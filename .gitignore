@@ -1,0 +1,14 @@
+/build-3ds/
+*.elf
+*.3dsx
+*.cia
+*.smdh
+*.bnr
+*.z64
+*.n64
+*.v64
+*.sav
+*.sra
+*.fla
+*.eep
+/.DS_Store
