@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="128" viewBox="0 0 256 128">
+  <rect width="256" height="128" fill="#08111f"/>
+  <path d="M0 0h32v16H0zm64 0h32v16H64zm64 0h32v16h-32zm64 0h32v16h-32zM32 16h32v16H32zm64 0h32v16H96zm64 0h32v16h-32zm64 0h32v16h-32z" fill="#db3b4a"/>
+  <path d="M32 0h32v16H32zm64 0h32v16H96zm64 0h32v16h-32zm64 0h32v16h-32zM0 16h32v16H0zm64 0h32v16H64zm64 0h32v16h-32zm64 0h32v16h-32z" fill="#4393db"/>
+  <rect x="16" y="42" width="224" height="68" rx="6" fill="#122238" stroke="#ffc435" stroke-width="2"/>
+  <text x="128" y="76" fill="#f1f6fa" font-family="sans-serif" font-size="25" font-weight="700" text-anchor="middle">MARIO KART 64 3DS</text>
+  <text x="128" y="97" fill="#a9bbcb" font-family="sans-serif" font-size="12" text-anchor="middle">NATIVE PORT BOOTSTRAP</text>
+</svg>

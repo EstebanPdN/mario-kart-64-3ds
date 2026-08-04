@@ -1,0 +1,6 @@
+#pragma once
+
+#define MK64_3DS_TOP_WIDTH 400.0f
+#define MK64_3DS_TOP_HEIGHT 240.0f
+#define MK64_3DS_BOTTOM_WIDTH 320.0f
+#define MK64_3DS_BOTTOM_HEIGHT 240.0f
