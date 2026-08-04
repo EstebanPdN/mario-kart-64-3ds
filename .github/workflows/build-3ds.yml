@@ -31,9 +31,10 @@ jobs:
       - name: Verify outputs and public boundary
         run: |
           VERSION="$(tr -d '\r\n' < platform/3ds/version.txt)"
-          git diff --check
-          ! git ls-files | grep -Ei '(^|/)[^/]*\.(z64|n64|v64|sav|sra|fla|eep)$'
-          ! git ls-files | grep -E '(^|/)(AGENTS\.md|PROTOCOL\.md|WORKFLOW\.md|GITHUB_RELEASE_WORKFLOW\.md)$'
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" diff --check
+          ! git -C "$GITHUB_WORKSPACE" ls-files | grep -Ei '(^|/)[^/]*\.(z64|n64|v64|sav|sra|fla|eep)$'
+          ! git -C "$GITHUB_WORKSPACE" ls-files | grep -E '(^|/)(AGENTS\.md|PROTOCOL\.md|WORKFLOW\.md|GITHUB_RELEASE_WORKFLOW\.md)$'
           test -f "build-3ds/game/mk64-3ds-v${VERSION}.3dsx"
           if [ -f "build-3ds/game/mk64-3ds-v${VERSION}.cia" ]; then
             echo "CIA package was built."
