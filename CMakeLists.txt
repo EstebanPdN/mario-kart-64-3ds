@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/version.txt" MK64_3DS_VERSION LIMIT_COUNT 1)
-project(mk64_3ds VERSION "${MK64_3DS_VERSION}" LANGUAGES C)
+project(mk64_3ds LANGUAGES C)
 
 add_executable(mk64-3ds
     platform/3ds/source/main.c

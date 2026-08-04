@@ -17,7 +17,7 @@ static void parse_static_texts(bool is_new_3ds) {
     C2D_TextBufClear(sTextBuffer);
 
     C2D_TextParse(&sTitleText, sTextBuffer, "MARIO KART 64 3DS");
-    C2D_TextParse(&sStatusText, sTextBuffer, "v0.1 PLATFORM BOOTSTRAP");
+    C2D_TextParse(&sStatusText, sTextBuffer, "UNRELEASED PORT FOUNDATION");
     C2D_TextParse(&sDetailText, sTextBuffer,
                   is_new_3ds ? "NEW 3DS ENHANCEMENT ENABLED" : "OLD 3DS BASELINE ACTIVE");
     C2D_TextParse(&sExitText, sTextBuffer, "No ROM or Nintendo assets are included.  START: Exit");

@@ -10,14 +10,14 @@ RSP/RDP, and video paths with native 3DS platform code.
 
 ## Status
 
-`v0.1` is the platform bootstrap. It establishes a native 400x240 top-screen
+This is unreleased development work. It establishes a native 400x240 top-screen
 PICA200/Citro2D presentation, a deliberately black bottom screen, Home/sleep
 lifecycle handling, and an Old 3DS-compatible package layout. It does **not**
 yet load a ROM or run Mario Kart 64 gameplay.
 
-No claim of playable performance or stable 60 FPS is made at this stage. The
-60 FPS goal will be measured on real Old and New Nintendo 3DS hardware only
-after the game loop and renderer are integrated.
+No downloadable release is available and no playable-performance or 60 FPS
+claim is made at this stage. `v0.1` is reserved for a playable pre-release
+after the game loop and renderer are integrated and tested on real hardware.
 
 ## Building
 
