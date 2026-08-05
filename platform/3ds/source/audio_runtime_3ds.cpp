@@ -20,7 +20,11 @@ bool sReady = false;
 }
 
 extern "C" bool Mk64GameAudio3DSInit() {
+#if defined(MK64_3DS_ENABLE_NDSP_AUDIO)
     sReady = Mk64Audio3DSInit(kSampleRate);
+#else
+    sReady = false;
+#endif
     return sReady;
 }
 

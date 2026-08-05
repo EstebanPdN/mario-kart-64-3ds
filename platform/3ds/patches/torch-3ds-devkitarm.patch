@@ -214,7 +214,7 @@ index 5e0096e..61c8bff 100644
  #ifdef USE_STORMLIB
  private:
 diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
-index 6440b62..8a118d2 100644
+index 6440b62..c062c0c 100644
 --- a/src/archive/ZWrapper.cpp
 +++ b/src/archive/ZWrapper.cpp
 @@ -5,21 +5,134 @@
@@ -416,7 +416,7 @@ index 6440b62..8a118d2 100644
 +    this->mPayloadBytesWritten += data.size();
 +    this->mArchiveBytesWritten += 30 + path.size() + data.size();
 +    this->mCentralDirectoryBytesWritten += 46 + path.size();
-+    if((this->mEntriesWritten % 1000) == 0) {
++    if((this->mEntriesWritten % 100) == 0) {
 +        char message[192] = {};
 +        std::snprintf(message, sizeof(message), "O2R progress: %lu entries, %llu payload bytes.",
 +                      static_cast<unsigned long>(this->mEntriesWritten),

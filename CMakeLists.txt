@@ -73,16 +73,48 @@ if(MK64_3DS_BUILD_GAME_CORE)
     list(FILTER SPAGHETTIKART_GAME_RECURSIVE EXCLUDE REGEX ".*/crash_screen_enhancement\\.c$")
 
     # The desktop port reserves 256 MiB in racing/memory.c. Generate a 3DS-only
-    # translation unit with a bounded 16 MiB arena while leaving upstream clean.
+    # translation unit with a runtime-allocated 16 MiB arena while leaving
+    # upstream clean. Keeping this arena out of .bss leaves enough heap for the
+    # first-run on-device O2R installer on Old 3DS.
     set(SPAGHETTIKART_MEMORY_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/memory.c")
     set(SPAGHETTIKART_3DS_MEMORY_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/memory_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_MEMORY_SOURCE}")
     file(READ "${SPAGHETTIKART_MEMORY_SOURCE}" SPAGHETTIKART_MEMORY_TEXT)
     string(REPLACE
         "static u8 sMemoryPool[0x10000000] ALIGNED4096;"
-        "static u8 sMemoryPool[0x01000000] ALIGNED4096;"
+        "static u8* sMemoryPool = NULL;"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_MEMORY_TEXT}"
+    )
+    string(REPLACE
+        "uintptr_t sPoolEnd = sMemoryPool + sizeof(sMemoryPool);"
+        "uintptr_t sPoolEnd = 0;"
+        SPAGHETTIKART_3DS_MEMORY_TEXT
+        "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
+    )
+    string(REPLACE
+        "#include <stdio.h>"
+        "#include <stdio.h>\n#include <stdlib.h>"
+        SPAGHETTIKART_3DS_MEMORY_TEXT
+        "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
+    )
+    string(REPLACE
+        "    // Clear pool\n    memset(sMemoryPool, 0, sizeof(sMemoryPool));\n\n    // Force the pointer to be exactly at the start of the aligned array\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    \n    // Ensure sPoolEnd is exactly at the end of the 256MB block\n    sPoolEnd = poolStart + sizeof(sMemoryPool);"
+        "    if (sMemoryPool == NULL) {\n        sMemoryPool = (u8*)aligned_alloc(4096, 0x01000000);\n        if (sMemoryPool == NULL) {\n            printf(\"[memory.c] initialize_memory_pool(): 3DS arena allocation failed!\\n\");\n            return;\n        }\n    }\n    memset(sMemoryPool, 0, 0x01000000);\n\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    sPoolEnd = poolStart + 0x01000000;"
+        SPAGHETTIKART_3DS_MEMORY_TEXT
+        "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
+    )
+    string(REPLACE
+        "(((sMemoryPool + sizeof(sMemoryPool)) - sMemoryPool))"
+        "((uintptr_t)0x01000000)"
+        SPAGHETTIKART_3DS_MEMORY_TEXT
+        "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
+    )
+    string(REPLACE
+        "(void*) (sMemoryPool + sizeof(sMemoryPool))"
+        "(void*) (sMemoryPool + 0x01000000)"
+        SPAGHETTIKART_3DS_MEMORY_TEXT
+        "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
     )
     string(REPLACE
         "#include \"memory.h\""
@@ -259,6 +291,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/game_state_3ds.cpp
         platform/3ds/source/gbi_middleware_3ds.cpp
         platform/3ds/source/install_log_3ds.cpp
+        platform/3ds/source/loading_image_3ds.cpp
         platform/3ds/source/torch_o2r_3ds.cpp
         platform/3ds/source/vanilla_stubs_3ds.cpp
         "${SPAGHETTIKART_ROOT}/src/engine/editor/GameObject.cpp"
