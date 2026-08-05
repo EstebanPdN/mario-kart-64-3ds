@@ -28,6 +28,13 @@ index 83c0b4c..4dcab60 100644
          Write(strLen);
      }
      for (char c : str) {
+@@ -158,4 +168,4 @@ std::vector<char> LUS::BinaryWriter::ToVector() {
+ void LUS::BinaryWriter::Finish(std::ostream& output) {
+     auto data = mStream->ToVector();
+     output.write(data.data(), data.size());
+-}
+\ No newline at end of file
++}
 diff --git a/lib/binarytools/BinaryWriter.h b/lib/binarytools/BinaryWriter.h
 index 089a7f5..af2dbea 100644
 --- a/lib/binarytools/BinaryWriter.h
@@ -43,6 +50,108 @@ index 089a7f5..af2dbea 100644
      void Write(int32_t value);
      void Write(int32_t valueA, int32_t valueB);
      void Write(uint32_t value);
+diff --git a/src/Companion.cpp b/src/Companion.cpp
+index a881533..20dae56 100644
+--- a/src/Companion.cpp
++++ b/src/Companion.cpp
+@@ -12,6 +12,10 @@
+ #include <iostream>
+ #include <filesystem>
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++extern "C" void Mk64InstallLogWrite(const char* message);
++#endif
++
+ #include "factories/GenericArrayFactory.h"
+ #include "factories/VtxFactory.h"
+ #include "factories/MtxFactory.h"
+@@ -734,12 +738,13 @@ void Companion::ProcessFile(YAML::Node root) {
+                 stream.clear();
+                 exporter->get()->Export(stream, data, result.name, result.node, &result.name);
+                 auto data = stream.str();
+-                this->gCurrentWrapper->AddFile(result.name, std::vector(data.begin(), data.end()));
++                std::vector<char> binaryData(data.begin(), data.end());
++                this->gCurrentWrapper->AddFile(result.name, std::move(binaryData));
+ 
+                 for(auto& entry : this->gCompanionFiles){
+                     auto output = (this->gCurrentDirectory / entry.first).string();
+                     std::replace(output.begin(), output.end(), '\\', '/');
+-                    this->gCurrentWrapper->AddFile(output, entry.second);
++                    this->gCurrentWrapper->AddFile(output, std::move(entry.second));
+                 }
+ 
+                 break;
+@@ -789,7 +794,7 @@ void Companion::ProcessFile(YAML::Node root) {
+ 
+         this->gCompanionFiles.clear();
+ 
+-        if(result.node["offset"]) {
++        if(this->gConfig.exporterType != ExportType::Binary && result.node["offset"]) {
+             auto alignment = GetSafeNode<uint32_t>(result.node, "alignment", impl->GetAlignment());
+             if(!endptr.has_value()) {
+                 wEntry = {
+@@ -832,7 +837,16 @@ void Companion::ProcessFile(YAML::Node root) {
+             }
+         }
+ 
+-        this->gWriteMap[this->gCurrentFile][result.type].push_back(wEntry);
++        if(this->gConfig.exporterType != ExportType::Binary) {
++            this->gWriteMap[this->gCurrentFile][result.type].push_back(wEntry);
++        }
++    }
++
++    if(this->gConfig.exporterType == ExportType::Binary) {
++        this->gParseResults.erase(this->gCurrentFile);
++        this->gWriteMap.erase(this->gCurrentFile);
++        this->gAddrMap.erase(this->gCurrentFile);
++        Decompressor::ClearCache();
+     }
+ 
+     auto fsout = fs::path(this->gConfig.outputPath);
+@@ -1022,9 +1036,15 @@ void Companion::Process() {
+     auto configPath = this->gSourceDirectory / "config.yml";
+ 
+     if(!fs::exists(configPath)) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        Mk64InstallLogWrite(("Torch: config file not found: " + configPath.string()).c_str());
++#endif
+         SPDLOG_ERROR("No config file found");
+         return;
+     }
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    Mk64InstallLogWrite(("Torch: using config file: " + configPath.string()).c_str());
++#endif
+ 
+     auto start = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
+     YAML::Node config = YAML::LoadFile(configPath.string());
+@@ -1042,6 +1062,9 @@ void Companion::Process() {
+         this->gCartridge->Initialize();
+ 
+         if(!config[this->gCartridge->GetHash()]){
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++            Mk64InstallLogWrite(("Torch: no matching config for SHA-1: " + this->gCartridge->GetHash()).c_str());
++#endif
+             SPDLOG_ERROR("No config found for {}", this->gCartridge->GetHash());
+             return;
+         }
+@@ -1320,7 +1343,7 @@ void Companion::Process() {
+                 std::vector<char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+                 input.close();
+                 std::string filename = fs::path(filePath).filename().string();
+-                wrapper->AddFile(filename, data);
++                wrapper->AddFile(filename, std::move(data));
+                 SPDLOG_INFO("Added additional file: {}", filename);
+             } else {
+                 SPDLOG_WARN("Could not open additional file: {}", filePath);
+@@ -1393,7 +1416,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
+         std::replace(normalized.begin(), normalized.end(), '\\', '/');
+         // Remove parent folder
+         normalized = normalized.substr(folder.length() + 1);
+-        wrapper->AddFile(normalized, data);
++        wrapper->AddFile(normalized, std::move(data));
+         SPDLOG_CRITICAL("> Added {}", normalized);
+     }
+ 
 diff --git a/src/Companion.h b/src/Companion.h
 index 40a664e..cc3d38c 100644
 --- a/src/Companion.h
@@ -56,119 +165,235 @@ index 40a664e..cc3d38c 100644
      bool IsUsingIndividualIncludes() const { return this->gIndividualIncludes; }
  
      std::optional<ParseResultData> GetParseDataByAddr(uint32_t addr);
-diff --git a/src/factories/naudio/v1/SampleFactory.cpp b/src/factories/naudio/v1/SampleFactory.cpp
-index 616d883..a797746 100644
---- a/src/factories/naudio/v1/SampleFactory.cpp
-+++ b/src/factories/naudio/v1/SampleFactory.cpp
-@@ -87,18 +87,18 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
-     root->SetAttribute("Version", 0);
-     root->SetAttribute("Codec", AudioContext::GetCodecStr(entry->codec));
-     root->SetAttribute("Medium", AudioContext::GetMediumStr(entry->medium));
--    root->SetAttribute("bit26", entry->unk);
-+    root->SetAttribute("bit26", static_cast<unsigned int>(entry->unk));
-     root->SetAttribute("Tuning", entry->tuning);
--    root->SetAttribute("Size", entry->size);
-+    root->SetAttribute("Size", static_cast<unsigned int>(entry->size));
-     root->SetAttribute("Relocated", 0);
-     root->SetAttribute("Path", (path.string() + "_data").c_str());
+diff --git a/src/archive/BinaryWrapper.h b/src/archive/BinaryWrapper.h
+index d6f4b39..9820fdb 100644
+--- a/src/archive/BinaryWrapper.h
++++ b/src/archive/BinaryWrapper.h
+@@ -11,7 +11,7 @@ public:
+     virtual ~BinaryWrapper() = default;
  
-     if(entry->loop != 0) {
-         auto loop = std::static_pointer_cast<ADPCMLoopData>(Companion::Instance->GetParseDataByAddr(entry->loop)->data.value());
-         tinyxml2::XMLElement* adpcmLoop = sample.NewElement("ADPCMLoop");
--        adpcmLoop->SetAttribute("Start", loop->start);
--        adpcmLoop->SetAttribute("End", loop->end);
--        adpcmLoop->SetAttribute("Count", loop->count);
-+        adpcmLoop->SetAttribute("Start", static_cast<unsigned int>(loop->start));
-+        adpcmLoop->SetAttribute("End", static_cast<unsigned int>(loop->end));
-+        adpcmLoop->SetAttribute("Count", static_cast<unsigned int>(loop->count));
-         if (loop->count != 0) {
-             for (auto& state : loop->predictorState) {
-                 tinyxml2::XMLElement* loopEntry = adpcmLoop->InsertNewChildElement("Predictor");
-@@ -112,8 +112,8 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
-     if(entry->book != 0) {
-         auto book = std::static_pointer_cast<ADPCMBookData>(Companion::Instance->GetParseDataByAddr(entry->book)->data.value());
-         tinyxml2::XMLElement* adpcmBook = sample.NewElement("ADPCMBook");
--        adpcmBook->SetAttribute("Order", book->order);
--        adpcmBook->SetAttribute("Npredictors", book->numPredictors);
-+        adpcmBook->SetAttribute("Order", static_cast<int>(book->order));
-+        adpcmBook->SetAttribute("Npredictors", static_cast<int>(book->numPredictors));
+     virtual int32_t CreateArchive(void) = 0;
+-    virtual bool AddFile(const std::string& path, std::vector<char> data) = 0;
++    virtual bool AddFile(const std::string& path, std::vector<char>&& data) = 0;
+     virtual int32_t Close(void) = 0;
+ protected:
+     std::mutex mMutex;
+diff --git a/src/archive/SWrapper.cpp b/src/archive/SWrapper.cpp
+index fab0caf..e835233 100644
+--- a/src/archive/SWrapper.cpp
++++ b/src/archive/SWrapper.cpp
+@@ -29,7 +29,7 @@ int32_t SWrapper::CreateArchive() {
+ #endif
+ }
  
-         for (auto& page : book->book) {
-             tinyxml2::XMLElement* bookEntry = adpcmBook->InsertNewChildElement("Book");
-diff --git a/src/factories/naudio/v1/SoundFontFactory.cpp b/src/factories/naudio/v1/SoundFontFactory.cpp
-index cd00123..7925b06 100644
---- a/src/factories/naudio/v1/SoundFontFactory.cpp
-+++ b/src/factories/naudio/v1/SoundFontFactory.cpp
-@@ -111,7 +111,7 @@ void WriteDrum(tinyxml2::XMLElement* parent, uint32_t offset){
-     root->SetAttribute("Tuning", sample.tuning);
+-bool SWrapper::AddFile(const std::string& path, std::vector<char> data) {
++bool SWrapper::AddFile(const std::string& path, std::vector<char>&& data) {
+ #ifndef USE_STORMLIB
+     throw std::runtime_error("StormLib is not enabled. Cannot create file");
+ #else
+diff --git a/src/archive/SWrapper.h b/src/archive/SWrapper.h
+index 5e0096e..61c8bff 100644
+--- a/src/archive/SWrapper.h
++++ b/src/archive/SWrapper.h
+@@ -12,7 +12,7 @@ public:
+     explicit SWrapper(const std::string& path);
  
-     tinyxml2::XMLElement* envelopes = root->InsertNewChildElement("Envelopes");
--    envelopes->SetAttribute("Count", (uint32_t) envelopeData->points.size());
-+    envelopes->SetAttribute("Count", static_cast<unsigned int>(envelopeData->points.size()));
-     for(size_t i = 0; i < envelopeData->points.size(); i++){
-         auto point = envelopeData->points[i];
-         tinyxml2::XMLElement* pointEntry = envelopes->InsertNewChildElement("Envelope");
-@@ -135,7 +135,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
-     tinyxml2::XMLDocument doc;
-     tinyxml2::XMLElement* root = doc.NewElement("SoundFont");
-     root->SetAttribute("Version", 0);
--    root->SetAttribute("Num", id);
-+    root->SetAttribute("Num", static_cast<unsigned int>(id));
-     root->SetAttribute("Medium", AudioContext::GetMediumStr(medium));
-     root->SetAttribute("CachePolicy", AudioContext::GetCachePolicyStr(policy));
-     root->SetAttribute("Data1", sd1);
-@@ -143,7 +143,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
-     root->SetAttribute("Data3", sd3);
+     int32_t CreateArchive(void) override;
+-    bool AddFile(const std::string& path, std::vector<char> data) override;
++    bool AddFile(const std::string& path, std::vector<char>&& data) override;
+     int32_t Close(void) override;
+ #ifdef USE_STORMLIB
+ private:
+diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
+index 6440b62..3706627 100644
+--- a/src/archive/ZWrapper.cpp
++++ b/src/archive/ZWrapper.cpp
+@@ -5,21 +5,100 @@
  
-     tinyxml2::XMLElement* drums = doc.NewElement("Drums");
--    drums->SetAttribute("Count", font->numDrums);
-+    drums->SetAttribute("Count", static_cast<unsigned int>(font->numDrums));
+ #include "spdlog/spdlog.h"
+ #include <Companion.h>
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++#include <cerrno>
++#include <climits>
++#include <cstdio>
++#include <cstring>
++#include <stdexcept>
++#include <miniz/zip_file.hpp>
++
++extern "C" void Mk64InstallLogWrite(const char* message);
++
++namespace {
++constexpr size_t kMk64ZipWriteChunkSize = 64 * 1024;
++}
++
++struct ZWrapper::Mk64ZipFileWriter {
++    FILE* file = nullptr;
++    int errorNumber = 0;
++    const char* stage = "none";
++};
++
++static size_t Mk64ZipWrite(void* opaque, mz_uint64 fileOffset, const void* buffer, size_t size) {
++    auto* writer = static_cast<ZWrapper::Mk64ZipFileWriter*>(opaque);
++    if (writer == nullptr || writer->file == nullptr || fileOffset > LONG_MAX) {
++        if (writer != nullptr) {
++            writer->stage = "seek";
++            writer->errorNumber = EFBIG;
++        }
++        return 0;
++    }
++
++    errno = 0;
++    if (std::fseek(writer->file, static_cast<long>(fileOffset), SEEK_SET) != 0) {
++        writer->stage = "seek";
++        writer->errorNumber = errno != 0 ? errno : EIO;
++        return 0;
++    }
++
++    const auto* bytes = static_cast<const unsigned char*>(buffer);
++    size_t totalWritten = 0;
++    while (totalWritten < size) {
++        const size_t chunkSize = std::min(size - totalWritten, kMk64ZipWriteChunkSize);
++        errno = 0;
++        const size_t written = std::fwrite(bytes + totalWritten, 1, chunkSize, writer->file);
++        totalWritten += written;
++        if (written != chunkSize) {
++            writer->stage = "write";
++            writer->errorNumber = errno != 0 ? errno : EIO;
++            return totalWritten;
++        }
++    }
++    return size;
++}
++#endif
+ #include <miniz/zip_file.hpp>
  
-     for(auto& drum : font->drums){
-         if(drum == 0){
-@@ -154,7 +154,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
-     root->InsertEndChild(drums);
+ namespace fs = std::filesystem;
  
-     tinyxml2::XMLElement* insts = doc.NewElement("Instruments");
--    insts->SetAttribute("Count", font->numInstruments);
-+    insts->SetAttribute("Count", static_cast<unsigned int>(font->numInstruments));
+ ZWrapper::ZWrapper(const std::string& path) {
+     this->mPath = path;
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    this->mArchive = new mz_zip_archive{};
++    this->mWriter = new Mk64ZipFileWriter{};
++    this->mArchiveOpen = false;
++    this->mEntriesWritten = 0;
++    this->mPayloadBytesWritten = 0;
++#else
+     this->mZip = new miniz_cpp::zip_file;
++#endif
+ }
  
-     for(auto& inst : font->instruments){
-         if(inst == 0){
-diff --git a/src/utils/Decompressor.cpp b/src/utils/Decompressor.cpp
-index dd24650..138c2a8 100644
---- a/src/utils/Decompressor.cpp
-+++ b/src/utils/Decompressor.cpp
-@@ -123,8 +123,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
-             offset = ASSET_PTR(offset);
+ int32_t ZWrapper::CreateArchive() {
+     SPDLOG_INFO("Loaded ZIP (O2R) archive: {}", mPath.c_str());
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if(fs::exists(mPath)) {
++        fs::remove(mPath);
++    }
++    this->mWriter->file = std::fopen(mPath.c_str(), "wb");
++    if(this->mWriter->file == nullptr) {
++        throw std::runtime_error("Could not open the temporary O2R archive on the SD card");
++    }
++    this->mArchive->m_pWrite = Mk64ZipWrite;
++    this->mArchive->m_pIO_opaque = this->mWriter;
++    this->mArchiveOpen = mz_zip_writer_init(this->mArchive, 0) == MZ_TRUE;
++    if(!this->mArchiveOpen) {
++        std::fclose(this->mWriter->file);
++        this->mWriter->file = nullptr;
++        throw std::runtime_error("Could not create the O2R archive on the SD card");
++    }
++    Mk64InstallLogWrite("O2R writer opened with 64 KiB chunked SD writes.");
++#endif
+     return 0;
+ }
  
-             auto decoded = Decode(buffer, fileOffset, type);
--            auto availableSize = decoded->size - offset;
--            auto size = node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
-+            const size_t availableSize = decoded->size - offset;
-+            const size_t size =
-+                node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
-             return {
-                 .root = decoded,
-                 .segment = { decoded->data + offset, size }
-@@ -136,8 +137,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
-         {
-             fileOffset = TranslateAddr(offset, false);
+-bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
++bool ZWrapper::AddFile(const std::string& path, std::vector<char>&& data) {
+     char* fileData = data.data();
+     size_t fileSize = data.size();
  
--            auto availableSize = buffer.size() - fileOffset;
--            auto size = node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
-+            const size_t availableSize = buffer.size() - fileOffset;
-+            const size_t size =
-+                node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
+@@ -34,11 +113,74 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
+         stream.close();
+     }
  
-             return {
-                 .root = nullptr,
-
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if(!this->mArchiveOpen) {
++        throw std::runtime_error("The O2R archive is not open");
++    }
++    if(mz_zip_writer_add_mem(this->mArchive, path.c_str(), data.data(), data.size(), MZ_NO_COMPRESSION) != MZ_TRUE) {
++        char message[256] = {};
++        std::snprintf(message, sizeof(message), "Could not write extracted file %s to the O2R archive (stage=%s errno=%d)",
++                      path.c_str(), this->mWriter->stage, this->mWriter->errorNumber);
++        Mk64InstallLogWrite(message);
++        throw std::runtime_error(message);
++    }
++    ++this->mEntriesWritten;
++    this->mPayloadBytesWritten += data.size();
++    if((this->mEntriesWritten % 1000) == 0) {
++        char message[192] = {};
++        std::snprintf(message, sizeof(message), "O2R progress: %lu entries, %llu payload bytes.",
++                      static_cast<unsigned long>(this->mEntriesWritten),
++                      static_cast<unsigned long long>(this->mPayloadBytesWritten));
++        Mk64InstallLogWrite(message);
++    }
++#else
+     this->mZip->writebytes(path, data);
++#endif
+     return true;
+ }
+ 
+ int32_t ZWrapper::Close(void) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if(!this->mArchiveOpen) {
++        return -1;
++    }
++    const bool finalized = mz_zip_writer_finalize_archive(this->mArchive) == MZ_TRUE;
++    const uint64_t archiveBytes = this->mArchive->m_archive_size;
++    const int writerError = this->mWriter->errorNumber;
++    const char* writerStage = this->mWriter->stage;
++    const bool ended = mz_zip_writer_end(this->mArchive) == MZ_TRUE;
++    bool flushed = false;
++    bool closed = false;
++    int closeError = 0;
++    if(this->mWriter->file != nullptr) {
++        errno = 0;
++        flushed = std::fflush(this->mWriter->file) == 0;
++        if(!flushed) closeError = errno != 0 ? errno : EIO;
++        errno = 0;
++        closed = std::fclose(this->mWriter->file) == 0;
++        if(!closed && closeError == 0) closeError = errno != 0 ? errno : EIO;
++        this->mWriter->file = nullptr;
++    }
++    this->mArchiveOpen = false;
++    delete this->mArchive;
++    this->mArchive = nullptr;
++    delete this->mWriter;
++    this->mWriter = nullptr;
++    if(!finalized || !ended || !flushed || !closed) {
++        char message[320] = {};
++        std::snprintf(message, sizeof(message),
++                      "Could not finalize the O2R archive on the SD card (entries=%lu bytes=%llu stage=%s writer_errno=%d close_errno=%d)",
++                      static_cast<unsigned long>(this->mEntriesWritten), static_cast<unsigned long long>(archiveBytes),
++                      writerStage, writerError, closeError);
++        Mk64InstallLogWrite(message);
++        throw std::runtime_error(message);
++    }
++    char message[192] = {};
++    std::snprintf(message, sizeof(message), "O2R finalized: %lu entries, %llu archive bytes.",
++                  static_cast<unsigned long>(this->mEntriesWritten), static_cast<unsigned long long>(archiveBytes));
++    Mk64InstallLogWrite(message);
++#else
+     this->mZip->save(this->mPath);
++#endif
+     return 0;
+ }
 diff --git a/src/archive/ZWrapper.h b/src/archive/ZWrapper.h
-index 8a3a59d..20f0c59 100644
+index d1fe867..99737b9 100644
 --- a/src/archive/ZWrapper.h
 +++ b/src/archive/ZWrapper.h
-@@ -4,9 +4,14 @@
+@@ -1,20 +1,35 @@
+ #pragma once
+ 
++#include <cstdint>
+ #include <vector>
  #include <string>
  #include "BinaryWrapper.h"
  
@@ -183,77 +408,21 @@ index 8a3a59d..20f0c59 100644
  
  class ZWrapper : public BinaryWrapper {
  public:
-@@ -15,6 +20,11 @@ public:
+     explicit ZWrapper(const std::string& path);
+ 
      int32_t CreateArchive(void) override;
-     bool AddFile(const std::string& path, std::vector<char> data) override;
+-    bool AddFile(const std::string& path, std::vector<char> data) override;
++    bool AddFile(const std::string& path, std::vector<char>&& data) override;
      int32_t Close(void) override;
  
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
++    struct Mk64ZipFileWriter;
 +    mz_zip_archive* mArchive;
++    Mk64ZipFileWriter* mWriter;
 +    bool mArchiveOpen;
++    uint32_t mEntriesWritten;
++    uint64_t mPayloadBytesWritten;
 +#else
      miniz_cpp::zip_file* mZip;
 +#endif
  };
-diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
-index 1d608e8..ec46cde 100644
---- a/src/archive/ZWrapper.cpp
-+++ b/src/archive/ZWrapper.cpp
-@@ -11,10 +11,24 @@ namespace fs = std::filesystem;
- 
- ZWrapper::ZWrapper(const std::string& path) {
-     this->mPath = path;
-+#if defined(__3DS__) || defined(PLATFORM_3DS)
-+    this->mArchive = new mz_zip_archive{};
-+    this->mArchiveOpen = false;
-+#else
-     this->mZip = new miniz_cpp::zip_file;
-+#endif
- }
- 
- int32_t ZWrapper::CreateArchive() {
-     SPDLOG_INFO("Loaded ZIP (O2R) archive: {}", mPath.c_str());
-+#if defined(__3DS__) || defined(PLATFORM_3DS)
-+    if(fs::exists(mPath)) {
-+        fs::remove(mPath);
-+    }
-+    this->mArchiveOpen = mz_zip_writer_init_file(this->mArchive, mPath.c_str(), 0) == MZ_TRUE;
-+    if(!this->mArchiveOpen) {
-+        throw std::runtime_error("Could not create the O2R archive on the SD card");
-+    }
-+#endif
-     return 0;
- }
-@@ -34,11 +48,32 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
-         stream.close();
-     }
- 
-+#if defined(__3DS__) || defined(PLATFORM_3DS)
-+    if(!this->mArchiveOpen) {
-+        throw std::runtime_error("The O2R archive is not open");
-+    }
-+    if(mz_zip_writer_add_mem(this->mArchive, path.c_str(), data.data(), data.size(), MZ_BEST_SPEED) != MZ_TRUE) {
-+        throw std::runtime_error("Could not write an extracted file to the O2R archive");
-+    }
-+#else
-     this->mZip->writebytes(path, data);
-+#endif
-     return true;
- }
- 
- int32_t ZWrapper::Close(void) {
-+#if defined(__3DS__) || defined(PLATFORM_3DS)
-+    if(!this->mArchiveOpen) {
-+        return -1;
-+    }
-+    const bool finalized = mz_zip_writer_finalize_archive(this->mArchive) == MZ_TRUE;
-+    const bool ended = mz_zip_writer_end(this->mArchive) == MZ_TRUE;
-+    this->mArchiveOpen = false;
-+    if(!finalized || !ended) {
-+        throw std::runtime_error("Could not finalize the O2R archive on the SD card");
-+    }
-+#else
-     this->mZip->save(this->mPath);
-+#endif
-     return 0;
- }

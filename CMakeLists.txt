@@ -258,6 +258,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/game_data_3ds.cpp
         platform/3ds/source/game_state_3ds.cpp
         platform/3ds/source/gbi_middleware_3ds.cpp
+        platform/3ds/source/install_log_3ds.cpp
         platform/3ds/source/torch_o2r_3ds.cpp
         platform/3ds/source/vanilla_stubs_3ds.cpp
         "${SPAGHETTIKART_ROOT}/src/engine/editor/GameObject.cpp"
