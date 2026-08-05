@@ -4,9 +4,9 @@ An experimental native Nintendo 3DS port of the vanilla Mario Kart 64 game code,
 [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart). The port targets the top screen at its native
 400x240 resolution with a 5:3 viewport; the bottom screen is intentionally black.
 
-This repository contains no ROM, extracted game data, or copyrighted Nintendo assets. You must generate
-`mk64.o2r` from a legally owned supported Mario Kart 64 dump by following the upstream SpaghettiKart extraction
-instructions.
+This repository contains no ROM, extracted game data, or copyrighted Nintendo assets. Put your legally owned
+Mario Kart 64 USA ROM in `sd:/3ds/MK64/`. The 3DS app creates and uses that folder as the local game-data
+workspace.
 
 ## Current status
 
@@ -45,14 +45,26 @@ executables. Packaging tools are not vendored in this repository.
 
 ## Install game data
 
-Generate `mk64.o2r` with an official SpaghettiKart desktop build, then copy only your locally generated archive to:
+Create this folder on your SD card:
 
 ```text
-sd:/3ds/mk64-3ds/mk64.o2r
+sd:/3ds/MK64/
 ```
 
+Place your legally owned Mario Kart 64 USA ROM there. Supported names:
+
+```text
+sd:/3ds/MK64/Mario Kart 64.z64
+sd:/3ds/MK64/mk64.z64
+sd:/3ds/MK64/baserom.us.z64
+```
+
+On first boot, the 3DS build checks the ROM and shows a preparation screen. The current `v0.1` build can validate
+the ROM from this folder and will automatically launch when `sd:/3ds/MK64/mk64.o2r` already exists. The full
+on-device O2R generator is still being ported from SpaghettiKart's desktop `torch` extractor, so this release does
+not embed or redistribute generated game data.
+
 Install the CIA with your normal homebrew installer, or place the 3DSX in a Homebrew Launcher application folder.
-The port never embeds or redistributes the O2R archive.
 
 ## Controls
 

@@ -1,3 +1,4 @@
+#include "game_data_3ds.h"
 #include "audio_runtime_3ds.h"
 #include "game_runtime_3ds.h"
 #include "game_state_3ds.h"
@@ -25,21 +26,6 @@ uint32_t __stacksize__ = 4 * 1024 * 1024;
 
 namespace {
 constexpr int32_t kLogoIntroMenu = 8;
-constexpr std::array<const char*, 3> kArchivePaths = {
-    "sdmc:/3ds/mk64-3ds/mk64.o2r",
-    "sdmc:/3ds/spaghettikart/mk64.o2r",
-    "sdmc:/mk64.o2r",
-};
-
-const char* FindArchive() {
-    for (const char* path : kArchivePaths) {
-        if (FILE* file = std::fopen(path, "rb")) {
-            std::fclose(file);
-            return path;
-        }
-    }
-    return nullptr;
-}
 
 int ShowError(const char* message) {
     gfxInitDefault();
@@ -56,11 +42,11 @@ int ShowError(const char* message) {
 }
 
 int main() {
-    const char* archivePath = FindArchive();
-    if (archivePath == nullptr) {
-        return ShowError("mk64.o2r was not found. Place your legally generated archive in\n/3ds/mk64-3ds/mk64.o2r on the SD card.");
+    const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
+    if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
+        return ShowError(data.message);
     }
-    if (!Mk64Resource3DSInit(archivePath)) {
+    if (!Mk64Resource3DSInit(data.archivePath)) {
         return ShowError("mk64.o2r could not be opened or is not a supported archive.");
     }
     if (!Mk64Graphics3DSInit()) {
