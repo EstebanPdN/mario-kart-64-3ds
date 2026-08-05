@@ -33,6 +33,10 @@ extern "C" bool Mk64Graphics3DSInit() {
     Fast::GfxSetInstance(sInterpreter);
     sInterpreter->SetGfxDebugger(sDebugger);
     sInterpreter->Init(sWindow.get(), sRenderer.get(), "Mario Kart 64 3DS", true, 400, 240, 0, 0);
+    // Mario Kart 64 emits Fast3DEX display lists. Interpreter::Init defaults
+    // to F3DEX2, whose vertex command layout is incompatible and caused the
+    // real-hardware crash in gfx_vtx_handler_f3dex2.
+    Fast::gfx_set_target_ucode(ucode_f3dex);
     if (!sRenderer->IsInitialized()) {
         Mk64Graphics3DSShutdown();
         return false;
