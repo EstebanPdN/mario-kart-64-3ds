@@ -1,5 +1,6 @@
 #include "o2r_archive_reader.hpp"
 
+#include <cassert>
 #include <cstring>
 #include <string>
 #include <utility>

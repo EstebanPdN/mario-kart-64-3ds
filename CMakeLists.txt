@@ -13,6 +13,20 @@ option(MK64_3DS_BUILD_RENDERER_PROBE "Build a standalone renderer validation pro
 option(MK64_3DS_BUILD_INTERPRETER_PROBE "Build a Fast3D display-list validation program" ON)
 option(MK64_3DS_BUILD_GAME_CORE "Compile the portable Mario Kart 64 C game core" OFF)
 option(MK64_3DS_BUILD_GAME_ENGINE "Compile the portable SpaghettiKart C++ engine layer" OFF)
+option(MK64_3DS_ENABLE_ON_DEVICE_EXTRACTOR "Build Torch so the 3DS can generate mk64.o2r from a legal ROM" ON)
+
+set(MK64_3DS_ROMFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/romfs")
+set(MK64_3DS_TORCH_ROMFS_DIR "${MK64_3DS_ROMFS_DIR}/torch")
+file(MAKE_DIRECTORY "${MK64_3DS_TORCH_ROMFS_DIR}")
+file(COPY
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/config.yml"
+    DESTINATION "${MK64_3DS_TORCH_ROMFS_DIR}"
+)
+file(COPY
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/yamls"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/meta"
+    DESTINATION "${MK64_3DS_TORCH_ROMFS_DIR}"
+)
 
 add_library(mk64-3ds-platform STATIC
     platform/3ds/source/audio_ndsp_3ds.cpp
@@ -143,6 +157,49 @@ if(MK64_3DS_BUILD_GAME_CORE)
     )
 endif()
 
+if(MK64_3DS_ENABLE_ON_DEVICE_EXTRACTOR)
+    set(MK64_3DS_ARM_ABI_FLAGS
+        -march=armv6k
+        -mtune=mpcore
+        -mfloat-abi=hard
+        -mtp=soft
+        -mword-relocations
+    )
+    set(USE_STANDALONE OFF CACHE BOOL "" FORCE)
+    set(BUILD_STORMLIB OFF CACHE BOOL "" FORCE)
+    set(BUILD_SM64 OFF CACHE BOOL "" FORCE)
+    set(BUILD_MK64 ON CACHE BOOL "" FORCE)
+    set(BUILD_SF64 OFF CACHE BOOL "" FORCE)
+    set(BUILD_FZERO OFF CACHE BOOL "" FORCE)
+    set(BUILD_MARIO_ARTIST OFF CACHE BOOL "" FORCE)
+    set(BUILD_NAUDIO ON CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/SpaghettiKart/torch "${CMAKE_CURRENT_BINARY_DIR}/torch")
+    foreach(MK64_3DS_TORCH_TARGET
+            torch
+            yaml-cpp
+            spdlog
+            tinyxml2
+            BinaryTools
+            N64Graphics)
+        if(TARGET ${MK64_3DS_TORCH_TARGET})
+            target_compile_options(${MK64_3DS_TORCH_TARGET} PRIVATE ${MK64_3DS_ARM_ABI_FLAGS})
+            target_compile_definitions(${MK64_3DS_TORCH_TARGET} PRIVATE PLATFORM_3DS=1)
+        endif()
+    endforeach()
+    if(TARGET spdlog)
+        target_compile_definitions(spdlog PRIVATE _POSIX_C_SOURCE=200809L)
+    endif()
+    target_compile_definitions(torch PRIVATE PLATFORM_3DS=1)
+    target_compile_options(torch PRIVATE
+        -O3
+        -ffunction-sections
+        -fdata-sections
+        -Wno-unused-parameter
+        -Wno-unused-variable
+        -Wno-missing-field-initializers
+    )
+endif()
+
 if(MK64_3DS_BUILD_GAME_ENGINE)
     include(FetchContent)
     set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
@@ -201,6 +258,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/game_data_3ds.cpp
         platform/3ds/source/game_state_3ds.cpp
         platform/3ds/source/gbi_middleware_3ds.cpp
+        platform/3ds/source/torch_o2r_3ds.cpp
         platform/3ds/source/vanilla_stubs_3ds.cpp
         "${SPAGHETTIKART_ROOT}/src/engine/editor/GameObject.cpp"
         ${SPAGHETTIKART_GAME_BRIDGE_SOURCE}
@@ -231,6 +289,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         F3DEX_GBI=1
         PLATFORM_3DS=1
         NON_MATCHING=1
+        MK64_3DS_ON_DEVICE_EXTRACTOR=1
     )
     target_compile_options(mk64-3ds-game-engine PRIVATE
         -O3
@@ -244,6 +303,9 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         -Wno-unused-parameter
     )
     target_link_libraries(mk64-3ds-game-engine PRIVATE nlohmann_json::nlohmann_json)
+    if(MK64_3DS_ENABLE_ON_DEVICE_EXTRACTOR)
+        target_link_libraries(mk64-3ds-game-engine PRIVATE torch)
+    endif()
 endif()
 
 set(MK64_3DS_SMDH "${CMAKE_CURRENT_BINARY_DIR}/mk64-3ds.smdh")
@@ -306,6 +368,9 @@ if(MK64_3DS_ENABLE_O2R_READER)
     )
     target_compile_features(mk64-3ds-o2r-reader PUBLIC cxx_std_17)
     target_compile_definitions(mk64-3ds-o2r-reader PRIVATE F3DEX_GBI=1)
+    if(MK64_3DS_ENABLE_ON_DEVICE_EXTRACTOR)
+        target_compile_definitions(mk64-3ds-o2r-reader PRIVATE MINIZ_HEADER_FILE_ONLY=1)
+    endif()
     target_compile_options(mk64-3ds-o2r-reader PRIVATE
         -O3
         -ffunction-sections
@@ -503,7 +568,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         -include
         engine_3ds_prelude.h
     )
-    target_link_options(mk64-3ds-game PRIVATE -Wl,--gc-sections)
+    target_link_options(mk64-3ds-game PRIVATE -Wl,--gc-sections -Wl,--allow-multiple-definition)
     target_link_libraries(mk64-3ds-game PRIVATE
         mk64-3ds-game-runtime
         -Wl,--start-group
@@ -522,5 +587,6 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         TARGET mk64-3ds-game
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/mk64-3ds-game-v${MK64_3DS_VERSION}.3dsx"
         SMDH "${MK64_3DS_SMDH}"
+        ROMFS "${MK64_3DS_ROMFS_DIR}"
     )
 endif()

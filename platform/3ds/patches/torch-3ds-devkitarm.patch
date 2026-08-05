@@ -1,0 +1,165 @@
+diff --git a/lib/binarytools/BinaryWriter.cpp b/lib/binarytools/BinaryWriter.cpp
+index 83c0b4c..4dcab60 100644
+--- a/lib/binarytools/BinaryWriter.cpp
++++ b/lib/binarytools/BinaryWriter.cpp
+@@ -62,6 +62,16 @@ void LUS::BinaryWriter::Write(uint16_t value) {
+     mStream->Write((char*)&value, sizeof(uint16_t));
+ }
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++void LUS::BinaryWriter::Write(int value) {
++    Write(static_cast<int32_t>(value));
++}
++
++void LUS::BinaryWriter::Write(unsigned int value) {
++    Write(static_cast<uint32_t>(value));
++}
++#endif
++
+ void LUS::BinaryWriter::Write(int32_t value) {
+     if (mEndianness != Torch::Endianness::Native) {
+         value = BSWAP32(value);
+@@ -135,7 +145,7 @@ void LUS::BinaryWriter::Write(double value) {
+ 
+ void LUS::BinaryWriter::Write(const std::string& str, bool writeLength) {
+     if(writeLength){
+-        int strLen = str.size();
++        int32_t strLen = static_cast<int32_t>(str.size());
+         Write(strLen);
+     }
+     for (char c : str) {
+diff --git a/lib/binarytools/BinaryWriter.h b/lib/binarytools/BinaryWriter.h
+index 089a7f5..af2dbea 100644
+--- a/lib/binarytools/BinaryWriter.h
++++ b/lib/binarytools/BinaryWriter.h
+@@ -26,6 +26,10 @@ class BinaryWriter {
+     void Write(uint8_t value);
+     void Write(int16_t value);
+     void Write(uint16_t value);
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    void Write(int value);
++    void Write(unsigned int value);
++#endif
+     void Write(int32_t value);
+     void Write(int32_t valueA, int32_t valueB);
+     void Write(uint32_t value);
+diff --git a/src/Companion.h b/src/Companion.h
+index 40a664e..cc3d38c 100644
+--- a/src/Companion.h
++++ b/src/Companion.h
+@@ -156,7 +156,7 @@ public:
+     GBIVersion GetGBIVersion() const { return this->gConfig.gbi.version; }
+     GBIMinorVersion GetGBIMinorVersion() const { return  this->gConfig.gbi.subversion; }
+     std::unordered_map<std::string, std::vector<YAML::Node>> GetCourseMetadata() { return this->gCourseMetadata; }
+-    std::optional<std::string> GetEnumFromValue(const std::string& key, int id);
++    std::optional<std::string> GetEnumFromValue(const std::string& key, int32_t id);
+     bool IsUsingIndividualIncludes() const { return this->gIndividualIncludes; }
+ 
+     std::optional<ParseResultData> GetParseDataByAddr(uint32_t addr);
+diff --git a/src/factories/naudio/v1/SampleFactory.cpp b/src/factories/naudio/v1/SampleFactory.cpp
+index 616d883..a797746 100644
+--- a/src/factories/naudio/v1/SampleFactory.cpp
++++ b/src/factories/naudio/v1/SampleFactory.cpp
+@@ -87,18 +87,18 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
+     root->SetAttribute("Version", 0);
+     root->SetAttribute("Codec", AudioContext::GetCodecStr(entry->codec));
+     root->SetAttribute("Medium", AudioContext::GetMediumStr(entry->medium));
+-    root->SetAttribute("bit26", entry->unk);
++    root->SetAttribute("bit26", static_cast<unsigned int>(entry->unk));
+     root->SetAttribute("Tuning", entry->tuning);
+-    root->SetAttribute("Size", entry->size);
++    root->SetAttribute("Size", static_cast<unsigned int>(entry->size));
+     root->SetAttribute("Relocated", 0);
+     root->SetAttribute("Path", (path.string() + "_data").c_str());
+ 
+     if(entry->loop != 0) {
+         auto loop = std::static_pointer_cast<ADPCMLoopData>(Companion::Instance->GetParseDataByAddr(entry->loop)->data.value());
+         tinyxml2::XMLElement* adpcmLoop = sample.NewElement("ADPCMLoop");
+-        adpcmLoop->SetAttribute("Start", loop->start);
+-        adpcmLoop->SetAttribute("End", loop->end);
+-        adpcmLoop->SetAttribute("Count", loop->count);
++        adpcmLoop->SetAttribute("Start", static_cast<unsigned int>(loop->start));
++        adpcmLoop->SetAttribute("End", static_cast<unsigned int>(loop->end));
++        adpcmLoop->SetAttribute("Count", static_cast<unsigned int>(loop->count));
+         if (loop->count != 0) {
+             for (auto& state : loop->predictorState) {
+                 tinyxml2::XMLElement* loopEntry = adpcmLoop->InsertNewChildElement("Predictor");
+@@ -112,8 +112,8 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
+     if(entry->book != 0) {
+         auto book = std::static_pointer_cast<ADPCMBookData>(Companion::Instance->GetParseDataByAddr(entry->book)->data.value());
+         tinyxml2::XMLElement* adpcmBook = sample.NewElement("ADPCMBook");
+-        adpcmBook->SetAttribute("Order", book->order);
+-        adpcmBook->SetAttribute("Npredictors", book->numPredictors);
++        adpcmBook->SetAttribute("Order", static_cast<int>(book->order));
++        adpcmBook->SetAttribute("Npredictors", static_cast<int>(book->numPredictors));
+ 
+         for (auto& page : book->book) {
+             tinyxml2::XMLElement* bookEntry = adpcmBook->InsertNewChildElement("Book");
+diff --git a/src/factories/naudio/v1/SoundFontFactory.cpp b/src/factories/naudio/v1/SoundFontFactory.cpp
+index cd00123..7925b06 100644
+--- a/src/factories/naudio/v1/SoundFontFactory.cpp
++++ b/src/factories/naudio/v1/SoundFontFactory.cpp
+@@ -111,7 +111,7 @@ void WriteDrum(tinyxml2::XMLElement* parent, uint32_t offset){
+     root->SetAttribute("Tuning", sample.tuning);
+ 
+     tinyxml2::XMLElement* envelopes = root->InsertNewChildElement("Envelopes");
+-    envelopes->SetAttribute("Count", (uint32_t) envelopeData->points.size());
++    envelopes->SetAttribute("Count", static_cast<unsigned int>(envelopeData->points.size()));
+     for(size_t i = 0; i < envelopeData->points.size(); i++){
+         auto point = envelopeData->points[i];
+         tinyxml2::XMLElement* pointEntry = envelopes->InsertNewChildElement("Envelope");
+@@ -135,7 +135,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
+     tinyxml2::XMLDocument doc;
+     tinyxml2::XMLElement* root = doc.NewElement("SoundFont");
+     root->SetAttribute("Version", 0);
+-    root->SetAttribute("Num", id);
++    root->SetAttribute("Num", static_cast<unsigned int>(id));
+     root->SetAttribute("Medium", AudioContext::GetMediumStr(medium));
+     root->SetAttribute("CachePolicy", AudioContext::GetCachePolicyStr(policy));
+     root->SetAttribute("Data1", sd1);
+@@ -143,7 +143,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
+     root->SetAttribute("Data3", sd3);
+ 
+     tinyxml2::XMLElement* drums = doc.NewElement("Drums");
+-    drums->SetAttribute("Count", font->numDrums);
++    drums->SetAttribute("Count", static_cast<unsigned int>(font->numDrums));
+ 
+     for(auto& drum : font->drums){
+         if(drum == 0){
+@@ -154,7 +154,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
+     root->InsertEndChild(drums);
+ 
+     tinyxml2::XMLElement* insts = doc.NewElement("Instruments");
+-    insts->SetAttribute("Count", font->numInstruments);
++    insts->SetAttribute("Count", static_cast<unsigned int>(font->numInstruments));
+ 
+     for(auto& inst : font->instruments){
+         if(inst == 0){
+diff --git a/src/utils/Decompressor.cpp b/src/utils/Decompressor.cpp
+index dd24650..138c2a8 100644
+--- a/src/utils/Decompressor.cpp
++++ b/src/utils/Decompressor.cpp
+@@ -123,8 +123,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
+             offset = ASSET_PTR(offset);
+ 
+             auto decoded = Decode(buffer, fileOffset, type);
+-            auto availableSize = decoded->size - offset;
+-            auto size = node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
++            const size_t availableSize = decoded->size - offset;
++            const size_t size =
++                node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
+             return {
+                 .root = decoded,
+                 .segment = { decoded->data + offset, size }
+@@ -136,8 +137,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
+         {
+             fileOffset = TranslateAddr(offset, false);
+ 
+-            auto availableSize = buffer.size() - fileOffset;
+-            auto size = node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
++            const size_t availableSize = buffer.size() - fileOffset;
++            const size_t size =
++                node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
+ 
+             return {
+                 .root = nullptr,

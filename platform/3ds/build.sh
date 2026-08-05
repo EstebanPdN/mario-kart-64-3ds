@@ -8,6 +8,8 @@ BUILD="${ROOT}/build-3ds/game"
 TOOLS_ROOT="${MK64_3DS_TOOLS_ROOT:-${ROOT}/../Tools/bin}"
 MAKEROM="${MAKEROM:-${TOOLS_ROOT}/makerom}"
 BANNERTOOL="${BANNERTOOL:-${TOOLS_ROOT}/bannertool}"
+TORCH_DIR="${ROOT}/third_party/SpaghettiKart/torch"
+TORCH_PATCH="${ROOT}/platform/3ds/patches/torch-3ds-devkitarm.patch"
 
 if [[ ! -x "${MAKEROM}" ]] && command -v makerom >/dev/null 2>&1; then
   MAKEROM="$(command -v makerom)"
@@ -20,6 +22,15 @@ if [[ ! -x "${MAKEROM}" && -x "${DEVKITPRO}/tools/bin/makerom" ]]; then
 fi
 if [[ ! -x "${BANNERTOOL}" && -x "${DEVKITPRO}/tools/bin/bannertool" ]]; then
   BANNERTOOL="${DEVKITPRO}/tools/bin/bannertool"
+fi
+
+if git -C "${TORCH_DIR}" apply --check "${TORCH_PATCH}" >/dev/null 2>&1; then
+  git -C "${TORCH_DIR}" apply "${TORCH_PATCH}"
+elif git -C "${TORCH_DIR}" apply --reverse --check "${TORCH_PATCH}" >/dev/null 2>&1; then
+  :
+else
+  printf 'Could not apply or verify the 3DS Torch compatibility patch.\n' >&2
+  exit 1
 fi
 
 cmake -S "${ROOT}" -B "${BUILD}" \
@@ -46,6 +57,7 @@ fi
 (
   cd "${ROOT}"
   "${MAKEROM}" -f cia -o "${BUILD}/mk64-3ds-v${VERSION}.cia" \
+    -DAPP_ROMFS="${BUILD#"${ROOT}/"}/romfs" \
     -rsf "${ROOT}/platform/3ds/cia/mk64-3ds.rsf" -target t -exefslogo \
     -elf "${BUILD}/mk64-3ds-game.elf" -icon "${BUILD}/mk64-3ds.smdh" \
     -banner "${BUILD}/mk64-3ds.bnr"
