@@ -22,7 +22,10 @@ constexpr uint32_t kMaxSourceVertices = 256 * 3;
 constexpr uint32_t kMaxDrawVertices = 256 * 6;
 constexpr uint32_t kVertexBufferCapacity = 32 * 1024;
 constexpr uint32_t kPackedVertexFloats = 10;
-constexpr uint32_t kMaxTextureSize = 1024;
+// The largest texture in the vanilla MK64 O2R data is 320 pixels wide. A
+// 512-pixel cap preserves the required power-of-two backing texture while
+// reducing Fast3D's RGBA upload buffer from 4 MiB to 1 MiB on Old 3DS.
+constexpr uint32_t kMaxTextureSize = 512;
 constexpr float kClipWEpsilon = 1.0e-4f;
 constexpr size_t kMaxVertexStrideFloats = 64;
 

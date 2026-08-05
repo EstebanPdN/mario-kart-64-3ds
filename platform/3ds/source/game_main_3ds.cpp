@@ -21,7 +21,9 @@ void thread5_iteration(void);
 }
 
 extern "C" {
-uint32_t __stacksize__ = 4 * 1024 * 1024;
+// Match the CIA exheader. Four MiB was unnecessarily reserved by 3DSX builds
+// and reduced the heap available to the first-run installer on Old 3DS.
+uint32_t __stacksize__ = 1 * 1024 * 1024;
 }
 
 namespace {

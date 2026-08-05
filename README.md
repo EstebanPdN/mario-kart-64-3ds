@@ -37,8 +37,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.6.3dsx
-build-3ds/game/mk64-3ds-v0.6.cia
+build-3ds/game/mk64-3ds-game-v0.7.3dsx
+build-3ds/game/mk64-3ds-v0.7.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -84,7 +84,10 @@ details.
 During this first-run step the top screen shows the bundled loading image with an overlaid progress bar, while the
 bottom screen mirrors the live installer output. The game memory arena is allocated only after game-data preparation,
 the ROM is loaded after the Torch configuration is parsed, and the 3DS O2R writer spools the ZIP central directory to
-the SD card instead of keeping it in RAM.
+the SD card instead of keeping it in RAM. The 3DS cartridge-header reader does not duplicate the full ROM, incremental
+Torch hash-cache generation is disabled for this one-shot installer, and memory checkpoints are included in the local
+installation log. Runtime memory is based on the 64 MiB Old 3DS application limit; the renderer uses the vanilla
+archive's actual texture-size requirements rather than reserving a 1024x1024 upload surface.
 
 Install the CIA with your normal homebrew installer, or place the 3DSX in a Homebrew Launcher application folder.
 

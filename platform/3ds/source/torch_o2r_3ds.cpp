@@ -1,6 +1,8 @@
 #include "Companion.h"
 #include "install_log_3ds.h"
 
+#include <3ds.h>
+
 #include <array>
 #include <exception>
 #include <filesystem>
@@ -43,6 +45,9 @@ bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* de
         return true;
     } catch (const std::exception& exception) {
         Mk64InstallLogWritef("Torch: exception: %s", exception.what());
+        Mk64InstallLogWritef("Torch: memory after exception: %lu free / %lu application bytes.",
+                             static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
+                             static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
         if (error != nullptr && errorSize != 0) {
             std::snprintf(error, errorSize, "%s", exception.what());
         }
@@ -51,6 +56,9 @@ bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* de
         return false;
     } catch (...) {
         Mk64InstallLogWrite("Torch: unknown exception.");
+        Mk64InstallLogWritef("Torch: memory after exception: %lu free / %lu application bytes.",
+                             static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
+                             static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
         if (error != nullptr && errorSize != 0) {
             std::snprintf(error, errorSize, "The Torch extractor raised an unknown error.");
         }

@@ -51,22 +51,66 @@ index 089a7f5..af2dbea 100644
      void Write(int32_t valueA, int32_t valueB);
      void Write(uint32_t value);
 diff --git a/src/Companion.cpp b/src/Companion.cpp
-index a881533..12741f3 100644
+index a881533..8c60316 100644
 --- a/src/Companion.cpp
 +++ b/src/Companion.cpp
-@@ -12,6 +12,11 @@
+@@ -12,6 +12,20 @@
  #include <iostream>
  #include <filesystem>
  
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
++#include <3ds.h>
 +extern "C" void Mk64InstallLogWrite(const char* message);
 +extern "C" void Mk64InstallLogWritef(const char* format, ...);
++
++namespace {
++void Mk64LogApplicationMemory(const char* phase) {
++    Mk64InstallLogWritef("Torch memory at %s: %lu free / %lu application bytes.", phase,
++                         static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
++                         static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
++}
++}
 +#endif
 +
  #include "factories/GenericArrayFactory.h"
  #include "factories/VtxFactory.h"
  #include "factories/MtxFactory.h"
-@@ -734,12 +739,13 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -507,6 +521,13 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
+ }
+ 
+ void Companion::ParseHash() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    // The on-device installer always creates a fresh binary archive. Building
++    // Torch's incremental YAML hash tree only consumes heap and writes a cache
++    // that this one-shot workflow never reuses.
++    this->gHashNode = YAML::Node();
++    return;
++#else
+     const auto out = this->gDestinationDirectory / "torch.hash.yml";
+ 
+     if(fs::exists(out)) {
+@@ -514,6 +535,7 @@ void Companion::ParseHash() {
+     } else {
+         this->gHashNode = YAML::Node();
+     }
++#endif
+ }
+ 
+ std::string ExportTypeToString(ExportType type) {
+@@ -530,6 +552,12 @@ std::string ExportTypeToString(ExportType type) {
+ 
+ bool Companion::NodeHasChanges(const std::string& path) {
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if(this->gConfig.exporterType == ExportType::Binary) {
++        return true;
++    }
++#endif
++
+     if(this->gConfig.modding) {
+         return true;
+     }
+@@ -734,12 +762,13 @@ void Companion::ProcessFile(YAML::Node root) {
                  stream.clear();
                  exporter->get()->Export(stream, data, result.name, result.node, &result.name);
                  auto data = stream.str();
@@ -82,7 +126,7 @@ index a881533..12741f3 100644
                  }
  
                  break;
-@@ -789,7 +795,7 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -789,7 +818,7 @@ void Companion::ProcessFile(YAML::Node root) {
  
          this->gCompanionFiles.clear();
  
@@ -91,7 +135,7 @@ index a881533..12741f3 100644
              auto alignment = GetSafeNode<uint32_t>(result.node, "alignment", impl->GetAlignment());
              if(!endptr.has_value()) {
                  wEntry = {
-@@ -832,7 +838,16 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -832,7 +861,16 @@ void Companion::ProcessFile(YAML::Node root) {
              }
          }
  
@@ -109,7 +153,7 @@ index a881533..12741f3 100644
      }
  
      auto fsout = fs::path(this->gConfig.outputPath);
-@@ -1022,9 +1037,15 @@ void Companion::Process() {
+@@ -1022,26 +1060,72 @@ void Companion::Process() {
      auto configPath = this->gSourceDirectory / "config.yml";
  
      if(!fs::exists(configPath)) {
@@ -125,7 +169,11 @@ index a881533..12741f3 100644
  
      auto start = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
      YAML::Node config = YAML::LoadFile(configPath.string());
-@@ -1033,15 +1054,47 @@ void Companion::Process() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    Mk64LogApplicationMemory("config load");
++#endif
+ 
+     bool isDirectoryMode = config["mode"] && config["mode"].as<std::string>() == "directory";
  
      if(!isDirectoryMode) {
          if(this->gRomPath.has_value()){
@@ -156,6 +204,7 @@ index a881533..12741f3 100644
 +            }
 +            std::fclose(input);
 +            Mk64InstallLogWritef("Torch: loaded %zu ROM bytes using stdio.", this->gRomData.size());
++            Mk64LogApplicationMemory("ROM load");
 +#else
              std::ifstream input( this->gRomPath.value(), std::ios::binary );
              this->gRomData = std::vector<uint8_t>( std::istreambuf_iterator( input ), {} );
@@ -165,6 +214,10 @@ index a881533..12741f3 100644
  
          this->gCartridge = std::make_shared<N64::Cartridge>(this->gRomData);
          this->gCartridge->Initialize();
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        Mk64InstallLogWrite("Torch: parsed the cartridge header without copying the ROM.");
++        Mk64LogApplicationMemory("cartridge initialization");
++#endif
  
          if(!config[this->gCartridge->GetHash()]){
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
@@ -173,7 +226,39 @@ index a881533..12741f3 100644
              SPDLOG_ERROR("No config found for {}", this->gCartridge->GetHash());
              return;
          }
-@@ -1320,7 +1373,7 @@ void Companion::Process() {
+@@ -1274,6 +1358,9 @@ void Companion::Process() {
+ 
+     if (wrapper) {
+         wrapper->CreateArchive();
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        Mk64LogApplicationMemory("archive creation");
++#endif
+     }
+     this->gCurrentWrapper = wrapper;
+ 
+@@ -1287,6 +1374,7 @@ void Companion::Process() {
+         vWriter.Write((uint32_t) 0);
+     }
+ 
++    size_t processedYamlFiles = 0;
+     for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){
+         if(entry.is_directory())  {
+             continue;
+@@ -1309,6 +1397,13 @@ void Companion::Process() {
+         if (!this->gProcessedFiles.contains(this->gCurrentFile)) {
+             ProcessFile(root);
+             this->gProcessedFiles.insert(this->gCurrentFile);
++            ++processedYamlFiles;
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++            if((processedYamlFiles % 16) == 0) {
++                Mk64InstallLogWritef("Torch: processed %zu YAML files.", processedYamlFiles);
++                Mk64LogApplicationMemory("asset extraction");
++            }
++#endif
+         }
+     }
+ 
+@@ -1320,7 +1415,7 @@ void Companion::Process() {
                  std::vector<char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
                  input.close();
                  std::string filename = fs::path(filePath).filename().string();
@@ -182,7 +267,23 @@ index a881533..12741f3 100644
                  SPDLOG_INFO("Added additional file: {}", filename);
              } else {
                  SPDLOG_WARN("Could not open additional file: {}", filePath);
-@@ -1393,7 +1446,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
+@@ -1333,10 +1428,15 @@ void Companion::Process() {
+         wrapper->Close();
+     }
+ 
++#if !defined(__3DS__) && !defined(PLATFORM_3DS)
+     // Write entries hash
+     std::ofstream file(this->gDestinationDirectory / "torch.hash.yml", std::ios::binary);
+     file << this->gHashNode;
+     file.close();
++#else
++    Mk64InstallLogWritef("Torch: completed %zu YAML files without an incremental hash cache.", processedYamlFiles);
++    Mk64LogApplicationMemory("archive finalization");
++#endif
+ 
+     auto end = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
+     auto level = spdlog::get_level();
+@@ -1393,7 +1493,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
          std::replace(normalized.begin(), normalized.end(), '\\', '/');
          // Remove parent folder
          normalized = normalized.substr(folder.length() + 1);
@@ -191,7 +292,7 @@ index a881533..12741f3 100644
          SPDLOG_CRITICAL("> Added {}", normalized);
      }
  
-@@ -1710,7 +1763,7 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
+@@ -1710,7 +1810,7 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
          }
      }
  
@@ -574,33 +675,139 @@ index d1fe867..4f3eee5 100644
      miniz_cpp::zip_file* mZip;
 +#endif
  };
+diff --git a/src/factories/naudio/v1/SampleFactory.cpp b/src/factories/naudio/v1/SampleFactory.cpp
+index 616d883..a797746 100644
+--- a/src/factories/naudio/v1/SampleFactory.cpp
++++ b/src/factories/naudio/v1/SampleFactory.cpp
+@@ -87,18 +87,18 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
+     root->SetAttribute("Version", 0);
+     root->SetAttribute("Codec", AudioContext::GetCodecStr(entry->codec));
+     root->SetAttribute("Medium", AudioContext::GetMediumStr(entry->medium));
+-    root->SetAttribute("bit26", entry->unk);
++    root->SetAttribute("bit26", static_cast<unsigned int>(entry->unk));
+     root->SetAttribute("Tuning", entry->tuning);
+-    root->SetAttribute("Size", entry->size);
++    root->SetAttribute("Size", static_cast<unsigned int>(entry->size));
+     root->SetAttribute("Relocated", 0);
+     root->SetAttribute("Path", (path.string() + "_data").c_str());
+ 
+     if(entry->loop != 0) {
+         auto loop = std::static_pointer_cast<ADPCMLoopData>(Companion::Instance->GetParseDataByAddr(entry->loop)->data.value());
+         tinyxml2::XMLElement* adpcmLoop = sample.NewElement("ADPCMLoop");
+-        adpcmLoop->SetAttribute("Start", loop->start);
+-        adpcmLoop->SetAttribute("End", loop->end);
+-        adpcmLoop->SetAttribute("Count", loop->count);
++        adpcmLoop->SetAttribute("Start", static_cast<unsigned int>(loop->start));
++        adpcmLoop->SetAttribute("End", static_cast<unsigned int>(loop->end));
++        adpcmLoop->SetAttribute("Count", static_cast<unsigned int>(loop->count));
+         if (loop->count != 0) {
+             for (auto& state : loop->predictorState) {
+                 tinyxml2::XMLElement* loopEntry = adpcmLoop->InsertNewChildElement("Predictor");
+@@ -112,8 +112,8 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
+     if(entry->book != 0) {
+         auto book = std::static_pointer_cast<ADPCMBookData>(Companion::Instance->GetParseDataByAddr(entry->book)->data.value());
+         tinyxml2::XMLElement* adpcmBook = sample.NewElement("ADPCMBook");
+-        adpcmBook->SetAttribute("Order", book->order);
+-        adpcmBook->SetAttribute("Npredictors", book->numPredictors);
++        adpcmBook->SetAttribute("Order", static_cast<int>(book->order));
++        adpcmBook->SetAttribute("Npredictors", static_cast<int>(book->numPredictors));
+ 
+         for (auto& page : book->book) {
+             tinyxml2::XMLElement* bookEntry = adpcmBook->InsertNewChildElement("Book");
+diff --git a/src/factories/naudio/v1/SoundFontFactory.cpp b/src/factories/naudio/v1/SoundFontFactory.cpp
+index cd00123..7925b06 100644
+--- a/src/factories/naudio/v1/SoundFontFactory.cpp
++++ b/src/factories/naudio/v1/SoundFontFactory.cpp
+@@ -111,7 +111,7 @@ void WriteDrum(tinyxml2::XMLElement* parent, uint32_t offset){
+     root->SetAttribute("Tuning", sample.tuning);
+ 
+     tinyxml2::XMLElement* envelopes = root->InsertNewChildElement("Envelopes");
+-    envelopes->SetAttribute("Count", (uint32_t) envelopeData->points.size());
++    envelopes->SetAttribute("Count", static_cast<unsigned int>(envelopeData->points.size()));
+     for(size_t i = 0; i < envelopeData->points.size(); i++){
+         auto point = envelopeData->points[i];
+         tinyxml2::XMLElement* pointEntry = envelopes->InsertNewChildElement("Envelope");
+@@ -135,7 +135,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
+     tinyxml2::XMLDocument doc;
+     tinyxml2::XMLElement* root = doc.NewElement("SoundFont");
+     root->SetAttribute("Version", 0);
+-    root->SetAttribute("Num", id);
++    root->SetAttribute("Num", static_cast<unsigned int>(id));
+     root->SetAttribute("Medium", AudioContext::GetMediumStr(medium));
+     root->SetAttribute("CachePolicy", AudioContext::GetCachePolicyStr(policy));
+     root->SetAttribute("Data1", sd1);
+@@ -143,7 +143,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
+     root->SetAttribute("Data3", sd3);
+ 
+     tinyxml2::XMLElement* drums = doc.NewElement("Drums");
+-    drums->SetAttribute("Count", font->numDrums);
++    drums->SetAttribute("Count", static_cast<unsigned int>(font->numDrums));
+ 
+     for(auto& drum : font->drums){
+         if(drum == 0){
+@@ -154,7 +154,7 @@ ExportResult SoundFontXMLExporter::Export(std::ostream &write, std::shared_ptr<I
+     root->InsertEndChild(drums);
+ 
+     tinyxml2::XMLElement* insts = doc.NewElement("Instruments");
+-    insts->SetAttribute("Count", font->numInstruments);
++    insts->SetAttribute("Count", static_cast<unsigned int>(font->numInstruments));
+ 
+     for(auto& inst : font->instruments){
+         if(inst == 0){
 diff --git a/src/n64/Cartridge.cpp b/src/n64/Cartridge.cpp
-index f3c1f83..cffa9f4 100644
+index f3c1f83..2784870 100644
 --- a/src/n64/Cartridge.cpp
 +++ b/src/n64/Cartridge.cpp
-@@ -4,7 +4,12 @@
+@@ -3,8 +3,28 @@
+ #include "lib/binarytools/BinaryReader.h"
  #include <Companion.h>
  
++#include <stdexcept>
++
  void N64::Cartridge::Initialize() {
 -    LUS::BinaryReader reader((char*) this->gRomData.data(), this->gRomData.size());
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +    const std::vector<uint8_t>& romData = *this->gRomData;
++    if (romData.size() < 0x40) {
++        throw std::runtime_error("The ROM is too small to contain an N64 header.");
++    }
++
++    // BinaryReader owns a MemoryStream, and MemoryStream copies its complete
++    // input buffer. Avoid duplicating the 12 MiB MK64 ROM on memory-constrained
++    // 3DS systems just to read the fixed-size cartridge header.
++    this->gRomCRC = static_cast<uint32_t>(romData[0x10]) |
++                    (static_cast<uint32_t>(romData[0x11]) << 8) |
++                    (static_cast<uint32_t>(romData[0x12]) << 16) |
++                    (static_cast<uint32_t>(romData[0x13]) << 24);
++    this->gGameTitle.assign(reinterpret_cast<const char*>(romData.data() + 0x20), 20);
++    const uint8_t country = romData[0x3E];
++    this->gVersion = romData[0x3F];
 +#else
 +    const std::vector<uint8_t>& romData = this->gRomData;
-+#endif
 +    LUS::BinaryReader reader((char*) romData.data(), romData.size());
      reader.SetEndianness(Torch::Endianness::Big);
      reader.Seek(0x10, LUS::SeekOffsetType::Start);
      this->gRomCRC = BSWAP32(reader.ReadUInt32());
-@@ -14,7 +19,7 @@ void N64::Cartridge::Initialize() {
+@@ -14,7 +34,8 @@ void N64::Cartridge::Initialize() {
      reader.Seek(0x3E, LUS::SeekOffsetType::Start);
      uint8_t country = reader.ReadUByte();
      this->gVersion = reader.ReadUByte();
 -    this->gHash = Companion::CalculateHash(this->gRomData);
++#endif
 +    this->gHash = Companion::CalculateHash(romData);
      switch (country) {
          case 'J':
              this->gCountryCode = CountryCode::Japan;
+@@ -29,7 +50,9 @@ void N64::Cartridge::Initialize() {
+             this->gCountryCode = CountryCode::Unknown;
+             break;
+     }
++#if !defined(__3DS__) && !defined(PLATFORM_3DS)
+     reader.Close();
++#endif
+ }
+ 
+ const std::string &N64::Cartridge::GetGameTitle() {
 diff --git a/src/n64/Cartridge.h b/src/n64/Cartridge.h
 index 4477a59..6992694 100644
 --- a/src/n64/Cartridge.h
@@ -635,6 +842,41 @@ index 4477a59..6992694 100644
      std::string gHash;
      uint32_t gRomCRC;
  };
+-}
+\ No newline at end of file
++}
+diff --git a/src/utils/Decompressor.cpp b/src/utils/Decompressor.cpp
+index dd24650..138c2a8 100644
+--- a/src/utils/Decompressor.cpp
++++ b/src/utils/Decompressor.cpp
+@@ -123,8 +123,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
+             offset = ASSET_PTR(offset);
+ 
+             auto decoded = Decode(buffer, fileOffset, type);
+-            auto availableSize = decoded->size - offset;
+-            auto size = node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
++            const size_t availableSize = decoded->size - offset;
++            const size_t size =
++                node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
+             return {
+                 .root = decoded,
+                 .segment = { decoded->data + offset, size }
+@@ -136,8 +137,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
+         {
+             fileOffset = TranslateAddr(offset, false);
+ 
+-            auto availableSize = buffer.size() - fileOffset;
+-            auto size = node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
++            const size_t availableSize = buffer.size() - fileOffset;
++            const size_t size =
++                node["size"] ? node["size"].as<size_t>() : std::min(manualSize.value_or(availableSize), availableSize);
+ 
+             return {
+                 .root = nullptr,
+@@ -227,4 +229,4 @@ void Decompressor::ClearCache() {
+         delete[] value->data;
+     }
+     gCachedChunks.clear();
 -}
 \ No newline at end of file
 +}
