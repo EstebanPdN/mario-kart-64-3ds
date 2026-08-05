@@ -2,6 +2,8 @@
 
 #include <3ds.h>
 
+extern "C" bool Mk64Diagnostics3DSOwnsHid(void) __attribute__((weak));
+
 namespace Fast {
 
 void GfxWindowBackend3DS::Init(const char*, const char*, bool, uint32_t, uint32_t, int32_t, int32_t) {
@@ -9,7 +11,7 @@ void GfxWindowBackend3DS::Init(const char*, const char*, bool, uint32_t, uint32_
     mHeight = 240;
     mFullScreen = true;
     mIsRunning = true;
-    mTargetFps = 60;
+    mTargetFps = 30;
 }
 
 void GfxWindowBackend3DS::Close() {
@@ -109,7 +111,11 @@ Ship::WindowRect GfxWindowBackend3DS::GetPrimaryMonitorRect() {
 }
 
 void GfxWindowBackend3DS::HandleEvents() {
-    hidScanInput();
+    // The diagnostics worker owns HID while the game is running so L+R+A can
+    // still be observed if the main thread is blocked in the renderer.
+    if (Mk64Diagnostics3DSOwnsHid == nullptr || !Mk64Diagnostics3DSOwnsHid()) {
+        hidScanInput();
+    }
     if (!aptMainLoop()) {
         mIsRunning = false;
     }
@@ -134,7 +140,7 @@ int GfxWindowBackend3DS::GetTargetFps() {
 }
 
 void GfxWindowBackend3DS::SetTargetFps(int fps) {
-    mTargetFps = fps > 0 ? static_cast<uint32_t>(fps) : 60;
+    mTargetFps = fps > 0 ? static_cast<uint32_t>(fps) : 30;
 }
 
 void GfxWindowBackend3DS::SetMaxFrameLatency(int) {

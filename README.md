@@ -13,8 +13,9 @@ workspace.
 The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O2R resource runtime, 3DS input,
 NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game remains a work in
 progress and is not yet a stable release. The original game simulation runs at 30 Hz; the renderer presents that
-state at the 3DS display's 60 Hz refresh rate. A true interpolated 60 FPS mode and sustained real-hardware
-performance have not been claimed.
+state once per simulation step and is paced at 30 Hz. Replaying the same state twice is not interpolation, so the
+Old 3DS baseline deliberately avoids that duplicate CPU/GPU work. A true interpolated 60 FPS mode and sustained
+real-hardware performance have not been claimed.
 
 Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
 3DS and New Nintendo 3DS performance still require real-hardware profiling.
@@ -39,6 +40,8 @@ The CLI writes the game package to:
 ```text
 build-3ds/game/mk64-3ds-game-v0.7.3dsx
 build-3ds/game/mk64-3ds-v0.7.cia
+build-3ds/game/mk64-3ds-game-v0.8.3dsx
+build-3ds/game/mk64-3ds-v0.8.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -104,6 +107,31 @@ Install the CIA with your normal homebrew installer, or place the 3DSX in a Home
 | X / Y | C-Up / C-Left |
 | ZL / ZR | C-Down / C-Right |
 | Start | Start |
+
+## Runtime diagnostics
+
+Every game launch writes a local stage log to:
+
+```text
+sd:/3ds/MK64/dump/runtime.log
+```
+
+After a forced reboot, copy this file before launching the port again because the next launch replaces it.
+
+Hold `L + R + A` together to create a timestamped diagnostic session under:
+
+```text
+sd:/3ds/MK64/dump/dump-YYYYMMDD-HHMMSS/
+```
+
+The diagnostic input worker is independent of the main game loop, so the shortcut can still be detected when the
+renderer thread is stuck. A session contains `info.txt`, a copy of `runtime.log`, the active game arena when it is
+readable, and the current display list when available. `info.txt` records the current startup/rendering stage,
+resource name, memory-region totals, heap use, display-list watchdog state, and the process memory map.
+
+These files remain on the SD card and may contain private device details or owner-generated game data. Inspect or
+share only the small text files privately when possible; never publish the raw binary dumps in a repository or
+release.
 
 ## Upstream and legal notice
 

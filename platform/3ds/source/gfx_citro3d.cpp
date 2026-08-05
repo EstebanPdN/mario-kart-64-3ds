@@ -17,7 +17,6 @@ namespace {
 
 constexpr uint32_t kTopWidth = 400;
 constexpr uint32_t kTopHeight = 240;
-constexpr uint32_t kBottomWidth = 320;
 constexpr uint32_t kMaxSourceVertices = 256 * 3;
 constexpr uint32_t kMaxDrawVertices = 256 * 6;
 constexpr uint32_t kVertexBufferCapacity = 32 * 1024;
@@ -244,7 +243,6 @@ struct GfxRenderingAPICitro3D::Impl {
     shaderProgram_s shaderProgram = {};
     int projectionUniform = -1;
     C3D_RenderTarget* topTarget = nullptr;
-    C3D_RenderTarget* bottomTarget = nullptr;
     C3D_RenderTarget* activeTarget = nullptr;
     float* packedVertices = nullptr;
     size_t packedVertexCount = 0;
@@ -293,9 +291,6 @@ struct GfxRenderingAPICitro3D::Impl {
         if (initialized) {
             if (topTarget != nullptr) {
                 C3D_RenderTargetDelete(topTarget);
-            }
-            if (bottomTarget != nullptr) {
-                C3D_RenderTargetDelete(bottomTarget);
             }
             C3D_Fini();
             gfxExit();
@@ -552,7 +547,7 @@ void GfxRenderingAPICitro3D::SetUseAlpha(bool useAlpha) {
 
 void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, size_t bufVboNumTris) {
     ShaderProgram* program = mImpl->currentProgram;
-    if (!mImpl->initialized || program == nullptr || program->invisible || bufVbo == nullptr ||
+    if (!mImpl->frameActive || program == nullptr || program->invisible || bufVbo == nullptr ||
         program->strideFloats == 0 || bufVboNumTris == 0) {
         return;
     }
@@ -735,6 +730,15 @@ void GfxRenderingAPICitro3D::Init() {
     }
     gfxInit(GSP_BGR8_OES, GSP_BGR8_OES, false);
     gfxSet3D(false);
+    gfxSetDoubleBuffering(GFX_BOTTOM, false);
+    uint16_t bottomWidth = 0;
+    uint16_t bottomHeight = 0;
+    uint8_t* bottomFramebuffer = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bottomWidth, &bottomHeight);
+    if (bottomFramebuffer != nullptr) {
+        const size_t bottomBytes = static_cast<size_t>(bottomWidth) * bottomHeight * 3;
+        std::memset(bottomFramebuffer, 0, bottomBytes);
+        GSPGPU_FlushDataCache(bottomFramebuffer, bottomBytes);
+    }
     aptSetHomeAllowed(true);
     aptSetSleepAllowed(true);
 
@@ -749,13 +753,10 @@ void GfxRenderingAPICitro3D::Init() {
     }
     mImpl->initialized = true;
     mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, kTopWidth, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    mImpl->bottomTarget =
-        C3D_RenderTargetCreate(kTopHeight, kBottomWidth, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    if (mImpl->topTarget == nullptr || mImpl->bottomTarget == nullptr) {
+    if (mImpl->topTarget == nullptr) {
         return;
     }
     C3D_RenderTargetSetOutput(mImpl->topTarget, GFX_TOP, GFX_LEFT, kDisplayTransferFlags);
-    C3D_RenderTargetSetOutput(mImpl->bottomTarget, GFX_BOTTOM, GFX_LEFT, kDisplayTransferFlags);
 
     mImpl->shaderBinary = DVLB_ParseFile(reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(fast3d_passthrough_shbin)),
                                          fast3d_passthrough_shbin_size);
@@ -781,6 +782,7 @@ void GfxRenderingAPICitro3D::Init() {
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 3, 0x210);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 1.0f);
+    C3D_FrameRate(30.0f);
     SetUseAlpha(false);
     SetDepthTestAndMask(false, false);
     mImpl->ready = true;
@@ -793,13 +795,13 @@ void GfxRenderingAPICitro3D::StartFrame() {
     if (!mImpl->ready || mImpl->frameActive) {
         return;
     }
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) {
+        return;
+    }
     mImpl->frameActive = true;
     mImpl->activeTarget = mImpl->topTarget;
     mImpl->packedVertexCount = 0;
     C3D_RenderTargetClear(mImpl->topTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
-    C3D_RenderTargetClear(mImpl->bottomTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
-    C3D_FrameDrawOn(mImpl->bottomTarget);
     C3D_FrameDrawOn(mImpl->topTarget);
     C3D_BindProgram(&mImpl->shaderProgram);
     C3D_Mtx depthConversion;
@@ -829,7 +831,10 @@ void GfxRenderingAPICitro3D::EndFrame() {
 }
 
 void GfxRenderingAPICitro3D::FinishRender() {
-    C3D_FrameSplit(0);
+    // EndFrame already submitted and closed the Citro3D frame. FrameSplit is
+    // only valid while a frame is being recorded; issuing it here can wait on
+    // a command queue that no longer has an active frame and hard-lock the
+    // first presentation on real hardware.
 }
 
 int GfxRenderingAPICitro3D::CreateFramebuffer() {
@@ -883,6 +888,9 @@ void GfxRenderingAPICitro3D::UpdateFramebufferParameters(int fbId, uint32_t widt
 
 void GfxRenderingAPICitro3D::StartDrawToFramebuffer(int fbId, float noiseScale) {
     (void) noiseScale;
+    if (!mImpl->frameActive) {
+        return;
+    }
     C3D_RenderTarget* target = mImpl->topTarget;
     Impl::FramebufferSlot* slot = nullptr;
     if (fbId > 0 && fbId < static_cast<int>(mImpl->framebuffers.size()) &&

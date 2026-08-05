@@ -19,6 +19,14 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#define MK64_OPTIONAL_SYMBOL __attribute__((weak_import))
+#else
+#define MK64_OPTIONAL_SYMBOL __attribute__((weak))
+#endif
+extern "C" void Mk64Diagnostics3DSSetResource(const char*, size_t) MK64_OPTIONAL_SYMBOL;
+extern "C" void Mk64Diagnostics3DSSetArchiveEntryCount(size_t) MK64_OPTIONAL_SYMBOL;
+
 namespace {
 
 constexpr size_t kOtrHeaderSize = 64;
@@ -43,6 +51,7 @@ constexpr uint32_t kTypeSpawnData = MakeType('S', 'D', 'A', 'T');
 constexpr uint32_t kTypeSequence = MakeType('S', 'E', 'Q', 'C');
 constexpr uint32_t kTypeUnknownSpawnData = MakeType('U', 'S', 'D', 'T');
 constexpr uint32_t kTypeLight = 0x46669697;
+constexpr uint8_t kUcodeFast3DEX = 2;
 
 struct CpuBehaviour3DS {
     int16_t pathPointStart;
@@ -284,14 +293,31 @@ bool ParseVertex(Reader& reader, LoadedResource& resource) {
 
 bool ParseDisplayList(Reader& reader, LoadedResource& resource, const std::vector<uint8_t>& bytes) {
     uint8_t ucode = 0;
-    if (!reader.ReadU8(&ucode) || ucode >= 6 || !reader.Align(8)) {
+    if (!reader.ReadU8(&ucode) || ucode != kUcodeFast3DEX || !reader.Align(8)) {
         return false;
     }
     const size_t commandBytes = bytes.size() - reader.Offset();
-    if (commandBytes == 0 || commandBytes % sizeof(Gfx) != 0) {
+    constexpr size_t kSerializedCommandSize = sizeof(uint32_t) * 2;
+    if (commandBytes == 0 || commandBytes % kSerializedCommandSize != 0) {
         return false;
     }
-    return CopyBlock(reader, resource, commandBytes);
+    const size_t commandCount = commandBytes / kSerializedCommandSize;
+    Gfx* commands = resource.Allocate<Gfx>(commandCount);
+    if (commands == nullptr) {
+        return false;
+    }
+    for (size_t i = 0; i < commandCount; ++i) {
+        uint32_t word0 = 0;
+        uint32_t word1 = 0;
+        if (!reader.ReadU32(&word0) || !reader.ReadU32(&word1)) {
+            return false;
+        }
+        commands[i].words.w0 = word0;
+        commands[i].words.w1 = word1;
+    }
+    resource.pointer = commands;
+    resource.pointerSize = commandCount * sizeof(Gfx);
+    return true;
 }
 
 bool ParseMatrix(Reader& reader, LoadedResource& resource) {
@@ -631,6 +657,9 @@ LoadedResource* LoadByPath(std::string_view path) {
         return nullptr;
     }
     const std::string key(path);
+    if (Mk64Diagnostics3DSSetResource != nullptr) {
+        Mk64Diagnostics3DSSetResource(key.c_str(), sCache.size());
+    }
     if (const auto found = sCache.find(key); found != sCache.end()) {
         return found->second.get();
     }
@@ -645,6 +674,9 @@ LoadedResource* LoadByPath(std::string_view path) {
     }
     LoadedResource* result = resource.get();
     sCache.emplace(key, std::move(resource));
+    if (Mk64Diagnostics3DSSetResource != nullptr) {
+        Mk64Diagnostics3DSSetResource(key.c_str(), sCache.size());
+    }
     return result;
 }
 
@@ -675,6 +707,9 @@ extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
         sCrcToEntry.emplace(CRC64(archive->Entries()[i].c_str()), i);
     }
     sArchive = std::move(archive);
+    if (Mk64Diagnostics3DSSetArchiveEntryCount != nullptr) {
+        Mk64Diagnostics3DSSetArchiveEntryCount(sArchive->Entries().size());
+    }
 
     std::vector<uint8_t> bytes;
     for (const std::string& entry : sArchive->Entries()) {

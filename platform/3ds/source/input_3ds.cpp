@@ -1,8 +1,12 @@
 #include "input_3ds.h"
+#include "diagnostics_3ds.h"
 
 #include <3ds.h>
 
 #include <algorithm>
+
+extern "C" bool Mk64Diagnostics3DSOwnsHid(void) __attribute__((weak));
+extern "C" bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS*) __attribute__((weak));
 
 namespace {
 
@@ -22,7 +26,9 @@ int8_t ScaleStickAxis(int value) {
 } // namespace
 
 extern "C" void Mk64Input3DSInit(void) {
-    hidScanInput();
+    if (Mk64Diagnostics3DSOwnsHid == nullptr || !Mk64Diagnostics3DSOwnsHid()) {
+        hidScanInput();
+    }
 }
 
 extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
@@ -31,8 +37,11 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     }
 
     *pad = {};
-    hidScanInput();
-    const u32 keys = hidKeysHeld();
+    Mk64DiagnosticsInput3DS diagnosticInput = {};
+    const bool diagnosticReady = Mk64Diagnostics3DSReadInput != nullptr &&
+                                 Mk64Diagnostics3DSReadInput(&diagnosticInput);
+    if (!diagnosticReady) hidScanInput();
+    const u32 keys = diagnosticReady ? diagnosticInput.heldMask : hidKeysHeld();
 
     if ((keys & KEY_A) != 0) {
         pad->buttons |= MK64_N64_A;
@@ -72,12 +81,22 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     }
 
     circlePosition circle = {};
-    hidCircleRead(&circle);
+    if (diagnosticReady) {
+        circle.dx = diagnosticInput.circleX;
+        circle.dy = diagnosticInput.circleY;
+    } else {
+        hidCircleRead(&circle);
+    }
     pad->stickX = ScaleStickAxis(circle.dx);
     pad->stickY = ScaleStickAxis(circle.dy);
 
     circlePosition cstick = {};
-    hidCstickRead(&cstick);
+    if (diagnosticReady) {
+        cstick.dx = diagnosticInput.cstickX;
+        cstick.dy = diagnosticInput.cstickY;
+    } else {
+        hidCstickRead(&cstick);
+    }
     pad->rightStickX = ScaleStickAxis(cstick.dx);
     pad->rightStickY = ScaleStickAxis(cstick.dy);
 
