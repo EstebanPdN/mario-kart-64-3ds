@@ -129,7 +129,7 @@ if(MK64_3DS_BUILD_GAME_CORE)
         NON_EQUIVALENT=1
         AVOID_UB=1
         PLATFORM_3DS=1
-        SPAGHETTI_VERSION="3DS-dev"
+        SPAGHETTI_VERSION="3DS-v0.1"
     )
     target_compile_options(mk64-3ds-game-core PRIVATE
         -O3
