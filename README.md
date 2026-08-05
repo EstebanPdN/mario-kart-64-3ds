@@ -37,8 +37,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.1.3dsx
-build-3ds/game/mk64-3ds-v0.1.cia
+build-3ds/game/mk64-3ds-game-v0.2.3dsx
+build-3ds/game/mk64-3ds-v0.2.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -60,15 +60,16 @@ sd:/3ds/MK64/mk64.z64
 sd:/3ds/MK64/baserom.us.z64
 ```
 
-On first boot, the 3DS build checks the ROM and shows a preparation screen while it runs SpaghettiKart's Torch
-asset pipeline directly on the 3DS. If extraction succeeds, it creates:
+On first boot, the 3DS build checks the ROM, copies its public extraction metadata into the local MK64 folder,
+and shows a preparation screen while it writes the O2R directly to the SD card. If extraction succeeds, it creates:
 
 ```text
 sd:/3ds/MK64/mk64.o2r
 ```
 
-Later launches reuse that generated archive. This release does not embed or redistribute the ROM, generated O2R
-archive, or extracted game data.
+The final archive is only moved into place after it closes successfully, so an interrupted installation is retried on
+the next launch. Later launches reuse that generated archive. This release does not embed or redistribute the ROM,
+generated O2R archive, or extracted game data.
 
 Install the CIA with your normal homebrew installer, or place the 3DSX in a Homebrew Launcher application folder.
 

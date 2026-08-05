@@ -163,3 +163,97 @@ index dd24650..138c2a8 100644
  
              return {
                  .root = nullptr,
+
+diff --git a/src/archive/ZWrapper.h b/src/archive/ZWrapper.h
+index 8a3a59d..20f0c59 100644
+--- a/src/archive/ZWrapper.h
++++ b/src/archive/ZWrapper.h
+@@ -4,9 +4,14 @@
+ #include <string>
+ #include "BinaryWrapper.h"
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++struct mz_zip_archive_tag;
++typedef struct mz_zip_archive_tag mz_zip_archive;
++#else
+ namespace miniz_cpp {
+ class zip_file;
+ }
++#endif
+ 
+ class ZWrapper : public BinaryWrapper {
+ public:
+@@ -15,6 +20,11 @@ public:
+     int32_t CreateArchive(void) override;
+     bool AddFile(const std::string& path, std::vector<char> data) override;
+     int32_t Close(void) override;
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    mz_zip_archive* mArchive;
++    bool mArchiveOpen;
++#else
+     miniz_cpp::zip_file* mZip;
++#endif
+ };
+diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
+index 1d608e8..ec46cde 100644
+--- a/src/archive/ZWrapper.cpp
++++ b/src/archive/ZWrapper.cpp
+@@ -11,10 +11,24 @@ namespace fs = std::filesystem;
+ 
+ ZWrapper::ZWrapper(const std::string& path) {
+     this->mPath = path;
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    this->mArchive = new mz_zip_archive{};
++    this->mArchiveOpen = false;
++#else
+     this->mZip = new miniz_cpp::zip_file;
++#endif
+ }
+ 
+ int32_t ZWrapper::CreateArchive() {
+     SPDLOG_INFO("Loaded ZIP (O2R) archive: {}", mPath.c_str());
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if(fs::exists(mPath)) {
++        fs::remove(mPath);
++    }
++    this->mArchiveOpen = mz_zip_writer_init_file(this->mArchive, mPath.c_str(), 0) == MZ_TRUE;
++    if(!this->mArchiveOpen) {
++        throw std::runtime_error("Could not create the O2R archive on the SD card");
++    }
++#endif
+     return 0;
+ }
+@@ -34,11 +48,32 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
+         stream.close();
+     }
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if(!this->mArchiveOpen) {
++        throw std::runtime_error("The O2R archive is not open");
++    }
++    if(mz_zip_writer_add_mem(this->mArchive, path.c_str(), data.data(), data.size(), MZ_BEST_SPEED) != MZ_TRUE) {
++        throw std::runtime_error("Could not write an extracted file to the O2R archive");
++    }
++#else
+     this->mZip->writebytes(path, data);
++#endif
+     return true;
+ }
+ 
+ int32_t ZWrapper::Close(void) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if(!this->mArchiveOpen) {
++        return -1;
++    }
++    const bool finalized = mz_zip_writer_finalize_archive(this->mArchive) == MZ_TRUE;
++    const bool ended = mz_zip_writer_end(this->mArchive) == MZ_TRUE;
++    this->mArchiveOpen = false;
++    if(!finalized || !ended) {
++        throw std::runtime_error("Could not finalize the O2R archive on the SD card");
++    }
++#else
+     this->mZip->save(this->mPath);
++#endif
+     return 0;
+ }

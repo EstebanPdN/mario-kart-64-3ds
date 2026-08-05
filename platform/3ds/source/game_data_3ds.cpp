@@ -7,19 +7,25 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
 bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* destinationDir,
-                          const char* additionalFile);
+                          const char* additionalFile, char* error, size_t errorSize);
 #endif
 
 namespace {
 constexpr const char* kDataDir = "sdmc:/3ds/MK64";
 constexpr const char* kPrimaryArchivePath = "sdmc:/3ds/MK64/mk64.o2r";
 constexpr const char* kLegacyArchivePath = "sdmc:/3ds/mk64-3ds/mk64.o2r";
-constexpr const char* kExtractorSourceDir = "romfs:/torch";
-constexpr const char* kExtractorAdditionalFile = "romfs:/torch/meta/mods.toml";
+constexpr const char* kInstallerDir = "sdmc:/3ds/MK64/.mk64-3ds-installer";
+constexpr const char* kExtractorSourceDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/torch";
+constexpr const char* kExtractorWorkDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/work";
+constexpr const char* kWorkArchivePath = "sdmc:/3ds/MK64/.mk64-3ds-installer/work/mk64.o2r";
+constexpr const char* kExtractorAdditionalFile = "meta/mods.toml";
+constexpr const char* kRomfsExtractorSourceDir = "romfs:/torch";
 constexpr const char* kExpectedSha1 = "579c48e211ae952530ffc8738709f078d5dd215e";
 constexpr std::array<const char*, 3> kRomPaths = {
     "sdmc:/3ds/MK64/Mario Kart 64.z64",
@@ -40,6 +46,77 @@ bool FileExists(const char* path) {
     }
     std::fclose(file);
     return true;
+}
+
+bool DirectoryExists(const char* path) {
+    struct stat info {};
+    return stat(path, &info) == 0 && S_ISDIR(info.st_mode);
+}
+
+bool MakeDirectory(const char* path) {
+    return mkdir(path, 0777) == 0 || errno == EEXIST;
+}
+
+bool JoinPath(char* output, size_t outputSize, const char* base, const char* name) {
+    const int written = std::snprintf(output, outputSize, "%s/%s", base, name);
+    return written > 0 && static_cast<size_t>(written) < outputSize;
+}
+
+bool CopyFile(const char* source, const char* destination) {
+    FILE* input = std::fopen(source, "rb");
+    if (input == nullptr) return false;
+    FILE* output = std::fopen(destination, "wb");
+    if (output == nullptr) {
+        std::fclose(input);
+        return false;
+    }
+
+    std::array<uint8_t, 64 * 1024> buffer{};
+    bool ok = true;
+    while (!std::feof(input)) {
+        const size_t bytesRead = std::fread(buffer.data(), 1, buffer.size(), input);
+        if (bytesRead == 0) break;
+        if (std::fwrite(buffer.data(), 1, bytesRead, output) != bytesRead) {
+            ok = false;
+            break;
+        }
+    }
+    if (std::ferror(input) != 0) ok = false;
+    std::fclose(output);
+    std::fclose(input);
+    return ok;
+}
+
+bool CopyDirectoryTree(const char* source, const char* destination) {
+    if (!MakeDirectory(destination)) return false;
+    DIR* directory = opendir(source);
+    if (directory == nullptr) return false;
+
+    bool ok = true;
+    while (ok) {
+        dirent* entry = readdir(directory);
+        if (entry == nullptr) break;
+        if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) continue;
+
+        char sourcePath[768];
+        char destinationPath[768];
+        if (!JoinPath(sourcePath, sizeof(sourcePath), source, entry->d_name) ||
+            !JoinPath(destinationPath, sizeof(destinationPath), destination, entry->d_name)) {
+            ok = false;
+            break;
+        }
+
+        struct stat info {};
+        if (stat(sourcePath, &info) != 0) {
+            ok = false;
+        } else if (S_ISDIR(info.st_mode)) {
+            ok = CopyDirectoryTree(sourcePath, destinationPath);
+        } else if (S_ISREG(info.st_mode)) {
+            ok = CopyFile(sourcePath, destinationPath);
+        }
+    }
+    closedir(directory);
+    return ok;
 }
 
 void SetResult(Mk64GameData3DSResult* result, Mk64GameData3DSStatus status, const char* archivePath,
@@ -226,35 +303,68 @@ const char* FindRom() {
     return nullptr;
 }
 
-bool GenerateArchiveFromRom(const char* romPath) {
+bool InstallExtractorFiles() {
+    if (DirectoryExists(kExtractorSourceDir) && FileExists("sdmc:/3ds/MK64/.mk64-3ds-installer/torch/config.yml")) {
+        return true;
+    }
+
+    if (!MakeDirectory(kInstallerDir)) return false;
+    DrawProgress("Installing local extractor...", "Copying the bundled extractor files to the SD card.", 78);
+    return CopyDirectoryTree(kRomfsExtractorSourceDir, kExtractorSourceDir);
+}
+
+bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
-    DrawProgress("ROM verified.", "Generating mk64.o2r on the 3DS. This can take several minutes.", 82);
+    DrawProgress("ROM verified.", "Preparing the local extractor on the SD card.", 76);
     Result romfsResult = romfsInit();
     if (R_FAILED(romfsResult)) {
-        DrawProgress("Extractor metadata unavailable.", "RomFS could not be opened from this install.", 82);
+        std::snprintf(error, errorSize, "RomFS could not be opened from this install.");
+        DrawProgress("Extractor metadata unavailable.", error, 76);
         svcSleepThread(1800LL * 1000LL * 1000LL);
         return false;
     }
 
+    const bool installed = InstallExtractorFiles();
+    romfsExit();
+    if (!installed) {
+        std::snprintf(error, errorSize, "Could not copy the extractor files to /3ds/MK64/.");
+        DrawProgress("Extractor install failed.", error, 78);
+        svcSleepThread(1800LL * 1000LL * 1000LL);
+        return false;
+    }
+
+    if (!MakeDirectory(kExtractorWorkDir)) {
+        std::snprintf(error, errorSize, "Could not create the temporary extraction folder.");
+        return false;
+    }
+    unlink(kWorkArchivePath);
+
+    DrawProgress("Generating mk64.o2r...", "Writing the archive directly to the SD card. This can take several minutes.", 82);
     bool ok = false;
     try {
-        ok = Mk64Torch3DSBuildO2R(romPath, kExtractorSourceDir, kDataDir, kExtractorAdditionalFile);
+        ok = Mk64Torch3DSBuildO2R(romPath, kExtractorSourceDir, kExtractorWorkDir, kExtractorAdditionalFile, error,
+                                  errorSize);
     } catch (...) {
+        std::snprintf(error, errorSize, "The extractor stopped unexpectedly.");
         ok = false;
     }
 
-    romfsExit();
-    if (ok && FileExists(kPrimaryArchivePath)) {
+    if (ok && FileExists(kWorkArchivePath) && rename(kWorkArchivePath, kPrimaryArchivePath) == 0) {
         DrawProgress("Game data generated.", "mk64.o2r was created in /3ds/MK64/.", 100);
         svcSleepThread(900LL * 1000LL * 1000LL);
         return true;
     }
 
-    DrawProgress("O2R generation failed.", "Keep the ROM in /3ds/MK64/ and reinstall this build if needed.", 82);
+    unlink(kWorkArchivePath);
+    if (error[0] == '\0') {
+        std::snprintf(error, errorSize, "The temporary O2R archive could not be finalized on the SD card.");
+    }
+    DrawProgress("O2R generation failed.", error, 82);
     svcSleepThread(2500LL * 1000LL * 1000LL);
     return false;
 #else
     (void)romPath;
+    std::snprintf(error, errorSize, "This build was made without the on-device extractor.");
     DrawProgress("Extractor unavailable.", "This build was made without the on-device Torch pipeline.", 82);
     svcSleepThread(1800LL * 1000LL * 1000LL);
     return false;
@@ -309,10 +419,10 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
         return result;
     }
 
-    if (!GenerateArchiveFromRom(romPath)) {
+    char extractionError[384] = {};
+    if (!GenerateArchiveFromRom(romPath, extractionError, sizeof(extractionError))) {
         gfxExit();
-        SetResult(&result, MK64_GAME_DATA_ERROR, nullptr,
-                  "ROM verified, but mk64.o2r could not be generated on the 3DS.");
+        SetResult(&result, MK64_GAME_DATA_ERROR, nullptr, extractionError);
         return result;
     }
     gfxExit();
