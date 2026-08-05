@@ -36,8 +36,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.1-dev.3dsx
-build-3ds/game/mk64-3ds-v0.1-dev.cia
+build-3ds/game/mk64-3ds-game-v0.1.3dsx
+build-3ds/game/mk64-3ds-v0.1.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
