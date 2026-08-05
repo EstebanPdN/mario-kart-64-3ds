@@ -1,11 +1,13 @@
 #include "game_runtime_3ds.h"
 
+#include "diagnostics_3ds.h"
 #include "gfx_citro3d.h"
 #include "gfx_window_manager_3ds.h"
 
 #include <fast/interpreter.h>
 
 #include <cmath>
+#include <exception>
 #include <memory>
 #include <unordered_map>
 
@@ -19,7 +21,21 @@ std::unique_ptr<Fast::GfxRenderingAPICitro3D> sRenderer;
 std::shared_ptr<Fast::Interpreter> sInterpreter;
 std::shared_ptr<Fast::GfxDebugger> sDebugger;
 const std::unordered_map<Mtx*, MtxF> sNoMatrixReplacements;
+uint64_t sFrameCounter = 0;
+
+void SetRendererStage(const char* stage) {
+    // Persist every boundary of the first few submissions. If real hardware
+    // blocks inside Citro3D, runtime.log still identifies the last completed
+    // boundary without adding SD writes to steady-state rendering.
+    if (sFrameCounter <= 3) {
+        Mk64Diagnostics3DSCheckpoint(stage);
+    } else {
+        Mk64Diagnostics3DSSetStage(stage);
+    }
 }
+}
+
+extern "C" Gfx* gDisplayListHead;
 
 extern "C" bool Mk64Graphics3DSInit() {
     if (sInterpreter != nullptr) {
@@ -62,18 +78,43 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         return;
     }
 
+    const uintptr_t listBegin = reinterpret_cast<uintptr_t>(commands);
+    const uintptr_t listEnd = reinterpret_cast<uintptr_t>(gDisplayListHead);
+    const size_t listBytes = listEnd >= listBegin ? listEnd - listBegin : 0;
+    Mk64Diagnostics3DSSetDisplayList(commands, listBytes);
+    SetRendererStage("renderer-window-events");
     sInterpreter->HandleWindowEvents();
     if (!sWindow->IsRunning() || !sInterpreter->IsFrameReady()) {
         return;
     }
 
-    // MK64 simulates at 30 Hz. Present each vanilla state twice so the native
-    // display remains synchronized at 60 Hz without accelerating game logic.
-    for (int presentation = 0; presentation < 2 && sWindow->IsRunning(); ++presentation) {
+    // Vanilla MK64 simulates at 30 Hz. Replaying an identical display list a
+    // second time is not motion interpolation; it doubles CPU/GPU work and
+    // made startup needlessly hostile to Old 3DS memory and GPU budgets.
+    ++sFrameCounter;
+    Mk64Diagnostics3DSSetFrame(sFrameCounter, 1);
+    SetRendererStage("renderer-prepare");
+    try {
         sInterpreter->StartFrame();
+        SetRendererStage("renderer-run-display-list");
         sInterpreter->Run(commands, sNoMatrixReplacements);
+        SetRendererStage("renderer-end-frame");
         sInterpreter->EndFrame();
+    } catch (const std::exception& exception) {
+        // Leave Citro3D in a closed state even if Fast3D rejects a malformed
+        // command or runs out of memory. The diagnostic thread and runtime log
+        // then remain usable instead of terminating through std::terminate.
+        sRenderer->EndFrame();
+        Mk64Diagnostics3DSFailure("renderer-exception", exception.what());
+        sWindow->Close();
+        return;
+    } catch (...) {
+        sRenderer->EndFrame();
+        Mk64Diagnostics3DSFailure("renderer-exception", "unknown C++ exception");
+        sWindow->Close();
+        return;
     }
+    SetRendererStage("renderer-frame-presented");
 }
 
 extern "C" void GameEngine_ProcessGfxCommands(Gfx* commands) {

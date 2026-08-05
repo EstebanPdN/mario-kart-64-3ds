@@ -94,13 +94,13 @@ if(MK64_3DS_BUILD_GAME_CORE)
     )
     string(REPLACE
         "#include <stdio.h>"
-        "#include <stdio.h>\n#include <stdlib.h>"
+        "#include <stdio.h>\n#include <stdlib.h>\nextern void Mk64Diagnostics3DSSetGameArena(const void*, size_t) __attribute__((weak));"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
     )
     string(REPLACE
         "    // Clear pool\n    memset(sMemoryPool, 0, sizeof(sMemoryPool));\n\n    // Force the pointer to be exactly at the start of the aligned array\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    \n    // Ensure sPoolEnd is exactly at the end of the 256MB block\n    sPoolEnd = poolStart + sizeof(sMemoryPool);"
-        "    if (sMemoryPool == NULL) {\n        sMemoryPool = (u8*)aligned_alloc(4096, 0x01000000);\n        if (sMemoryPool == NULL) {\n            printf(\"[memory.c] initialize_memory_pool(): 3DS arena allocation failed!\\n\");\n            return;\n        }\n    }\n    memset(sMemoryPool, 0, 0x01000000);\n\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    sPoolEnd = poolStart + 0x01000000;"
+        "    if (sMemoryPool == NULL) {\n        sMemoryPool = (u8*)aligned_alloc(4096, 0x01000000);\n        if (sMemoryPool == NULL) {\n            printf(\"[memory.c] initialize_memory_pool(): 3DS arena allocation failed!\\n\");\n            return;\n        }\n    }\n    memset(sMemoryPool, 0, 0x01000000);\n\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    sPoolEnd = poolStart + 0x01000000;\n    if (Mk64Diagnostics3DSSetGameArena != NULL) {\n        Mk64Diagnostics3DSSetGameArena(sMemoryPool, 0x01000000);\n    }"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
     )
@@ -470,10 +470,34 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
     endif()
 
     if(MK64_3DS_BUILD_INTERPRETER_PROBE)
+        set(SPAGHETTIKART_INTERPRETER_SOURCE
+            "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/libultraship/src/fast/interpreter.cpp")
+        set(SPAGHETTIKART_3DS_INTERPRETER_SOURCE
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/interpreter_3ds.cpp")
+        file(READ "${SPAGHETTIKART_INTERPRETER_SOURCE}" SPAGHETTIKART_3DS_INTERPRETER_TEXT)
+        set(SPAGHETTIKART_3DS_INTERPRETER_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "GfxExecStack g_exec_stack = {};"
+            "extern \"C\" void Mk64Diagnostics3DSGfxWatchdog(const void*, uint32_t, uint32_t, size_t) __attribute__((weak));\n\nGfxExecStack g_exec_stack = {};"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            "    while (!g_exec_stack.cmd_stack.empty()) {\n        auto cmd = g_exec_stack.cmd_stack.top();"
+            "    size_t commandCount = 0;\n    constexpr size_t kMaxCommandsPerFrame = 250000;\n    constexpr size_t kMaxDisplayListDepth = 512;\n    while (!g_exec_stack.cmd_stack.empty()) {\n        auto cmd = g_exec_stack.cmd_stack.top();\n        if (++commandCount > kMaxCommandsPerFrame || g_exec_stack.cmd_stack.size() > kMaxDisplayListDepth) {\n            if (Mk64Diagnostics3DSGfxWatchdog != nullptr && cmd != nullptr) {\n                Mk64Diagnostics3DSGfxWatchdog(cmd, cmd->words.w0, cmd->words.w1, commandCount);\n            }\n            g_exec_stack.stop();\n            break;\n        }"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_INTERPRETER_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D interpreter watchdog insertion points changed")
+        endif()
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+        file(WRITE "${SPAGHETTIKART_3DS_INTERPRETER_SOURCE}" "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+
         add_library(mk64-3ds-fast3d-interpreter STATIC
             platform/3ds/source/gfx_window_manager_3ds.cpp
             third_party/SpaghettiKart/libultraship/src/fast/debug/GfxDebugger.cpp
-            third_party/SpaghettiKart/libultraship/src/fast/interpreter.cpp
+            "${SPAGHETTIKART_3DS_INTERPRETER_SOURCE}"
         )
         target_include_directories(mk64-3ds-fast3d-interpreter PUBLIC
             "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/include"
@@ -481,7 +505,10 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
             "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/libultraship/include"
         )
         target_compile_features(mk64-3ds-fast3d-interpreter PUBLIC cxx_std_20)
-        target_compile_definitions(mk64-3ds-fast3d-interpreter PRIVATE F3DEX_GBI_2)
+        # Mario Kart 64 and its O2R archives use Fast3DEX. Keep the
+        # interpreter itself on the same GBI so conditional command layouts
+        # cannot silently fall back to Fast3DEX2.
+        target_compile_definitions(mk64-3ds-fast3d-interpreter PRIVATE F3DEX_GBI=1)
         if(MK64_3DS_ENABLE_O2R_READER)
             target_sources(mk64-3ds-fast3d-interpreter PRIVATE
                 platform/3ds/source/resource_manager_3ds.cpp
@@ -517,18 +544,30 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
             platform/3ds/source/interpreter_probe.cpp
         )
         target_compile_features(mk64-3ds-interpreter-probe PRIVATE cxx_std_20)
-        target_compile_definitions(mk64-3ds-interpreter-probe PRIVATE F3DEX_GBI_2)
+        target_compile_definitions(mk64-3ds-interpreter-probe PRIVATE F3DEX_GBI=1)
         target_compile_options(mk64-3ds-interpreter-probe PRIVATE
             -O3
             -ffunction-sections
             -fdata-sections
             -Wno-unused-parameter
         )
-        target_link_options(mk64-3ds-interpreter-probe PRIVATE -Wl,--gc-sections)
+        target_link_options(mk64-3ds-interpreter-probe PRIVATE
+            -Wl,--gc-sections
+            -Wl,--allow-multiple-definition
+        )
         target_link_libraries(mk64-3ds-interpreter-probe PRIVATE
             mk64-3ds-fast3d-interpreter
             mk64-3ds-platform
         )
+        if(MK64_3DS_ENABLE_ON_DEVICE_EXTRACTOR)
+            # The compact O2R reader uses miniz from Torch's ZWrapper. The
+            # complete game already receives this through game-engine; the
+            # standalone interpreter probe must request it directly.
+            target_link_libraries(mk64-3ds-interpreter-probe PRIVATE
+                "$<TARGET_FILE:mk64-3ds-o2r-reader>"
+                "$<TARGET_FILE:torch>"
+            )
+        endif()
 
         ctr_create_3dsx(mk64-3ds-interpreter-probe-3dsx
             TARGET mk64-3ds-interpreter-probe
@@ -556,7 +595,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/libultraship/include"
     )
     target_compile_features(mk64-3ds-game-runtime PRIVATE cxx_std_20)
-    target_compile_definitions(mk64-3ds-game-runtime PRIVATE F3DEX_GBI_2)
+    target_compile_definitions(mk64-3ds-game-runtime PRIVATE F3DEX_GBI=1)
     target_compile_options(mk64-3ds-game-runtime PRIVATE
         -O3
         -ffast-math
@@ -572,6 +611,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
     )
 
     add_executable(mk64-3ds-game
+        platform/3ds/source/diagnostics_3ds.cpp
         platform/3ds/source/game_main_3ds.cpp
     )
     target_include_directories(mk64-3ds-game PRIVATE

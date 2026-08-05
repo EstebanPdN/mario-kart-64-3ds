@@ -72,6 +72,7 @@ int main() {
     Mk64Input3DSInit();
     interpreter->SetGfxDebugger(std::make_shared<Fast::GfxDebugger>());
     interpreter->Init(&window, &renderer, "Mario Kart 64 3DS", true, 400, 240, 0, 0);
+    Fast::gfx_set_target_ucode(ucode_f3dex);
 
     std::unordered_map<Mtx*, MtxF> replacements = {
         { &sProjection, MakeProjection() },
