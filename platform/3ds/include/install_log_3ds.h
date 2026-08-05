@@ -15,6 +15,6 @@ void Mk64InstallLogSetCallback(Mk64InstallLogCallback callback);
 }
 
 void Mk64InstallLogBegin();
-void Mk64InstallLogWritef(const char* format, ...);
+extern "C" void Mk64InstallLogWritef(const char* format, ...);
 void Mk64InstallLogClose();
 #endif

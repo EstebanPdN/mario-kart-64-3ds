@@ -38,7 +38,7 @@ extern "C" void Mk64InstallLogSetCallback(Mk64InstallLogCallback callback) {
     gInstallLogCallback = callback;
 }
 
-void Mk64InstallLogWritef(const char* format, ...) {
+extern "C" void Mk64InstallLogWritef(const char* format, ...) {
     if (format == nullptr) {
         return;
     }

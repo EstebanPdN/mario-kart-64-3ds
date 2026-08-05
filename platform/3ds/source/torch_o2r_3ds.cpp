@@ -21,41 +21,13 @@ bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* de
             additionalFiles.emplace_back(additionalFile);
         }
 
-        // libstdc++'s filesystem-backed ifstream is unreliable with the 3DS
-        // SD filesystem.  Read with stdio here so Torch receives the verified
-        // ROM bytes directly instead of reopening the path internally.
-        FILE* romFile = std::fopen(rom, "rb");
-        if (romFile == nullptr) {
-            throw std::runtime_error("Could not open the verified ROM for extraction.");
-        }
-        if (std::fseek(romFile, 0, SEEK_END) != 0) {
-            std::fclose(romFile);
-            throw std::runtime_error("Could not size the verified ROM for extraction.");
-        }
-        const long romSize = std::ftell(romFile);
-        if (romSize <= 0) {
-            std::fclose(romFile);
-            throw std::runtime_error("The verified ROM is empty.");
-        }
-        if (std::fseek(romFile, 0, SEEK_SET) != 0) {
-            std::fclose(romFile);
-            throw std::runtime_error("Could not rewind the verified ROM for extraction.");
-        }
-        Mk64InstallLogWritef("Torch: allocating %ld bytes for ROM data.", romSize);
-        std::vector<uint8_t> romData(static_cast<size_t>(romSize));
-        const size_t bytesRead = std::fread(romData.data(), 1, romData.size(), romFile);
-        if (bytesRead != romData.size() || std::ferror(romFile) != 0) {
-            std::fclose(romFile);
-            throw std::runtime_error("Could not read the verified ROM for extraction.");
-        }
-        std::fclose(romFile);
-        Mk64InstallLogWritef("Torch: loaded %zu ROM bytes using stdio.", romData.size());
-
         // The explicit modding argument is required: without it, C++ prefers
         // the overload that converts sourceDir to bool and silently swaps the
-        // source/destination roles on 3DS.
+        // source/destination roles on 3DS. Use the path constructor so Torch
+        // loads the ROM after parsing config.yml instead of holding 12 MiB
+        // during the YAML load.
         instance = Companion::Instance =
-            new Companion(std::move(romData), ArchiveType::O2R, false, false, sourceDir, destinationDir);
+            new Companion(std::filesystem::path(rom), ArchiveType::O2R, false, false, sourceDir, destinationDir);
         instance->SetAdditionalFiles(additionalFiles);
         instance->Init(ExportType::Binary);
         const std::string outputPath = instance->GetOutputPath();
