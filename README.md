@@ -38,8 +38,6 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.7.3dsx
-build-3ds/game/mk64-3ds-v0.7.cia
 build-3ds/game/mk64-3ds-game-v0.8.3dsx
 build-3ds/game/mk64-3ds-v0.8.cia
 ```
