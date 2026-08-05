@@ -359,22 +359,31 @@ s32 osPfsDeleteFile(OSPfs* pfs, u16 companyCode, u32 gameCode, u8* gameName, u8*
 
 s32 osAiSetFrequency(u32 frequency) {
     sAudioRate = frequency;
-    return Mk64Audio3DSInit(frequency) ? static_cast<s32>(frequency) : -1;
+    return static_cast<s32>(frequency);
 }
 
 u32 osAiGetLength(void) {
+#if defined(MK64_3DS_ENABLE_NDSP_AUDIO)
     return Mk64Audio3DSBufferedFrames() * sizeof(int16_t) * 2;
+#else
+    return 0;
+#endif
 }
 
 s32 osAiSetNextBuffer(void* buffer, size_t bytes) {
     if (buffer == nullptr || bytes == 0 || (bytes % (sizeof(int16_t) * 2)) != 0) {
         return -1;
     }
+#if defined(MK64_3DS_ENABLE_NDSP_AUDIO)
     if (!Mk64Audio3DSInit(sAudioRate)) {
         return -1;
     }
     const size_t frames = bytes / (sizeof(int16_t) * 2);
     return Mk64Audio3DSQueueStereoS16(static_cast<const int16_t*>(buffer), frames) ? 0 : -1;
+#else
+    (void)buffer;
+    return 0;
+#endif
 }
 
 s32 osPiStartDma(OSIoMesg*, s32, s32, uintptr_t source, void* destination, size_t bytes, OSMesgQueue* queue) {

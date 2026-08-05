@@ -1,5 +1,6 @@
 #include "game_data_3ds.h"
 #include "install_log_3ds.h"
+#include "loading_image_3ds.h"
 
 #include <3ds.h>
 
@@ -69,22 +70,55 @@ void PushInstallConsoleLine(const char* format, ...) {
     std::snprintf(gInstallConsoleLines.back().data(), gInstallConsoleLines[0].size(), "%s", line);
 }
 
-void DrawTopPixel(uint8_t* frameBuffer, uint16_t frameBufferHeight, int x, int y, uint8_t r, uint8_t g, uint8_t b) {
+uint16_t PackRgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+void UnpackRgb565(uint16_t color, uint8_t* r, uint8_t* g, uint8_t* b) {
+    const uint8_t rawR = static_cast<uint8_t>((color >> 11) & 0x1F);
+    const uint8_t rawG = static_cast<uint8_t>((color >> 5) & 0x3F);
+    const uint8_t rawB = static_cast<uint8_t>(color & 0x1F);
+    *r = static_cast<uint8_t>((rawR << 3) | (rawR >> 2));
+    *g = static_cast<uint8_t>((rawG << 2) | (rawG >> 4));
+    *b = static_cast<uint8_t>((rawB << 3) | (rawB >> 2));
+}
+
+uint16_t BlendRgb565(uint16_t background, uint8_t r, uint8_t g, uint8_t b, uint8_t alpha) {
+    uint8_t bgR = 0;
+    uint8_t bgG = 0;
+    uint8_t bgB = 0;
+    UnpackRgb565(background, &bgR, &bgG, &bgB);
+    const uint16_t invAlpha = static_cast<uint16_t>(255U - alpha);
+    const uint8_t outR = static_cast<uint8_t>((static_cast<uint16_t>(r) * alpha + bgR * invAlpha) / 255U);
+    const uint8_t outG = static_cast<uint8_t>((static_cast<uint16_t>(g) * alpha + bgG * invAlpha) / 255U);
+    const uint8_t outB = static_cast<uint8_t>((static_cast<uint16_t>(b) * alpha + bgB * invAlpha) / 255U);
+    return PackRgb565(outR, outG, outB);
+}
+
+void DrawTopPixel(uint16_t* frameBuffer, int x, int y, uint16_t color) {
     if (frameBuffer == nullptr || x < 0 || x >= 400 || y < 0 || y >= 240) {
         return;
     }
-
-    const size_t offset = static_cast<size_t>(x) * frameBufferHeight * 3 + static_cast<size_t>(y) * 3;
-    frameBuffer[offset + 0] = b;
-    frameBuffer[offset + 1] = g;
-    frameBuffer[offset + 2] = r;
+    frameBuffer[static_cast<size_t>(x) * 240 + static_cast<size_t>(239 - y)] = color;
 }
 
-void DrawTopRect(uint8_t* frameBuffer, uint16_t frameBufferHeight, int x, int y, int width, int height, uint8_t r,
-                 uint8_t g, uint8_t b) {
+void DrawTopRect(uint16_t* frameBuffer, int x, int y, int width, int height, uint16_t color) {
     for (int py = y; py < y + height; ++py) {
         for (int px = x; px < x + width; ++px) {
-            DrawTopPixel(frameBuffer, frameBufferHeight, px, py, r, g, b);
+            DrawTopPixel(frameBuffer, px, py, color);
+        }
+    }
+}
+
+void DrawTopBlendedRect(uint16_t* frameBuffer, int x, int y, int width, int height, uint8_t r, uint8_t g, uint8_t b,
+                        uint8_t alpha) {
+    for (int py = y; py < y + height; ++py) {
+        for (int px = x; px < x + width; ++px) {
+            if (px < 0 || px >= 400 || py < 0 || py >= 240) {
+                continue;
+            }
+            const uint16_t background = kMk64LoadingImageRgb565[py * 400 + px];
+            DrawTopPixel(frameBuffer, px, py, BlendRgb565(background, r, g, b, alpha));
         }
     }
 }
@@ -92,32 +126,30 @@ void DrawTopRect(uint8_t* frameBuffer, uint16_t frameBufferHeight, int x, int y,
 void DrawLoadingTopScreen(int percent) {
     uint16_t frameBufferWidth = 0;
     uint16_t frameBufferHeight = 0;
-    uint8_t* frameBuffer = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &frameBufferWidth, &frameBufferHeight);
+    uint16_t* frameBuffer =
+        reinterpret_cast<uint16_t*>(gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &frameBufferWidth, &frameBufferHeight));
     (void) frameBufferWidth;
+    (void) frameBufferHeight;
     if (frameBuffer == nullptr) {
         return;
     }
 
-    DrawTopRect(frameBuffer, frameBufferHeight, 0, 0, 400, 240, 5, 8, 16);
-    DrawTopRect(frameBuffer, frameBufferHeight, 0, 0, 400, 26, 16, 31, 54);
-    DrawTopRect(frameBuffer, frameBufferHeight, 0, 26, 400, 4, 230, 56, 62);
-    DrawTopRect(frameBuffer, frameBufferHeight, 0, 30, 400, 3, 245, 245, 245);
-    DrawTopRect(frameBuffer, frameBufferHeight, 0, 33, 400, 4, 48, 126, 211);
-    DrawTopRect(frameBuffer, frameBufferHeight, 26, 58, 348, 98, 12, 20, 36);
-    DrawTopRect(frameBuffer, frameBufferHeight, 26, 58, 348, 2, 255, 202, 52);
-    DrawTopRect(frameBuffer, frameBufferHeight, 26, 154, 348, 2, 255, 202, 52);
-    DrawTopRect(frameBuffer, frameBufferHeight, 30, 62, 4, 90, 255, 202, 52);
-    DrawTopRect(frameBuffer, frameBufferHeight, 366, 62, 4, 90, 255, 202, 52);
+    for (int y = 0; y < 240; ++y) {
+        for (int x = 0; x < 400; ++x) {
+            DrawTopPixel(frameBuffer, x, y, kMk64LoadingImageRgb565[y * 400 + x]);
+        }
+    }
 
     const int clampedPercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
-    const int barX = 48;
-    const int barY = 205;
+    const int barX = 44;
+    const int barY = 201;
     const int barW = 304;
-    const int barH = 12;
-    DrawTopRect(frameBuffer, frameBufferHeight, barX - 2, barY - 2, barW + 4, barH + 4, 8, 12, 22);
-    DrawTopRect(frameBuffer, frameBufferHeight, barX, barY, barW, barH, 38, 44, 58);
-    DrawTopRect(frameBuffer, frameBufferHeight, barX, barY, (barW * clampedPercent) / 100, barH, 255, 202, 52);
-    DrawTopRect(frameBuffer, frameBufferHeight, barX, barY, barW, 2, 245, 248, 255);
+    const int barH = 18;
+    DrawTopBlendedRect(frameBuffer, barX - 4, barY - 4, barW + 8, barH + 8, 3, 5, 12, 150);
+    DrawTopBlendedRect(frameBuffer, barX - 2, barY - 2, barW + 4, barH + 4, 235, 242, 252, 135);
+    DrawTopBlendedRect(frameBuffer, barX, barY, barW, barH, 20, 27, 42, 155);
+    DrawTopBlendedRect(frameBuffer, barX, barY, (barW * clampedPercent) / 100, barH, 38, 235, 95, 205);
+    DrawTopBlendedRect(frameBuffer, barX, barY, barW, 2, 150, 255, 185, 150);
 }
 
 void RedrawInstallScreens(int percent) {
@@ -142,8 +174,8 @@ void OnInstallLogLine(const char* message) {
 
     int entries = 0;
     if (message != nullptr && std::sscanf(message, "O2R progress: %d entries", &entries) == 1) {
-        const int estimatedPercent = 82 + entries / 1200;
-        RedrawInstallScreens(estimatedPercent > 98 ? 98 : estimatedPercent);
+        const int estimatedPercent = 55 + entries / 325;
+        RedrawInstallScreens(estimatedPercent > 99 ? 99 : estimatedPercent);
         return;
     }
     RedrawInstallScreens(gInstallProgressPercent);
@@ -379,7 +411,7 @@ bool Sha1File(const char* path, char outHex[41]) {
         }
         Sha1Update(&ctx, buffer.data(), read);
         processed += static_cast<long>(read);
-        const int percent = size > 0 ? static_cast<int>((processed * 70L) / size) + 10 : 50;
+        const int percent = size > 0 ? static_cast<int>((processed * 45L) / size) + 5 : 50;
         if (percent != lastPercent) {
             DrawProgress("Checking ROM...", path, percent);
             lastPercent = percent;
@@ -414,19 +446,19 @@ bool InstallExtractorFiles(CopyStats* stats) {
     }
 
     if (!MakeDirectory(kInstallerDir)) return false;
-    DrawProgress("Installing local extractor...", "Copying the bundled extractor files to the SD card.", 78);
+    DrawProgress("Installing local extractor...", "Copying the bundled extractor files to the SD card.", 52);
     Mk64InstallLogWrite("Copying bundled Torch metadata from RomFS to SD card.");
     return CopyDirectoryTree(kRomfsExtractorSourceDir, kExtractorSourceDir, stats);
 }
 
 bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
-    DrawProgress("ROM verified.", "Preparing the local extractor on the SD card.", 76);
+    DrawProgress("ROM verified.", "Preparing the local extractor on the SD card.", 50);
     Result romfsResult = romfsInit();
     Mk64InstallLogWritef("RomFS initialization returned 0x%08lX.", static_cast<unsigned long>(romfsResult));
     if (R_FAILED(romfsResult)) {
         std::snprintf(error, errorSize, "RomFS could not be opened from this install.");
-        DrawProgress("Extractor metadata unavailable.", error, 76);
+        DrawProgress("Extractor metadata unavailable.", error, 50);
         svcSleepThread(1800LL * 1000LL * 1000LL);
         return false;
     }
@@ -439,7 +471,7 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
                              static_cast<unsigned long>(copyStats.fileCount),
                              static_cast<unsigned long long>(copyStats.byteCount), errno);
         std::snprintf(error, errorSize, "Could not copy the extractor files to /3ds/MK64/.");
-        DrawProgress("Extractor install failed.", error, 78);
+        DrawProgress("Extractor install failed.", error, 52);
         svcSleepThread(1800LL * 1000LL * 1000LL);
         return false;
     }
@@ -459,7 +491,7 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
         Mk64InstallLogWritef("Could not remove previous temporary O2R archive; errno=%d.", errno);
     }
 
-    DrawProgress("Generating mk64.o2r...", "Writing the archive directly to the SD card. This can take several minutes.", 82);
+    DrawProgress("Generating mk64.o2r...", "Writing the archive directly to the SD card. This can take several minutes.", 55);
     Mk64InstallLogWrite("Starting O2R archive generation.");
     char originalDirectory[768] = {};
     if (getcwd(originalDirectory, sizeof(originalDirectory)) == nullptr) {
@@ -520,13 +552,13 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     if (error[0] == '\0') {
         std::snprintf(error, errorSize, "The temporary O2R archive could not be finalized on the SD card.");
     }
-    DrawProgress("O2R generation failed.", error, 82);
+    DrawProgress("O2R generation failed.", error, gInstallProgressPercent < 55 ? 55 : gInstallProgressPercent);
     svcSleepThread(2500LL * 1000LL * 1000LL);
     return false;
 #else
     (void)romPath;
     std::snprintf(error, errorSize, "This build was made without the on-device extractor.");
-    DrawProgress("Extractor unavailable.", "This build was made without the on-device Torch pipeline.", 82);
+    DrawProgress("Extractor unavailable.", "This build was made without the on-device Torch pipeline.", 55);
     svcSleepThread(1800LL * 1000LL * 1000LL);
     return false;
 #endif
@@ -562,6 +594,8 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
     }
 
     gfxInitDefault();
+    gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
+    gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
     consoleInit(GFX_BOTTOM, &gBottomConsole);
     gInstallConsoleLineCount = 0;
     gInstallProgressPercent = 0;

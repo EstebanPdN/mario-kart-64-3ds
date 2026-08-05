@@ -37,8 +37,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.4.3dsx
-build-3ds/game/mk64-3ds-v0.4.cia
+build-3ds/game/mk64-3ds-game-v0.5.3dsx
+build-3ds/game/mk64-3ds-v0.5.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -81,9 +81,9 @@ The log records the ROM check, RomFS metadata copy, O2R archive progress, finali
 It is created on the SD card only; do not attach it to a public issue or release because it may contain local device
 details.
 
-During this first-run step the top screen shows a clean loading screen and progress bar, while the bottom screen mirrors
-the live installer output. The 3DS O2R writer spools the ZIP central directory to the SD card instead of keeping it in
-RAM.
+During this first-run step the top screen shows the bundled loading image with an overlaid progress bar, while the
+bottom screen mirrors the live installer output. The game memory arena is allocated only after game-data preparation,
+and the 3DS O2R writer spools the ZIP central directory to the SD card instead of keeping it in RAM.
 
 Install the CIA with your normal homebrew installer, or place the 3DSX in a Homebrew Launcher application folder.
 
