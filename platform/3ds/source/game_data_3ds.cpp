@@ -11,8 +11,12 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
+
+#include "o2r_archive_reader.hpp"
 
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
 bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* destinationDir,
@@ -451,6 +455,25 @@ bool InstallExtractorFiles(CopyStats* stats) {
     return CopyDirectoryTree(kRomfsExtractorSourceDir, kExtractorSourceDir, stats);
 }
 
+namespace {
+bool IsValidArchive(const char* path) {
+#if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
+    if (path == nullptr || path[0] == '\0') {
+        return false;
+    }
+    std::vector<std::string> entries;
+    if (mk64_3ds::O2rArchiveReader::ListEntries(path, &entries) != mk64_3ds::O2rReadResult::Ok ||
+        entries.empty()) {
+        return false;
+    }
+    return true;
+#else
+    (void)path;
+    return true;
+#endif
+}
+} // namespace
+
 bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
     DrawProgress("ROM verified.", "Preparing the local extractor on the SD card.", 50);
@@ -581,16 +604,32 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
     Mk64InstallLogWrite("Installation check started.");
 
     if (FileExists(kPrimaryArchivePath)) {
-        Mk64InstallLogWrite("Existing O2R archive found; no installation work is needed.");
-        Mk64InstallLogClose();
-        SetResult(&result, MK64_GAME_DATA_READY, kPrimaryArchivePath, "Game data is ready.");
-        return result;
+        Mk64InstallLogWrite("Validating existing mk64.o2r archive.");
+        if (!IsValidArchive(kPrimaryArchivePath)) {
+            Mk64InstallLogWrite("Found O2R archive appears invalid; regenerating from ROM.");
+            unlink(kPrimaryArchivePath);
+            Mk64InstallLogWrite("Removed invalid archive before re-extraction.");
+        } else {
+            Mk64InstallLogWrite("Existing O2R archive is valid.");
+            Mk64InstallLogWrite("Existing O2R archive found; no installation work is needed.");
+            Mk64InstallLogClose();
+            SetResult(&result, MK64_GAME_DATA_READY, kPrimaryArchivePath, "Game data is ready.");
+            return result;
+        }
     }
     if (FileExists(kLegacyArchivePath)) {
-        Mk64InstallLogWrite("Existing legacy O2R archive found; no installation work is needed.");
-        Mk64InstallLogClose();
-        SetResult(&result, MK64_GAME_DATA_READY, kLegacyArchivePath, "Game data is ready.");
-        return result;
+        Mk64InstallLogWrite("Validating legacy mk64.o2r archive.");
+        if (!IsValidArchive(kLegacyArchivePath)) {
+            Mk64InstallLogWrite("Found legacy O2R archive appears invalid; removing and regenerating.");
+            unlink(kLegacyArchivePath);
+            Mk64InstallLogWrite("Removed invalid legacy archive before extraction.");
+        } else {
+            Mk64InstallLogWrite("Existing legacy O2R archive is valid.");
+            Mk64InstallLogWrite("Existing legacy O2R archive found; no installation work is needed.");
+            Mk64InstallLogClose();
+            SetResult(&result, MK64_GAME_DATA_READY, kLegacyArchivePath, "Game data is ready.");
+            return result;
+        }
     }
 
     gfxInitDefault();

@@ -22,6 +22,9 @@ std::shared_ptr<Fast::Interpreter> sInterpreter;
 std::shared_ptr<Fast::GfxDebugger> sDebugger;
 const std::unordered_map<Mtx*, MtxF> sNoMatrixReplacements;
 uint64_t sFrameCounter = 0;
+uint64_t sRendererFaultCounter = 0;
+bool sRendererFaulted = false;
+constexpr uint64_t kRendererFaultTolerance = 16;
 
 void SetRendererStage(const char* stage) {
     // Persist every boundary of the first few submissions. If real hardware
@@ -33,6 +36,15 @@ void SetRendererStage(const char* stage) {
         Mk64Diagnostics3DSSetStage(stage);
     }
 }
+}
+
+void SetRendererFault(const char* stage, const char* reason) {
+    ++sRendererFaultCounter;
+    sRendererFaulted = true;
+    Mk64Diagnostics3DSFailure(stage, reason);
+    if (sRendererFaultCounter > kRendererFaultTolerance) {
+        Mk64Diagnostics3DSSetStage("renderer-fault-limit-reached");
+    }
 }
 
 extern "C" Gfx* gDisplayListHead;
@@ -82,6 +94,13 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     const uintptr_t listEnd = reinterpret_cast<uintptr_t>(gDisplayListHead);
     const size_t listBytes = listEnd >= listBegin ? listEnd - listBegin : 0;
     Mk64Diagnostics3DSSetDisplayList(commands, listBytes);
+    Mk64Diagnostics3DSSetStage("renderer-frame-start");
+    if (sRendererFaulted) {
+        // Keep gameplay/input alive if a frame decoding exception occurs.
+        // Repeated failures are surfaced through diagnostics; we avoid ending
+        // the window in-place so the user can still capture L+R+A dump.
+        return;
+    }
     SetRendererStage("renderer-window-events");
     sInterpreter->HandleWindowEvents();
     if (!sWindow->IsRunning() || !sInterpreter->IsFrameReady()) {
@@ -103,15 +122,13 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     } catch (const std::exception& exception) {
         // Leave Citro3D in a closed state even if Fast3D rejects a malformed
         // command or runs out of memory. The diagnostic thread and runtime log
-        // then remain usable instead of terminating through std::terminate.
+        // remain usable instead of terminating through std::terminate.
+        SetRendererFault("renderer-exception", exception.what());
         sRenderer->EndFrame();
-        Mk64Diagnostics3DSFailure("renderer-exception", exception.what());
-        sWindow->Close();
         return;
     } catch (...) {
         sRenderer->EndFrame();
-        Mk64Diagnostics3DSFailure("renderer-exception", "unknown C++ exception");
-        sWindow->Close();
+        SetRendererFault("renderer-exception", "unknown C++ exception");
         return;
     }
     SetRendererStage("renderer-frame-presented");
