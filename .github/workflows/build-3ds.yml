@@ -37,7 +37,7 @@ jobs:
           git -C "$GITHUB_WORKSPACE" diff --check
           ! git -C "$GITHUB_WORKSPACE" ls-files | grep -Ei '(^|/)[^/]*\.(z64|n64|v64|sav|sra|fla|eep)$'
           ! git -C "$GITHUB_WORKSPACE" ls-files | grep -E '(^|/)(AGENTS\.md|PROTOCOL\.md|WORKFLOW\.md|GITHUB_RELEASE_WORKFLOW\.md)$'
-          test -f "build-3ds/game/mk64-3ds-v${VERSION}.3dsx"
+          test -f "build-3ds/game/mk64-3ds-game-v${VERSION}.3dsx"
           if [ -f "build-3ds/game/mk64-3ds-v${VERSION}.cia" ]; then
             echo "CIA package was built."
           else
@@ -50,5 +50,5 @@ jobs:
           name: mk64-3ds-packages
           if-no-files-found: error
           path: |
-            build-3ds/game/mk64-3ds-v*.3dsx
+            build-3ds/game/mk64-3ds-game-v*.3dsx
             build-3ds/game/mk64-3ds-v*.cia

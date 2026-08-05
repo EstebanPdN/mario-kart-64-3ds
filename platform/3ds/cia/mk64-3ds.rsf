@@ -84,6 +84,8 @@ AccessControlInfo:
     OutputDebugString: 61
   ServiceAccessControl:
     - APT:U
+    - dsp::DSP
+    - fs:USER
     - gsp::Gpu
     - hid:USER
     - ptm:u
@@ -91,7 +93,7 @@ AccessControlInfo:
 SystemControlInfo:
   SaveDataSize: 0KB
   RemasterVersion: 3
-  StackSize: 0x40000
+  StackSize: 0x400000
   Dependency:
     gsp: 0x0004013000001c02
     hid: 0x0004013000001d02

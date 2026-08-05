@@ -1,4 +1,5 @@
 /build-3ds/
+/build-3ds-*/
 *.elf
 *.3dsx
 *.cia
@@ -11,4 +12,4 @@
 *.sra
 *.fla
 *.eep
-/.DS_Store
+.DS_Store
