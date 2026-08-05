@@ -28,27 +28,28 @@ bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* de
         if (romFile == nullptr) {
             throw std::runtime_error("Could not open the verified ROM for extraction.");
         }
-        std::vector<uint8_t> romData;
-        std::array<uint8_t, 64 * 1024> buffer{};
-        while (true) {
-            const size_t bytesRead = std::fread(buffer.data(), 1, buffer.size(), romFile);
-            if (bytesRead != 0) {
-                romData.insert(romData.end(), buffer.data(), buffer.data() + bytesRead);
-            }
-            if (bytesRead != buffer.size()) {
-                if (std::ferror(romFile) != 0) {
-                    std::fclose(romFile);
-                    throw std::runtime_error("Could not read the verified ROM for extraction.");
-                }
-                break;
-            }
+        if (std::fseek(romFile, 0, SEEK_END) != 0) {
+            std::fclose(romFile);
+            throw std::runtime_error("Could not size the verified ROM for extraction.");
         }
-        std::fclose(romFile);
-        if (romData.empty()) {
+        const long romSize = std::ftell(romFile);
+        if (romSize <= 0) {
+            std::fclose(romFile);
             throw std::runtime_error("The verified ROM is empty.");
         }
+        if (std::fseek(romFile, 0, SEEK_SET) != 0) {
+            std::fclose(romFile);
+            throw std::runtime_error("Could not rewind the verified ROM for extraction.");
+        }
+        Mk64InstallLogWritef("Torch: allocating %ld bytes for ROM data.", romSize);
+        std::vector<uint8_t> romData(static_cast<size_t>(romSize));
+        const size_t bytesRead = std::fread(romData.data(), 1, romData.size(), romFile);
+        if (bytesRead != romData.size() || std::ferror(romFile) != 0) {
+            std::fclose(romFile);
+            throw std::runtime_error("Could not read the verified ROM for extraction.");
+        }
+        std::fclose(romFile);
         Mk64InstallLogWritef("Torch: loaded %zu ROM bytes using stdio.", romData.size());
-        Mk64InstallLogWritef("Torch: SHA-1 calculated by Torch: %s", Companion::CalculateHash(romData).c_str());
 
         // The explicit modding argument is required: without it, C++ prefers
         // the overload that converts sourceDir to bool and silently swaps the

@@ -1,6 +1,5 @@
 #include "game_data_3ds.h"
 #include "install_log_3ds.h"
-#include "loading_image_3ds.h"
 
 #include <3ds.h>
 
@@ -99,13 +98,16 @@ void DrawLoadingTopScreen(int percent) {
         return;
     }
 
-    for (int y = 0; y < kMk64LoadingImageHeight; ++y) {
-        for (int x = 0; x < kMk64LoadingImageWidth; ++x) {
-            const size_t offset = static_cast<size_t>((y * kMk64LoadingImageWidth + x) * 3);
-            DrawTopPixel(frameBuffer, frameBufferHeight, x, y, kMk64LoadingImageRgb888[offset],
-                         kMk64LoadingImageRgb888[offset + 1], kMk64LoadingImageRgb888[offset + 2]);
-        }
-    }
+    DrawTopRect(frameBuffer, frameBufferHeight, 0, 0, 400, 240, 5, 8, 16);
+    DrawTopRect(frameBuffer, frameBufferHeight, 0, 0, 400, 26, 16, 31, 54);
+    DrawTopRect(frameBuffer, frameBufferHeight, 0, 26, 400, 4, 230, 56, 62);
+    DrawTopRect(frameBuffer, frameBufferHeight, 0, 30, 400, 3, 245, 245, 245);
+    DrawTopRect(frameBuffer, frameBufferHeight, 0, 33, 400, 4, 48, 126, 211);
+    DrawTopRect(frameBuffer, frameBufferHeight, 26, 58, 348, 98, 12, 20, 36);
+    DrawTopRect(frameBuffer, frameBufferHeight, 26, 58, 348, 2, 255, 202, 52);
+    DrawTopRect(frameBuffer, frameBufferHeight, 26, 154, 348, 2, 255, 202, 52);
+    DrawTopRect(frameBuffer, frameBufferHeight, 30, 62, 4, 90, 255, 202, 52);
+    DrawTopRect(frameBuffer, frameBufferHeight, 366, 62, 4, 90, 255, 202, 52);
 
     const int clampedPercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
     const int barX = 48;
