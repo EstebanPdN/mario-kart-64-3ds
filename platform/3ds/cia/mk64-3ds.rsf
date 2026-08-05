@@ -3,6 +3,9 @@ BasicInfo:
   ProductCode: "CTR-P-MK63"
   Logo: Homebrew
 
+RomFs:
+  RootPath: $(APP_ROMFS)
+
 TitleInfo:
   Category: Application
   UniqueId: 0x5A270

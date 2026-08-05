@@ -10,10 +10,11 @@ workspace.
 
 ## Current status
 
-The native ARM11 executable, Citro3D Fast3D renderer, O2R resource runtime, 3DS input, NDSP audio output, and
-3DSX/CIA packaging pipeline compile successfully. The vanilla game remains a work in progress and is not yet a
-stable release. The original game simulation runs at 30 Hz; the renderer presents that state at the 3DS display's
-60 Hz refresh rate. A true interpolated 60 FPS mode and sustained real-hardware performance have not been claimed.
+The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O2R resource runtime, 3DS input,
+NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game remains a work in
+progress and is not yet a stable release. The original game simulation runs at 30 Hz; the renderer presents that
+state at the 3DS display's 60 Hz refresh rate. A true interpolated 60 FPS mode and sustained real-hardware
+performance have not been claimed.
 
 Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
 3DS and New Nintendo 3DS performance still require real-hardware profiling.
@@ -59,10 +60,15 @@ sd:/3ds/MK64/mk64.z64
 sd:/3ds/MK64/baserom.us.z64
 ```
 
-On first boot, the 3DS build checks the ROM and shows a preparation screen. The current `v0.1` build can validate
-the ROM from this folder and will automatically launch when `sd:/3ds/MK64/mk64.o2r` already exists. The full
-on-device O2R generator is still being ported from SpaghettiKart's desktop `torch` extractor, so this release does
-not embed or redistribute generated game data.
+On first boot, the 3DS build checks the ROM and shows a preparation screen while it runs SpaghettiKart's Torch
+asset pipeline directly on the 3DS. If extraction succeeds, it creates:
+
+```text
+sd:/3ds/MK64/mk64.o2r
+```
+
+Later launches reuse that generated archive. This release does not embed or redistribute the ROM, generated O2R
+archive, or extracted game data.
 
 Install the CIA with your normal homebrew installer, or place the 3DSX in a Homebrew Launcher application folder.
 

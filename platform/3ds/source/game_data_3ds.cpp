@@ -9,10 +9,17 @@
 #include <cstring>
 #include <sys/stat.h>
 
+#if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
+bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* destinationDir,
+                          const char* additionalFile);
+#endif
+
 namespace {
 constexpr const char* kDataDir = "sdmc:/3ds/MK64";
 constexpr const char* kPrimaryArchivePath = "sdmc:/3ds/MK64/mk64.o2r";
 constexpr const char* kLegacyArchivePath = "sdmc:/3ds/mk64-3ds/mk64.o2r";
+constexpr const char* kExtractorSourceDir = "romfs:/torch";
+constexpr const char* kExtractorAdditionalFile = "romfs:/torch/meta/mods.toml";
 constexpr const char* kExpectedSha1 = "579c48e211ae952530ffc8738709f078d5dd215e";
 constexpr std::array<const char*, 3> kRomPaths = {
     "sdmc:/3ds/MK64/Mario Kart 64.z64",
@@ -218,6 +225,41 @@ const char* FindRom() {
     }
     return nullptr;
 }
+
+bool GenerateArchiveFromRom(const char* romPath) {
+#if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
+    DrawProgress("ROM verified.", "Generating mk64.o2r on the 3DS. This can take several minutes.", 82);
+    Result romfsResult = romfsInit();
+    if (R_FAILED(romfsResult)) {
+        DrawProgress("Extractor metadata unavailable.", "RomFS could not be opened from this install.", 82);
+        svcSleepThread(1800LL * 1000LL * 1000LL);
+        return false;
+    }
+
+    bool ok = false;
+    try {
+        ok = Mk64Torch3DSBuildO2R(romPath, kExtractorSourceDir, kDataDir, kExtractorAdditionalFile);
+    } catch (...) {
+        ok = false;
+    }
+
+    romfsExit();
+    if (ok && FileExists(kPrimaryArchivePath)) {
+        DrawProgress("Game data generated.", "mk64.o2r was created in /3ds/MK64/.", 100);
+        svcSleepThread(900LL * 1000LL * 1000LL);
+        return true;
+    }
+
+    DrawProgress("O2R generation failed.", "Keep the ROM in /3ds/MK64/ and reinstall this build if needed.", 82);
+    svcSleepThread(2500LL * 1000LL * 1000LL);
+    return false;
+#else
+    (void)romPath;
+    DrawProgress("Extractor unavailable.", "This build was made without the on-device Torch pipeline.", 82);
+    svcSleepThread(1800LL * 1000LL * 1000LL);
+    return false;
+#endif
+}
 } // namespace
 
 extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
@@ -267,11 +309,14 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
         return result;
     }
 
-    DrawProgress("ROM verified.", "The 3DS extractor still needs the Torch asset pipeline port.", 85);
-    svcSleepThread(1200LL * 1000LL * 1000LL);
+    if (!GenerateArchiveFromRom(romPath)) {
+        gfxExit();
+        SetResult(&result, MK64_GAME_DATA_ERROR, nullptr,
+                  "ROM verified, but mk64.o2r could not be generated on the 3DS.");
+        return result;
+    }
     gfxExit();
 
-    SetResult(&result, MK64_GAME_DATA_EXTRACTOR_PENDING, nullptr,
-              "ROM verified in sd:/3ds/MK64/. On-device O2R generation is not complete in this build.");
+    SetResult(&result, MK64_GAME_DATA_READY, kPrimaryArchivePath, "Game data is ready.");
     return result;
 }
