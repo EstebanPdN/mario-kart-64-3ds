@@ -24,8 +24,14 @@ fi
 
 cmake -S "${ROOT}" -B "${BUILD}" \
   -DCMAKE_TOOLCHAIN_FILE="${DEVKITPRO}/cmake/3DS.cmake" \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build "${BUILD}" --target mk64-3ds-3dsx --parallel "${MK64_3DS_JOBS:-4}"
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMK64_3DS_BUILD_GAME_CORE=ON \
+  -DMK64_3DS_BUILD_GAME_ENGINE=ON \
+  -DMK64_3DS_ENABLE_O2R_READER=ON \
+  -DMK64_3DS_ENABLE_FAST3D_RENDERER=ON \
+  -DMK64_3DS_BUILD_RENDERER_PROBE=OFF \
+  -DMK64_3DS_BUILD_INTERPRETER_PROBE=ON
+cmake --build "${BUILD}" --target mk64-3ds-game-3dsx --parallel "${MK64_3DS_JOBS:-4}"
 
 if [[ ! -x "${MAKEROM}" || ! -x "${BANNERTOOL}" ]]; then
   printf '3DSX ready; makerom/bannertool are unavailable for CIA packaging.\n'
@@ -41,9 +47,9 @@ fi
   cd "${ROOT}"
   "${MAKEROM}" -f cia -o "${BUILD}/mk64-3ds-v${VERSION}.cia" \
     -rsf "${ROOT}/platform/3ds/cia/mk64-3ds.rsf" -target t -exefslogo \
-    -elf "${BUILD}/mk64-3ds.elf" -icon "${BUILD}/mk64-3ds.smdh" \
+    -elf "${BUILD}/mk64-3ds-game.elf" -icon "${BUILD}/mk64-3ds.smdh" \
     -banner "${BUILD}/mk64-3ds.bnr"
 )
 
 printf 'Ready:\n  %s\n  %s\n' \
-  "${BUILD}/mk64-3ds-v${VERSION}.3dsx" "${BUILD}/mk64-3ds-v${VERSION}.cia"
+  "${BUILD}/mk64-3ds-game-v${VERSION}.3dsx" "${BUILD}/mk64-3ds-v${VERSION}.cia"
