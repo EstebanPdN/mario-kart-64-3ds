@@ -198,6 +198,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/cvar_3ds.cpp
         platform/3ds/source/frame_interpolation_3ds.cpp
         platform/3ds/source/editor_stubs_3ds.cpp
+        platform/3ds/source/game_data_3ds.cpp
         platform/3ds/source/game_state_3ds.cpp
         platform/3ds/source/gbi_middleware_3ds.cpp
         platform/3ds/source/vanilla_stubs_3ds.cpp
