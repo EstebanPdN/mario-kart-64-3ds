@@ -153,9 +153,18 @@ index a881533..20dae56 100644
      }
  
 diff --git a/src/Companion.h b/src/Companion.h
-index 40a664e..cc3d38c 100644
+index 40a664e..45022f2 100644
 --- a/src/Companion.h
 +++ b/src/Companion.h
+@@ -125,7 +125,7 @@ public:
+     explicit Companion(std::vector<uint8_t> rom, const ArchiveType otr, const bool debug, const bool modding = false,
+                        const std::string& srcDir = "", const std::string& destPath = "") : gCartridge(nullptr),
+                        gSourceDirectory(srcDir), gDestinationDirectory(destPath) {
+-        this->gRomData = rom;
++        this->gRomData = std::move(rom);
+         this->gConfig.otrMode = otr;
+         this->gConfig.debug = debug;
+         this->gConfig.modding = modding;
 @@ -156,7 +156,7 @@ public:
      GBIVersion GetGBIVersion() const { return this->gConfig.gbi.version; }
      GBIMinorVersion GetGBIMinorVersion() const { return  this->gConfig.gbi.subversion; }
@@ -205,16 +214,15 @@ index 5e0096e..61c8bff 100644
  #ifdef USE_STORMLIB
  private:
 diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
-index 6440b62..3706627 100644
+index 6440b62..8a118d2 100644
 --- a/src/archive/ZWrapper.cpp
 +++ b/src/archive/ZWrapper.cpp
-@@ -5,21 +5,100 @@
+@@ -5,21 +5,134 @@
  
  #include "spdlog/spdlog.h"
  #include <Companion.h>
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +#include <cerrno>
-+#include <climits>
 +#include <cstdio>
 +#include <cstring>
 +#include <stdexcept>
@@ -224,45 +232,75 @@ index 6440b62..3706627 100644
 +
 +namespace {
 +constexpr size_t kMk64ZipWriteChunkSize = 64 * 1024;
-+}
 +
-+struct ZWrapper::Mk64ZipFileWriter {
-+    FILE* file = nullptr;
-+    int errorNumber = 0;
-+    const char* stage = "none";
-+};
-+
-+static size_t Mk64ZipWrite(void* opaque, mz_uint64 fileOffset, const void* buffer, size_t size) {
-+    auto* writer = static_cast<ZWrapper::Mk64ZipFileWriter*>(opaque);
-+    if (writer == nullptr || writer->file == nullptr || fileOffset > LONG_MAX) {
-+        if (writer != nullptr) {
-+            writer->stage = "seek";
-+            writer->errorNumber = EFBIG;
-+        }
-+        return 0;
++bool Mk64WriteAll(FILE* file, const void* buffer, size_t size) {
++    if (file == nullptr) {
++        errno = EBADF;
++        return false;
 +    }
-+
-+    errno = 0;
-+    if (std::fseek(writer->file, static_cast<long>(fileOffset), SEEK_SET) != 0) {
-+        writer->stage = "seek";
-+        writer->errorNumber = errno != 0 ? errno : EIO;
-+        return 0;
-+    }
-+
 +    const auto* bytes = static_cast<const unsigned char*>(buffer);
 +    size_t totalWritten = 0;
 +    while (totalWritten < size) {
 +        const size_t chunkSize = std::min(size - totalWritten, kMk64ZipWriteChunkSize);
 +        errno = 0;
-+        const size_t written = std::fwrite(bytes + totalWritten, 1, chunkSize, writer->file);
++        const size_t written = std::fwrite(bytes + totalWritten, 1, chunkSize, file);
 +        totalWritten += written;
 +        if (written != chunkSize) {
-+            writer->stage = "write";
-+            writer->errorNumber = errno != 0 ? errno : EIO;
-+            return totalWritten;
++            if (errno == 0) errno = EIO;
++            return false;
 +        }
 +    }
-+    return size;
++    return true;
++}
++
++bool Mk64WriteU16(FILE* file, uint16_t value) {
++    const unsigned char bytes[2] = {
++        static_cast<unsigned char>(value & 0xFF),
++        static_cast<unsigned char>((value >> 8) & 0xFF),
++    };
++    return Mk64WriteAll(file, bytes, sizeof(bytes));
++}
++
++bool Mk64WriteU32(FILE* file, uint32_t value) {
++    const unsigned char bytes[4] = {
++        static_cast<unsigned char>(value & 0xFF),
++        static_cast<unsigned char>((value >> 8) & 0xFF),
++        static_cast<unsigned char>((value >> 16) & 0xFF),
++        static_cast<unsigned char>((value >> 24) & 0xFF),
++    };
++    return Mk64WriteAll(file, bytes, sizeof(bytes));
++}
++
++bool Mk64AppendFile(FILE* output, FILE* input, uint64_t* bytesWritten) {
++    if (output == nullptr || input == nullptr) {
++        errno = EBADF;
++        return false;
++    }
++    errno = 0;
++    if (std::fseek(input, 0, SEEK_SET) != 0) {
++        if (errno == 0) errno = EIO;
++        return false;
++    }
++    unsigned char buffer[kMk64ZipWriteChunkSize];
++    while (true) {
++        const size_t read = std::fread(buffer, 1, sizeof(buffer), input);
++        if (read > 0) {
++            if (!Mk64WriteAll(output, buffer, read)) {
++                return false;
++            }
++            if (bytesWritten != nullptr) {
++                *bytesWritten += read;
++            }
++        }
++        if (read < sizeof(buffer)) {
++            if (std::ferror(input) != 0) {
++                errno = EIO;
++                return false;
++            }
++            return true;
++        }
++    }
++}
 +}
 +#endif
  #include <miniz/zip_file.hpp>
@@ -272,11 +310,14 @@ index 6440b62..3706627 100644
  ZWrapper::ZWrapper(const std::string& path) {
      this->mPath = path;
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
-+    this->mArchive = new mz_zip_archive{};
-+    this->mWriter = new Mk64ZipFileWriter{};
++    this->mArchiveFile = nullptr;
++    this->mCentralDirectoryFile = nullptr;
++    this->mCentralDirectoryPath = path + ".cd";
 +    this->mArchiveOpen = false;
 +    this->mEntriesWritten = 0;
 +    this->mPayloadBytesWritten = 0;
++    this->mArchiveBytesWritten = 0;
++    this->mCentralDirectoryBytesWritten = 0;
 +#else
      this->mZip = new miniz_cpp::zip_file;
 +#endif
@@ -288,19 +329,21 @@ index 6440b62..3706627 100644
 +    if(fs::exists(mPath)) {
 +        fs::remove(mPath);
 +    }
-+    this->mWriter->file = std::fopen(mPath.c_str(), "wb");
-+    if(this->mWriter->file == nullptr) {
++    if(fs::exists(mCentralDirectoryPath)) {
++        fs::remove(mCentralDirectoryPath);
++    }
++    this->mArchiveFile = std::fopen(mPath.c_str(), "wb");
++    if(this->mArchiveFile == nullptr) {
 +        throw std::runtime_error("Could not open the temporary O2R archive on the SD card");
 +    }
-+    this->mArchive->m_pWrite = Mk64ZipWrite;
-+    this->mArchive->m_pIO_opaque = this->mWriter;
-+    this->mArchiveOpen = mz_zip_writer_init(this->mArchive, 0) == MZ_TRUE;
-+    if(!this->mArchiveOpen) {
-+        std::fclose(this->mWriter->file);
-+        this->mWriter->file = nullptr;
-+        throw std::runtime_error("Could not create the O2R archive on the SD card");
++    this->mCentralDirectoryFile = std::fopen(mCentralDirectoryPath.c_str(), "wb+");
++    if(this->mCentralDirectoryFile == nullptr) {
++        std::fclose(this->mArchiveFile);
++        this->mArchiveFile = nullptr;
++        throw std::runtime_error("Could not open the temporary O2R central directory on the SD card");
 +    }
-+    Mk64InstallLogWrite("O2R writer opened with 64 KiB chunked SD writes.");
++    this->mArchiveOpen = true;
++    Mk64InstallLogWrite("O2R writer opened with SD-spooled ZIP central directory.");
 +#endif
      return 0;
  }
@@ -310,7 +353,7 @@ index 6440b62..3706627 100644
      char* fileData = data.data();
      size_t fileSize = data.size();
  
-@@ -34,11 +113,74 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
+@@ -34,11 +147,130 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
          stream.close();
      }
  
@@ -318,15 +361,61 @@ index 6440b62..3706627 100644
 +    if(!this->mArchiveOpen) {
 +        throw std::runtime_error("The O2R archive is not open");
 +    }
-+    if(mz_zip_writer_add_mem(this->mArchive, path.c_str(), data.data(), data.size(), MZ_NO_COMPRESSION) != MZ_TRUE) {
++    if(path.size() > 0xFFFF || data.size() > 0xFFFFFFFFULL || this->mArchiveBytesWritten > 0xFFFFFFFFULL) {
++        throw std::runtime_error("The generated O2R archive exceeded the 3DS ZIP32 writer limit");
++    }
++
++    const uint32_t crc = static_cast<uint32_t>(mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(data.data()),
++                                                       data.size()));
++    const uint32_t zipFileSize = static_cast<uint32_t>(data.size());
++    const uint16_t nameSize = static_cast<uint16_t>(path.size());
++    const uint32_t localHeaderOffset = static_cast<uint32_t>(this->mArchiveBytesWritten);
++
++    bool ok = true;
++    ok = ok && Mk64WriteU32(this->mArchiveFile, 0x04034b50);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 20);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    ok = ok && Mk64WriteU32(this->mArchiveFile, crc);
++    ok = ok && Mk64WriteU32(this->mArchiveFile, zipFileSize);
++    ok = ok && Mk64WriteU32(this->mArchiveFile, zipFileSize);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, nameSize);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    ok = ok && Mk64WriteAll(this->mArchiveFile, path.data(), path.size());
++    ok = ok && (data.empty() || Mk64WriteAll(this->mArchiveFile, data.data(), data.size()));
++
++    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, 0x02014b50);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 20);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 20);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, crc);
++    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, zipFileSize);
++    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, zipFileSize);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, nameSize);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, localHeaderOffset);
++    ok = ok && Mk64WriteAll(this->mCentralDirectoryFile, path.data(), path.size());
++
++    if(!ok) {
 +        char message[256] = {};
-+        std::snprintf(message, sizeof(message), "Could not write extracted file %s to the O2R archive (stage=%s errno=%d)",
-+                      path.c_str(), this->mWriter->stage, this->mWriter->errorNumber);
++        std::snprintf(message, sizeof(message), "Could not write extracted file %s to the O2R archive (errno=%d)",
++                      path.c_str(), errno);
 +        Mk64InstallLogWrite(message);
 +        throw std::runtime_error(message);
 +    }
 +    ++this->mEntriesWritten;
 +    this->mPayloadBytesWritten += data.size();
++    this->mArchiveBytesWritten += 30 + path.size() + data.size();
++    this->mCentralDirectoryBytesWritten += 46 + path.size();
 +    if((this->mEntriesWritten % 1000) == 0) {
 +        char message[192] = {};
 +        std::snprintf(message, sizeof(message), "O2R progress: %lu entries, %llu payload bytes.",
@@ -345,40 +434,50 @@ index 6440b62..3706627 100644
 +    if(!this->mArchiveOpen) {
 +        return -1;
 +    }
-+    const bool finalized = mz_zip_writer_finalize_archive(this->mArchive) == MZ_TRUE;
-+    const uint64_t archiveBytes = this->mArchive->m_archive_size;
-+    const int writerError = this->mWriter->errorNumber;
-+    const char* writerStage = this->mWriter->stage;
-+    const bool ended = mz_zip_writer_end(this->mArchive) == MZ_TRUE;
-+    bool flushed = false;
-+    bool closed = false;
++    bool ok = true;
 +    int closeError = 0;
-+    if(this->mWriter->file != nullptr) {
++    const uint64_t centralDirectoryOffset = this->mArchiveBytesWritten;
++    ok = ok && std::fflush(this->mCentralDirectoryFile) == 0;
++    ok = ok && Mk64AppendFile(this->mArchiveFile, this->mCentralDirectoryFile, &this->mArchiveBytesWritten);
++    ok = ok && Mk64WriteU32(this->mArchiveFile, 0x06054b50);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, static_cast<uint16_t>(this->mEntriesWritten));
++    ok = ok && Mk64WriteU16(this->mArchiveFile, static_cast<uint16_t>(this->mEntriesWritten));
++    ok = ok && Mk64WriteU32(this->mArchiveFile, static_cast<uint32_t>(this->mCentralDirectoryBytesWritten));
++    ok = ok && Mk64WriteU32(this->mArchiveFile, static_cast<uint32_t>(centralDirectoryOffset));
++    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
++    this->mArchiveBytesWritten += 22;
++
++    if(this->mCentralDirectoryFile != nullptr) {
++        std::fclose(this->mCentralDirectoryFile);
++        this->mCentralDirectoryFile = nullptr;
++    }
++    if(this->mArchiveFile != nullptr) {
 +        errno = 0;
-+        flushed = std::fflush(this->mWriter->file) == 0;
++        const bool flushed = std::fflush(this->mArchiveFile) == 0;
 +        if(!flushed) closeError = errno != 0 ? errno : EIO;
 +        errno = 0;
-+        closed = std::fclose(this->mWriter->file) == 0;
++        const bool closed = std::fclose(this->mArchiveFile) == 0;
 +        if(!closed && closeError == 0) closeError = errno != 0 ? errno : EIO;
-+        this->mWriter->file = nullptr;
++        this->mArchiveFile = nullptr;
 +    }
++    fs::remove(this->mCentralDirectoryPath);
 +    this->mArchiveOpen = false;
-+    delete this->mArchive;
-+    this->mArchive = nullptr;
-+    delete this->mWriter;
-+    this->mWriter = nullptr;
-+    if(!finalized || !ended || !flushed || !closed) {
++    if(!ok || closeError != 0) {
 +        char message[320] = {};
 +        std::snprintf(message, sizeof(message),
-+                      "Could not finalize the O2R archive on the SD card (entries=%lu bytes=%llu stage=%s writer_errno=%d close_errno=%d)",
-+                      static_cast<unsigned long>(this->mEntriesWritten), static_cast<unsigned long long>(archiveBytes),
-+                      writerStage, writerError, closeError);
++                      "Could not finalize the O2R archive on the SD card (entries=%lu bytes=%llu cd_bytes=%llu errno=%d close_errno=%d)",
++                      static_cast<unsigned long>(this->mEntriesWritten),
++                      static_cast<unsigned long long>(this->mArchiveBytesWritten),
++                      static_cast<unsigned long long>(this->mCentralDirectoryBytesWritten), errno, closeError);
 +        Mk64InstallLogWrite(message);
 +        throw std::runtime_error(message);
 +    }
 +    char message[192] = {};
 +    std::snprintf(message, sizeof(message), "O2R finalized: %lu entries, %llu archive bytes.",
-+                  static_cast<unsigned long>(this->mEntriesWritten), static_cast<unsigned long long>(archiveBytes));
++                  static_cast<unsigned long>(this->mEntriesWritten),
++                  static_cast<unsigned long long>(this->mArchiveBytesWritten));
 +    Mk64InstallLogWrite(message);
 +#else
      this->mZip->save(this->mPath);
@@ -386,10 +485,10 @@ index 6440b62..3706627 100644
      return 0;
  }
 diff --git a/src/archive/ZWrapper.h b/src/archive/ZWrapper.h
-index d1fe867..99737b9 100644
+index d1fe867..4f3eee5 100644
 --- a/src/archive/ZWrapper.h
 +++ b/src/archive/ZWrapper.h
-@@ -1,20 +1,35 @@
+@@ -1,20 +1,36 @@
  #pragma once
  
 +#include <cstdint>
@@ -398,8 +497,7 @@ index d1fe867..99737b9 100644
  #include "BinaryWrapper.h"
  
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
-+struct mz_zip_archive_tag;
-+typedef struct mz_zip_archive_tag mz_zip_archive;
++#include <cstdio>
 +#else
  namespace miniz_cpp {
  class zip_file;
@@ -416,13 +514,79 @@ index d1fe867..99737b9 100644
      int32_t Close(void) override;
  
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
-+    struct Mk64ZipFileWriter;
-+    mz_zip_archive* mArchive;
-+    Mk64ZipFileWriter* mWriter;
++    FILE* mArchiveFile;
++    FILE* mCentralDirectoryFile;
++    std::string mCentralDirectoryPath;
 +    bool mArchiveOpen;
 +    uint32_t mEntriesWritten;
 +    uint64_t mPayloadBytesWritten;
++    uint64_t mArchiveBytesWritten;
++    uint64_t mCentralDirectoryBytesWritten;
 +#else
      miniz_cpp::zip_file* mZip;
 +#endif
  };
+diff --git a/src/n64/Cartridge.cpp b/src/n64/Cartridge.cpp
+index f3c1f83..cffa9f4 100644
+--- a/src/n64/Cartridge.cpp
++++ b/src/n64/Cartridge.cpp
+@@ -4,7 +4,12 @@
+ #include <Companion.h>
+ 
+ void N64::Cartridge::Initialize() {
+-    LUS::BinaryReader reader((char*) this->gRomData.data(), this->gRomData.size());
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    const std::vector<uint8_t>& romData = *this->gRomData;
++#else
++    const std::vector<uint8_t>& romData = this->gRomData;
++#endif
++    LUS::BinaryReader reader((char*) romData.data(), romData.size());
+     reader.SetEndianness(Torch::Endianness::Big);
+     reader.Seek(0x10, LUS::SeekOffsetType::Start);
+     this->gRomCRC = BSWAP32(reader.ReadUInt32());
+@@ -14,7 +19,7 @@ void N64::Cartridge::Initialize() {
+     reader.Seek(0x3E, LUS::SeekOffsetType::Start);
+     uint8_t country = reader.ReadUByte();
+     this->gVersion = reader.ReadUByte();
+-    this->gHash = Companion::CalculateHash(this->gRomData);
++    this->gHash = Companion::CalculateHash(romData);
+     switch (country) {
+         case 'J':
+             this->gCountryCode = CountryCode::Japan;
+diff --git a/src/n64/Cartridge.h b/src/n64/Cartridge.h
+index 4477a59..6992694 100644
+--- a/src/n64/Cartridge.h
++++ b/src/n64/Cartridge.h
+@@ -15,7 +15,13 @@ enum class CountryCode {
+ class Cartridge {
+ public:
+     explicit Cartridge(const std::vector<uint8_t>& romData)
+-      : gRomData(romData), gCountryCode(CountryCode::Unknown), gVersion(0), gGameTitle("Unknown"), gRomCRC(0) {
++      :
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        gRomData(&romData),
++#else
++        gRomData(romData),
++#endif
++        gCountryCode(CountryCode::Unknown), gVersion(0), gGameTitle("Unknown"), gRomCRC(0) {
+   }
+   void Initialize();
+     const std::string& GetGameTitle();
+@@ -25,11 +31,15 @@ public:
+     std::string GetHash();
+     uint32_t GetCRC();
+ private:
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    const std::vector<uint8_t>* gRomData;
++#else
+     std::vector<uint8_t> gRomData;
++#endif
+     CountryCode gCountryCode;
+     uint8_t gVersion;
+     std::string gGameTitle;
+     std::string gHash;
+     uint32_t gRomCRC;
+ };
+-}
+\ No newline at end of file
++}
