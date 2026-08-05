@@ -51,21 +51,22 @@ index 089a7f5..af2dbea 100644
      void Write(int32_t valueA, int32_t valueB);
      void Write(uint32_t value);
 diff --git a/src/Companion.cpp b/src/Companion.cpp
-index a881533..20dae56 100644
+index a881533..12741f3 100644
 --- a/src/Companion.cpp
 +++ b/src/Companion.cpp
-@@ -12,6 +12,10 @@
+@@ -12,6 +12,11 @@
  #include <iostream>
  #include <filesystem>
  
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +extern "C" void Mk64InstallLogWrite(const char* message);
++extern "C" void Mk64InstallLogWritef(const char* format, ...);
 +#endif
 +
  #include "factories/GenericArrayFactory.h"
  #include "factories/VtxFactory.h"
  #include "factories/MtxFactory.h"
-@@ -734,12 +738,13 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -734,12 +739,13 @@ void Companion::ProcessFile(YAML::Node root) {
                  stream.clear();
                  exporter->get()->Export(stream, data, result.name, result.node, &result.name);
                  auto data = stream.str();
@@ -81,7 +82,7 @@ index a881533..20dae56 100644
                  }
  
                  break;
-@@ -789,7 +794,7 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -789,7 +795,7 @@ void Companion::ProcessFile(YAML::Node root) {
  
          this->gCompanionFiles.clear();
  
@@ -90,7 +91,7 @@ index a881533..20dae56 100644
              auto alignment = GetSafeNode<uint32_t>(result.node, "alignment", impl->GetAlignment());
              if(!endptr.has_value()) {
                  wEntry = {
-@@ -832,7 +837,16 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -832,7 +838,16 @@ void Companion::ProcessFile(YAML::Node root) {
              }
          }
  
@@ -108,7 +109,7 @@ index a881533..20dae56 100644
      }
  
      auto fsout = fs::path(this->gConfig.outputPath);
-@@ -1022,9 +1036,15 @@ void Companion::Process() {
+@@ -1022,9 +1037,15 @@ void Companion::Process() {
      auto configPath = this->gSourceDirectory / "config.yml";
  
      if(!fs::exists(configPath)) {
@@ -124,7 +125,45 @@ index a881533..20dae56 100644
  
      auto start = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
      YAML::Node config = YAML::LoadFile(configPath.string());
-@@ -1042,6 +1062,9 @@ void Companion::Process() {
+@@ -1033,15 +1054,47 @@ void Companion::Process() {
+ 
+     if(!isDirectoryMode) {
+         if(this->gRomPath.has_value()){
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++            FILE* input = std::fopen(this->gRomPath.value().string().c_str(), "rb");
++            if(input == nullptr) {
++                throw std::runtime_error("Could not open the verified ROM for extraction.");
++            }
++            if(std::fseek(input, 0, SEEK_END) != 0) {
++                std::fclose(input);
++                throw std::runtime_error("Could not size the verified ROM for extraction.");
++            }
++            const long size = std::ftell(input);
++            if(size <= 0) {
++                std::fclose(input);
++                throw std::runtime_error("The verified ROM is empty.");
++            }
++            if(std::fseek(input, 0, SEEK_SET) != 0) {
++                std::fclose(input);
++                throw std::runtime_error("Could not rewind the verified ROM for extraction.");
++            }
++            Mk64InstallLogWritef("Torch: allocating %ld bytes for ROM data after config load.", size);
++            this->gRomData.resize(static_cast<size_t>(size));
++            const size_t read = std::fread(this->gRomData.data(), 1, this->gRomData.size(), input);
++            if(read != this->gRomData.size() || std::ferror(input) != 0) {
++                std::fclose(input);
++                throw std::runtime_error("Could not read the verified ROM for extraction.");
++            }
++            std::fclose(input);
++            Mk64InstallLogWritef("Torch: loaded %zu ROM bytes using stdio.", this->gRomData.size());
++#else
+             std::ifstream input( this->gRomPath.value(), std::ios::binary );
+             this->gRomData = std::vector<uint8_t>( std::istreambuf_iterator( input ), {} );
+             input.close();
++#endif
+         }
+ 
+         this->gCartridge = std::make_shared<N64::Cartridge>(this->gRomData);
          this->gCartridge->Initialize();
  
          if(!config[this->gCartridge->GetHash()]){
@@ -134,7 +173,7 @@ index a881533..20dae56 100644
              SPDLOG_ERROR("No config found for {}", this->gCartridge->GetHash());
              return;
          }
-@@ -1320,7 +1343,7 @@ void Companion::Process() {
+@@ -1320,7 +1373,7 @@ void Companion::Process() {
                  std::vector<char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
                  input.close();
                  std::string filename = fs::path(filePath).filename().string();
@@ -143,7 +182,7 @@ index a881533..20dae56 100644
                  SPDLOG_INFO("Added additional file: {}", filename);
              } else {
                  SPDLOG_WARN("Could not open additional file: {}", filePath);
-@@ -1393,7 +1416,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
+@@ -1393,7 +1446,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
          std::replace(normalized.begin(), normalized.end(), '\\', '/');
          // Remove parent folder
          normalized = normalized.substr(folder.length() + 1);
@@ -152,6 +191,15 @@ index a881533..20dae56 100644
          SPDLOG_CRITICAL("> Added {}", normalized);
      }
  
+@@ -1710,7 +1763,7 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
+         }
+     }
+ 
+-    auto rom = this->GetRomData();
++    auto& rom = this->GetRomData();
+     auto factory = this->GetFactory(type);
+ 
+     if(!factory.has_value()) {
 diff --git a/src/Companion.h b/src/Companion.h
 index 40a664e..45022f2 100644
 --- a/src/Companion.h
