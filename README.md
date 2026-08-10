@@ -12,10 +12,14 @@ workspace.
 
 The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O2R resource runtime, 3DS input,
 NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game remains a work in
-progress and is not yet a stable release. The original game simulation runs at 30 Hz; the renderer presents that
-state once per simulation step and is paced at 30 Hz. Replaying the same state twice is not interpolation, so the
-Old 3DS baseline deliberately avoids that duplicate CPU/GPU work. A true interpolated 60 FPS mode and sustained
-real-hardware performance have not been claimed.
+progress and is not yet a stable release. The original game simulation remains at 30 Hz; the 3DS renderer now uses
+SpaghettiKart's matrix recordings to render a real halfway presentation before each keyframe and targets the top
+LCD at 60 Hz. Sustained 60 FPS on physical Old 3DS hardware has not yet been measured and is not claimed.
+
+The v0.11 test build also enables native 26.8 kHz stereo NDSP output, corrects independent two-texture UVs and
+second-cycle RDP texture selection, removes the extra per-upload texture staging allocation, and initializes the
+game memory arena before resource and renderer allocations. The CIA uses the supplied custom icon and a compact
+3D CGFX HOME Menu banner.
 
 Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
 3DS and New Nintendo 3DS performance still require real-hardware profiling.
@@ -38,8 +42,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.10.3dsx
-build-3ds/game/mk64-3ds-v0.10.cia
+build-3ds/game/mk64-3ds-game-v0.11.3dsx
+build-3ds/game/mk64-3ds-v0.11.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their

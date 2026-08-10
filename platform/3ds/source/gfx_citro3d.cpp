@@ -20,7 +20,7 @@ constexpr uint32_t kTopHeight = 240;
 constexpr uint32_t kMaxSourceVertices = 256 * 3;
 constexpr uint32_t kMaxDrawVertices = 256 * 6;
 constexpr uint32_t kVertexBufferCapacity = 32 * 1024;
-constexpr uint32_t kPackedVertexFloats = 10;
+constexpr uint32_t kPackedVertexFloats = 12;
 // The largest texture in the vanilla MK64 O2R data is 320 pixels wide. A
 // 512-pixel cap preserves the required power-of-two backing texture while
 // reducing Fast3D's RGBA upload buffer from 4 MiB to 1 MiB on Old 3DS.
@@ -155,17 +155,17 @@ ChannelOperation PassPrevious() {
     return { GPU_REPLACE, { SourceCombined, SourceZero, SourceZero } };
 }
 
-GPU_TEVSRC SourceToTev(int source, int varyingInput) {
+GPU_TEVSRC SourceToTev(int source, int varyingInput, int cycle) {
     if (source >= SourceInput1 && source <= SourceInput7) {
         return source - SourceInput1 == varyingInput ? GPU_PRIMARY_COLOR : GPU_CONSTANT;
     }
     switch (source) {
         case SourceTexel0:
         case SourceTexel0Alpha:
-            return GPU_TEXTURE0;
+            return cycle == 0 ? GPU_TEXTURE0 : GPU_TEXTURE1;
         case SourceTexel1:
         case SourceTexel1Alpha:
-            return GPU_TEXTURE1;
+            return cycle == 0 ? GPU_TEXTURE1 : GPU_TEXTURE0;
         case SourceCombined:
             return GPU_PREVIOUS;
         default:
@@ -199,9 +199,10 @@ bool IsConstantSource(int source, int varyingInput) {
 }
 
 void ConfigureChannel(C3D_TexEnv* environment, C3D_TexEnvMode mode, const ChannelOperation& operation,
-                      int varyingInput) {
-    C3D_TexEnvSrc(environment, mode, SourceToTev(operation.source[0], varyingInput),
-                  SourceToTev(operation.source[1], varyingInput), SourceToTev(operation.source[2], varyingInput));
+                      int varyingInput, int cycle) {
+    C3D_TexEnvSrc(environment, mode, SourceToTev(operation.source[0], varyingInput, cycle),
+                  SourceToTev(operation.source[1], varyingInput, cycle),
+                  SourceToTev(operation.source[2], varyingInput, cycle));
     C3D_TexEnvFunc(environment, mode, operation.function);
 }
 
@@ -363,10 +364,16 @@ ShaderProgram* GfxRenderingAPICitro3D::CreateAndLoadNewShader(uint64_t shaderId0
                 const int source = program->combiner[cycle][channel][term];
                 if (source >= SourceInput1 && source <= SourceInput7) {
                     program->numInputs = std::max(program->numInputs, static_cast<uint8_t>(source));
-                } else if (source == SourceTexel0 || source == SourceTexel0Alpha) {
-                    program->usedTextures[0] = true;
-                } else if (source == SourceTexel1 || source == SourceTexel1Alpha) {
-                    program->usedTextures[1] = true;
+                } else if (source == SourceTexel0 || source == SourceTexel0Alpha ||
+                           source == SourceTexel1 || source == SourceTexel1Alpha) {
+                    int texture = (source == SourceTexel0 || source == SourceTexel0Alpha) ? 0 : 1;
+                    // The RDP swaps TEXEL0 and TEXEL1 for the second combiner
+                    // cycle. Match the desktop shaders and request/bind the
+                    // texture that is actually sampled by that cycle.
+                    if (program->twoCycle && cycle == 1) {
+                        texture ^= 1;
+                    }
+                    program->usedTextures[texture] = true;
                 }
             }
         }
@@ -459,39 +466,37 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     slot.sourceWidth = static_cast<uint16_t>(width);
     slot.sourceHeight = static_cast<uint16_t>(height);
 
-    const size_t stagingSize = static_cast<size_t>(textureWidth) * textureHeight * 4;
-    auto* staging = static_cast<uint8_t*>(linearAlloc(stagingSize));
-    if (staging == nullptr) {
-        C3D_TexDelete(&slot.texture);
-        slot.initialized = false;
-        return;
-    }
     // Fast3D supplies RGBA bytes, while PICA's GPU_RGBA8 texels are stored as
     // A-B-G-R on this little-endian CPU. A raw upload makes
     // red become alpha and produces the cyan/transparent corruption seen on
     // the title screen. Build PICA's 8x8 Morton layout on the CPU; this also
     // avoids emulator-specific linear-to-tiled display-transfer corruption.
     // Fill POT padding by wrapping so filtering cannot sample transparent
-    // border texels.
-    auto* stagingPixels = reinterpret_cast<uint32_t*>(staging);
+    // border texels. C3D_TexInit already provides writable linear memory, so
+    // write its Morton layout directly and avoid a second allocation, cache
+    // flush, transfer, and free for every texture upload.
+    auto* texturePixels = static_cast<uint32_t*>(slot.texture.data);
     const uint32_t tilesPerRow = textureWidth / 8U;
-    for (uint32_t row = 0; row < textureHeight; ++row) {
-        const uint32_t sourceRow = (textureHeight - 1U - row) % height;
-        for (uint32_t column = 0; column < textureWidth; ++column) {
-            const uint32_t sourceColumn = column % width;
-            uint32_t pixel = 0;
-            std::memcpy(&pixel, rgba32Buf + (static_cast<size_t>(sourceRow) * width + sourceColumn) * 4,
-                        sizeof(pixel));
-            const size_t tile = static_cast<size_t>(row / 8U) * tilesPerRow + column / 8U;
-            const size_t tiledOffset = tile * 64U + MortonOffset8x8(column & 7U, row & 7U);
-            stagingPixels[tiledOffset] = __builtin_bswap32(pixel);
+    for (uint32_t tileY = 0; tileY < textureHeight; tileY += 8U) {
+        for (uint32_t tileX = 0; tileX < textureWidth; tileX += 8U) {
+            uint32_t* tile = texturePixels +
+                (static_cast<size_t>(tileY / 8U) * tilesPerRow + tileX / 8U) * 64U;
+            for (uint32_t row = 0; row < 8U; ++row) {
+                const uint32_t sourceRow = (tileY + row) % height;
+                for (uint32_t column = 0; column < 8U; ++column) {
+                    const uint32_t sourceColumn = (tileX + column) % width;
+                    uint32_t pixel = 0;
+                    std::memcpy(&pixel,
+                                rgba32Buf +
+                                    (static_cast<size_t>(sourceRow) * width + sourceColumn) * 4,
+                                sizeof(pixel));
+                    tile[MortonOffset8x8(column, row)] = __builtin_bswap32(pixel);
+                }
+            }
         }
     }
 
-    GSPGPU_FlushDataCache(staging, stagingSize);
-    C3D_TexUpload(&slot.texture, staging);
     C3D_TexFlush(&slot.texture);
-    linearFree(staging);
     C3D_TexSetFilter(&slot.texture, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&slot.texture, GPU_REPEAT, GPU_REPEAT);
     C3D_TexBind(mImpl->selectedTextureUnit, &slot.texture);
@@ -647,9 +652,9 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         *destination++ = source[2];
         *destination++ = source[3];
 
-        float u = 0.0f;
-        float v = 0.0f;
         for (int texture = 0; texture < 2; ++texture) {
+            float u = 0.0f;
+            float v = 0.0f;
             if (program->usedTextures[texture]) {
                 const uint8_t textureOffset = program->textureOffsets[texture];
                 u = source[textureOffset];
@@ -675,11 +680,10 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                     u *= static_cast<float>(slot.logicalWidth) / slot.texture.width;
                     v *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
                 }
-                break;
             }
+            *destination++ = u;
+            *destination++ = v;
         }
-        *destination++ = u;
-        *destination++ = v;
 
         if (varyingInput >= 0) {
             const float* color = source + program->inputOffsets[varyingInput];
@@ -709,8 +713,8 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                 operationIndex < alphaPlan.size() ? alphaPlan[operationIndex] : PassPrevious();
             C3D_TexEnv* environment = C3D_GetTexEnv(stage);
             C3D_TexEnvInit(environment);
-            ConfigureChannel(environment, C3D_RGB, rgbOperation, varyingInput);
-            ConfigureChannel(environment, C3D_Alpha, alphaOperation, varyingInput);
+            ConfigureChannel(environment, C3D_RGB, rgbOperation, varyingInput, cycle);
+            ConfigureChannel(environment, C3D_Alpha, alphaOperation, varyingInput, cycle);
             ConfigureOperands(environment, rgbOperation, alphaOperation);
 
             std::array<float, 4> environmentColor = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -799,13 +803,14 @@ void GfxRenderingAPICitro3D::Init() {
     AttrInfo_Init(attributeInfo);
     AttrInfo_AddLoader(attributeInfo, 0, GPU_FLOAT, 4);
     AttrInfo_AddLoader(attributeInfo, 1, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attributeInfo, 2, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(attributeInfo, 2, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(attributeInfo, 3, GPU_FLOAT, 4);
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
-    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 3, 0x210);
+    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 4, 0x3210);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
-    C3D_FrameRate(30.0f);
+    C3D_FrameRate(60.0f);
     SetUseAlpha(false);
     SetDepthTestAndMask(false, false);
     mImpl->ready = true;

@@ -49,8 +49,15 @@ if [[ ! -x "${MAKEROM}" || ! -x "${BANNERTOOL}" ]]; then
   exit 0
 fi
 
+CGFX_BANNER="${ROOT}/platform/3ds/assets/banner.cgfx"
+CGFX_SIZE="$(wc -c < "${CGFX_BANNER}")"
+if (( CGFX_SIZE > 0x80000 )); then
+  printf '3D banner CGFX exceeds the 512 KiB HOME Menu limit: %s bytes\n' "${CGFX_SIZE}" >&2
+  exit 1
+fi
+
 "${BANNERTOOL}" makebanner \
-  -i "${ROOT}/platform/3ds/assets/banner.png" \
+  -ci "${CGFX_BANNER}" \
   -a "${ROOT}/platform/3ds/assets/banner.wav" \
   -o "${BUILD}/mk64-3ds.bnr"
 

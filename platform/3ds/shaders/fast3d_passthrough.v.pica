@@ -12,8 +12,9 @@
 .out outclr color
 
 .in inpos v0
-.in intex v1
-.in incolor v2
+.in intex0 v1
+.in intex1 v2
+.in incolor v3
 
 .proc main
     dp4 r0.x, projection[0], inpos
@@ -26,8 +27,8 @@
     min r0.z, shaderConstants.y, r0.z
     max r0.z, r0.z, -r0.w
     mov outpos, r0
-    mov outtc0, intex
-    mov outtc1, intex
+    mov outtc0, intex0
+    mov outtc1, intex1
     mov outclr, incolor
     end
 .end
