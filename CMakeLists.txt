@@ -29,6 +29,7 @@ file(COPY
 )
 
 add_library(mk64-3ds-platform STATIC
+    platform/3ds/source/audio_dma_registry_3ds.cpp
     platform/3ds/source/audio_ndsp_3ds.cpp
     platform/3ds/source/input_3ds.cpp
     platform/3ds/source/libultra_3ds.cpp
@@ -84,6 +85,9 @@ if(MK64_3DS_BUILD_GAME_CORE)
     set(SPAGHETTIKART_COLLISION_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/collision.c")
     set(SPAGHETTIKART_3DS_COLLISION_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/collision_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_COLLISION_SOURCE}")
+    set(SPAGHETTIKART_AUDIO_PORT_SOURCE "${SPAGHETTIKART_ROOT}/src/audio/port_eu.c")
+    set(SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/port_eu_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_AUDIO_PORT_SOURCE}")
     file(READ "${SPAGHETTIKART_MEMORY_SOURCE}" SPAGHETTIKART_MEMORY_TEXT)
     string(REPLACE
         "static u8 sMemoryPool[0x10000000] ALIGNED4096;"
@@ -238,6 +242,28 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         file(WRITE "${SPAGHETTIKART_3DS_COLLISION_SOURCE}" "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
     endif()
 
+    # The desktop direct-audio path normally advances sample-DMA state through
+    # an N64 audio task. The 3DS runtime synthesizes directly into NDSP buffers,
+    # so generate a narrow 3DS copy that keeps those per-frame queues moving
+    # without modifying the upstream SpaghettiKart submodule.
+    file(READ "${SPAGHETTIKART_AUDIO_PORT_SOURCE}" SPAGHETTIKART_AUDIO_PORT_TEXT)
+    string(REPLACE
+        "    gAudioFrameCount++;\n    gCurrAiBufferIndex %= 3;\n\n    gCurrAudioFrameDmaCount = 0;"
+        "    gAudioFrameCount++;\n    gCurrAiBufferIndex %= 3;\n\n#if defined(PLATFORM_3DS)\n    decrease_sample_dma_ttls();\n#endif\n\n    gCurrAudioFrameDmaCount = 0;"
+        SPAGHETTIKART_3DS_AUDIO_PORT_TEXT
+        "${SPAGHETTIKART_AUDIO_PORT_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_AUDIO_PORT_TEXT STREQUAL SPAGHETTIKART_AUDIO_PORT_TEXT)
+        message(FATAL_ERROR "The upstream audio port insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_AUDIO_PORT_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}" SPAGHETTIKART_3DS_AUDIO_PORT_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_AUDIO_PORT_EXISTING STREQUAL SPAGHETTIKART_3DS_AUDIO_PORT_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}" "${SPAGHETTIKART_3DS_AUDIO_PORT_TEXT}")
+    endif()
+
     set(SPAGHETTIKART_GAME_OS_MATH
         "${SPAGHETTIKART_ROOT}/src/os/guLookAtF.c"
         "${SPAGHETTIKART_ROOT}/src/os/guPerspectiveF.c"
@@ -258,6 +284,7 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         ${SPAGHETTIKART_GAME_OS_MATH}
         "${SPAGHETTIKART_3DS_MEMORY_SOURCE}"
         "${SPAGHETTIKART_3DS_COLLISION_SOURCE}"
+        "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}"
     )
     target_include_directories(mk64-3ds-game-core PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/compat"

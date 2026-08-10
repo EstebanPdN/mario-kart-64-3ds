@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 #include <vector>
 
+extern "C" size_t AudioDma_Clamp(uintptr_t address, size_t bytes);
+
 namespace {
 
 constexpr uint64_t kN64ClockRate = 62500000ULL;
@@ -390,7 +392,12 @@ s32 osPiStartDma(OSIoMesg*, s32, s32, uintptr_t source, void* destination, size_
     if (source == 0 || destination == nullptr) {
         return -1;
     }
-    std::memcpy(destination, reinterpret_cast<const void*>(source), bytes);
+    size_t safeBytes = bytes;
+    safeBytes = AudioDma_Clamp(source, bytes);
+    if (safeBytes < bytes) {
+        std::memset(destination, 0, bytes);
+    }
+    std::memcpy(destination, reinterpret_cast<const void*>(source), safeBytes);
     if (queue != nullptr) {
         OSMesg message = {};
         osSendMesg(queue, message, OS_MESG_NOBLOCK);

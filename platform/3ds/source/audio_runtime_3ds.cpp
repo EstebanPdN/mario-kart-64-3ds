@@ -1,6 +1,7 @@
 #include "audio_runtime_3ds.h"
 
 #include "audio_ndsp_3ds.h"
+#include "diagnostics_3ds.h"
 
 #include <libultraship/bridge/audiobridge.h>
 
@@ -19,6 +20,8 @@ constexpr uint32_t kStereoFramesPerGameFrame =
     kSamplesPerSynthesisFrame * kSynthesisFramesPerGameFrame;
 constexpr uint32_t kStereoSamplesPerGameFrame = kStereoFramesPerGameFrame * 2;
 bool sReady = false;
+uint32_t sPumpCount = 0;
+bool sLoggedFirstSignal = false;
 }
 
 extern "C" bool Mk64GameAudio3DSInit() {
@@ -35,12 +38,33 @@ extern "C" void Mk64GameAudio3DSPump() {
     create_next_audio_buffer(samples.data(), kSamplesPerSynthesisFrame);
     create_next_audio_buffer(samples.data() + kSamplesPerSynthesisFrame * 2,
                              kSamplesPerSynthesisFrame);
+    ++sPumpCount;
+    const bool inspectSignal =
+        sPumpCount <= 4u || !sLoggedFirstSignal || (sPumpCount % 180u) == 0u;
+    uint32_t peak = 0;
+    uint32_t nonzero = 0;
+    if (inspectSignal) {
+        for (const int16_t sample : samples) {
+            const int32_t value =
+                sample < 0 ? -static_cast<int32_t>(sample) : static_cast<int32_t>(sample);
+            if (value != 0) ++nonzero;
+            if (static_cast<uint32_t>(value) > peak) peak = static_cast<uint32_t>(value);
+        }
+    }
     Mk64Audio3DSQueueStereoS16(samples.data(), kStereoFramesPerGameFrame);
+    const bool firstSignal = inspectSignal && peak != 0u && !sLoggedFirstSignal;
+    if (firstSignal) sLoggedFirstSignal = true;
+    if (inspectSignal || firstSignal) {
+        Mk64Diagnostics3DSAudio(sPumpCount, Mk64Audio3DSBufferedFrames(), peak, nonzero,
+                                Mk64Audio3DSQueuedCount(), Mk64Audio3DSDroppedCount());
+    }
 }
 
 extern "C" void Mk64GameAudio3DSShutdown() {
     Mk64Audio3DSShutdown();
     sReady = false;
+    sPumpCount = 0;
+    sLoggedFirstSignal = false;
 }
 
 extern "C" uint32_t GameEngine_GetSampleRate() {

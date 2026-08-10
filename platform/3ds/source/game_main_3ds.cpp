@@ -32,7 +32,7 @@ uint32_t __stacksize__ = 1 * 1024 * 1024;
 namespace {
 constexpr int32_t kLogoIntroMenu = 8;
 
-int ShowError(const char* message) {
+[[noreturn]] void ExitWithError(const char* message) {
     gfxInitDefault();
     consoleInit(GFX_TOP, nullptr);
     std::printf("Mario Kart 64 3DS\n\n%s\n\nPress START to exit.\n", message);
@@ -42,7 +42,7 @@ int ShowError(const char* message) {
         gspWaitForVBlank();
     }
     gfxExit();
-    return 1;
+    std::_Exit(1);
 }
 }
 
@@ -58,7 +58,7 @@ int main() {
     if (!Mk64MemoryArena3DSIsReady()) {
         Mk64Diagnostics3DSCheckpoint("game-arena-init-failed");
         Mk64Diagnostics3DSStop();
-        return ShowError("Not enough application memory for the 8 MiB game arena.");
+        ExitWithError("Not enough application memory for the 8 MiB game arena.");
     }
     Mk64Diagnostics3DSCheckpoint("game-arena-ready");
 
@@ -66,14 +66,14 @@ int main() {
     if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
         Mk64Diagnostics3DSCheckpoint("game-data-failed");
         Mk64Diagnostics3DSStop();
-        return ShowError(data.message);
+        ExitWithError(data.message);
     }
     Mk64Diagnostics3DSCheckpoint("game-data-ready");
     Mk64Diagnostics3DSCheckpoint("resource-runtime-init");
     if (!Mk64Resource3DSInit(data.archivePath)) {
         Mk64Diagnostics3DSCheckpoint("resource-runtime-init-failed");
         Mk64Diagnostics3DSStop();
-        return ShowError("mk64.o2r could not be opened or is not a supported archive.");
+        ExitWithError("mk64.o2r could not be opened or is not a supported archive.");
     }
     Mk64Diagnostics3DSCheckpoint("resource-runtime-ready");
     Mk64Diagnostics3DSCheckpoint("graphics-init");
@@ -81,7 +81,7 @@ int main() {
         Mk64Diagnostics3DSCheckpoint("graphics-init-failed");
         Mk64Resource3DSShutdown();
         Mk64Diagnostics3DSStop();
-        return ShowError("The native Citro3D renderer could not be initialized.");
+        ExitWithError("The native Citro3D renderer could not be initialized.");
     }
     Mk64Diagnostics3DSCheckpoint("graphics-ready");
 
@@ -94,15 +94,18 @@ int main() {
         Mk64Graphics3DSShutdown();
         Mk64Resource3DSShutdown();
         Mk64Diagnostics3DSStop();
-        return ShowError("The vanilla game state could not be initialized.");
+        ExitWithError("The vanilla game state could not be initialized.");
     }
     Mk64Diagnostics3DSCheckpoint("game-state-ready");
 
     Mk64Diagnostics3DSCheckpoint("audio-init");
     audio_init();
     sound_init();
-    Mk64GameAudio3DSInit();
-    Mk64Diagnostics3DSCheckpoint("audio-ready");
+    if (Mk64GameAudio3DSInit()) {
+        Mk64Diagnostics3DSCheckpoint("audio-ready");
+    } else {
+        Mk64Diagnostics3DSCheckpoint("audio-init-failed");
+    }
 
     // Skip the desktop-only Harbour Masters splash and enter the stock logo.
     gMenuSelection = kLogoIntroMenu;
@@ -111,10 +114,10 @@ int main() {
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-ready");
 
     while (WindowIsRunning()) {
-        Mk64Diagnostics3DSSetStage("game-loop-audio");
-        Mk64GameAudio3DSPump();
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
         thread5_iteration();
+        Mk64Diagnostics3DSSetStage("game-loop-audio");
+        Mk64GameAudio3DSPump();
     }
 
     Mk64Diagnostics3DSCheckpoint("shutdown");

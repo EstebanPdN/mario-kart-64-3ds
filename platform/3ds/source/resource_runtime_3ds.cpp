@@ -27,6 +27,9 @@
 #endif
 extern "C" void Mk64Diagnostics3DSSetResource(const char*, size_t) MK64_OPTIONAL_SYMBOL;
 extern "C" void Mk64Diagnostics3DSSetArchiveEntryCount(size_t) MK64_OPTIONAL_SYMBOL;
+extern "C" void Mk64Diagnostics3DSFailure(const char*, const char*) MK64_OPTIONAL_SYMBOL;
+extern "C" void AudioDma_Register(const void* base, size_t size) MK64_OPTIONAL_SYMBOL;
+extern "C" void AudioDma_Clear(void) MK64_OPTIONAL_SYMBOL;
 
 namespace {
 
@@ -452,6 +455,9 @@ bool ParseAudioSample(Reader& reader, LoadedResource& resource) {
     if (sample->sampleAddr == nullptr || !reader.ReadBytes(sample->sampleAddr, static_cast<size_t>(sampleSize))) {
         return false;
     }
+    if (AudioDma_Register != nullptr) {
+        AudioDma_Register(sample->sampleAddr, static_cast<size_t>(sampleSize));
+    }
     sample->unused = 0;
     sample->loaded = 1;
     sample->loop = loop;
@@ -705,47 +711,61 @@ LoadedResource* LoadByCrc(uint64_t crc) {
 } // namespace
 
 extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
-    Mk64Resource3DSShutdown();
-    if (archivePath == nullptr || archivePath[0] == '\0') {
-        return false;
-    }
-    auto archive = std::make_unique<mk64_3ds::O2rArchiveReader>(archivePath);
-    if (archive->Open() != mk64_3ds::O2rReadResult::Ok) {
-        return false;
-    }
-    sCrcToEntry.reserve(archive->Entries().size());
-    for (size_t i = 0; i < archive->Entries().size(); ++i) {
-        sCrcToEntry.emplace(CRC64(archive->Entries()[i].c_str()), i);
-    }
-    sArchive = std::move(archive);
-    if (Mk64Diagnostics3DSSetArchiveEntryCount != nullptr) {
-        Mk64Diagnostics3DSSetArchiveEntryCount(sArchive->Entries().size());
-    }
+    try {
+        Mk64Resource3DSShutdown();
+        if (archivePath == nullptr || archivePath[0] == '\0') {
+            return false;
+        }
+        auto archive = std::make_unique<mk64_3ds::O2rArchiveReader>(archivePath);
+        if (archive->Open() != mk64_3ds::O2rReadResult::Ok) {
+            return false;
+        }
+        sCrcToEntry.reserve(archive->Entries().size());
+        for (size_t i = 0; i < archive->Entries().size(); ++i) {
+            sCrcToEntry.emplace(CRC64(archive->Entries()[i].c_str()), i);
+        }
+        sArchive = std::move(archive);
+        if (Mk64Diagnostics3DSSetArchiveEntryCount != nullptr) {
+            Mk64Diagnostics3DSSetArchiveEntryCount(sArchive->Entries().size());
+        }
 
-    std::vector<uint8_t> bytes;
-    for (const std::string& entry : sArchive->Entries()) {
-        const bool isBank = entry.rfind("sound/banks/", 0) == 0;
-        const bool isSequence = entry.rfind("sound/sequences/", 0) == 0;
-        if ((!isBank && !isSequence) || sArchive->ReadEntry(entry, &bytes) != mk64_3ds::O2rReadResult::Ok ||
-            bytes.size() < kOtrHeaderSize + sizeof(uint32_t)) {
-            continue;
+        std::vector<uint8_t> bytes;
+        for (const std::string& entry : sArchive->Entries()) {
+            const bool isBank = entry.rfind("sound/banks/", 0) == 0;
+            const bool isSequence = entry.rfind("sound/sequences/", 0) == 0;
+            if ((!isBank && !isSequence) || sArchive->ReadEntry(entry, &bytes) != mk64_3ds::O2rReadResult::Ok ||
+                bytes.size() < kOtrHeaderSize + sizeof(uint32_t)) {
+                continue;
+            }
+            Reader header(bytes, 4);
+            Reader body(bytes, kOtrHeaderSize);
+            uint32_t type = 0;
+            uint32_t version = 0;
+            uint32_t id = 0;
+            if (!header.ReadU32(&type) || !header.ReadU32(&version) || version != 0 || !body.ReadU32(&id) ||
+                id > UINT8_MAX) {
+                continue;
+            }
+            if (isBank && type == kTypeAudioBank) {
+                sBanksById[static_cast<uint8_t>(id)] = entry;
+            } else if (isSequence && type == kTypeSequence) {
+                sSequencesById[static_cast<uint8_t>(id)] = entry;
+            }
         }
-        Reader header(bytes, 4);
-        Reader body(bytes, kOtrHeaderSize);
-        uint32_t type = 0;
-        uint32_t version = 0;
-        uint32_t id = 0;
-        if (!header.ReadU32(&type) || !header.ReadU32(&version) || version != 0 || !body.ReadU32(&id) ||
-            id > UINT8_MAX) {
-            continue;
+        return true;
+    } catch (const std::bad_alloc&) {
+        if (Mk64Diagnostics3DSFailure != nullptr) {
+            Mk64Diagnostics3DSFailure("resource-runtime-init", "out of memory while indexing mk64.o2r");
         }
-        if (isBank && type == kTypeAudioBank) {
-            sBanksById[static_cast<uint8_t>(id)] = entry;
-        } else if (isSequence && type == kTypeSequence) {
-            sSequencesById[static_cast<uint8_t>(id)] = entry;
+        Mk64Resource3DSShutdown();
+        return false;
+    } catch (...) {
+        if (Mk64Diagnostics3DSFailure != nullptr) {
+            Mk64Diagnostics3DSFailure("resource-runtime-init", "unexpected exception while indexing mk64.o2r");
         }
+        Mk64Resource3DSShutdown();
+        return false;
     }
-    return true;
 }
 
 extern "C" void Mk64Resource3DSShutdown(void) {
@@ -754,6 +774,9 @@ extern "C" void Mk64Resource3DSShutdown(void) {
     sBanksById.clear();
     sSequencesById.clear();
     sArchive.reset();
+    if (AudioDma_Clear != nullptr) {
+        AudioDma_Clear();
+    }
 }
 
 extern "C" size_t Mk64Resource3DSArchiveEntryCount(void) {
