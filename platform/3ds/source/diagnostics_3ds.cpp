@@ -16,11 +16,13 @@ namespace {
 constexpr const char* kGameDirectory = "sdmc:/3ds/MK64";
 constexpr const char* kDumpDirectory = "sdmc:/3ds/MK64/dump";
 constexpr const char* kRuntimeLog = "sdmc:/3ds/MK64/dump/runtime.log";
-constexpr size_t kMaxArenaDump = 16u * 1024u * 1024u;
-constexpr size_t kMaxDisplayListDump = 2u * 1024u * 1024u;
+constexpr size_t kMaxArenaDump = 32u * 1024u * 1024u;
+constexpr size_t kMaxDisplayListDump = 4u * 1024u * 1024u;
 
 std::atomic<bool> sRunning{ false };
 std::atomic<bool> sInputReady{ false };
+std::atomic<bool> sDumpPaused{ false };
+std::atomic<unsigned> sDumpRequest{ 0 };
 std::atomic<uint32_t> sKeysHeld{ 0 };
 std::atomic<int> sCircleX{ 0 };
 std::atomic<int> sCircleY{ 0 };
@@ -46,6 +48,22 @@ Thread sThread = nullptr;
 FILE* sLog = nullptr;
 bool sIsNew3DS = false;
 uint64_t sStartTime = 0;
+
+extern "C" void Mk64GameAudio3DSSetPaused(bool paused) __attribute__((weak));
+
+enum DumpRequest : unsigned {
+    kDumpRequestNone = 0,
+    kDumpRequestSelect = 1,
+    kDumpRequestCombo = 2,
+};
+
+const char* DumpTriggerName(unsigned request) {
+    switch (request) {
+        case kDumpRequestSelect: return "SELECT";
+        case kDumpRequestCombo: return "L + R + A";
+        default: return "unknown";
+    }
+}
 
 bool EnsureDirectory(const char* path) {
     if (mkdir(path, 0777) == 0) return true;
@@ -107,6 +125,220 @@ bool WriteBlob(const char* path, const void* data, size_t size) {
         std::remove(path);
     }
     return ok;
+}
+
+void WriteU16(FILE* file, uint16_t value) {
+    std::fputc(static_cast<int>(value & 0xffu), file);
+    std::fputc(static_cast<int>((value >> 8) & 0xffu), file);
+}
+
+void WriteU32(FILE* file, uint32_t value) {
+    WriteU16(file, static_cast<uint16_t>(value & 0xffffu));
+    WriteU16(file, static_cast<uint16_t>((value >> 16) & 0xffffu));
+}
+
+const uint8_t* ReadFramebufferPixel(const uint8_t* framebuffer, uint16_t framebufferWidth,
+                                    uint16_t framebufferHeight, uint16_t x, uint16_t y,
+                                    bool rotate3dsPhysical) {
+    if (rotate3dsPhysical) {
+        const uint16_t sourceX = static_cast<uint16_t>(framebufferWidth - 1u - y);
+        const uint16_t sourceY = x;
+        return framebuffer + (static_cast<size_t>(sourceY) * framebufferWidth + sourceX) * 3u;
+    }
+    return framebuffer + (static_cast<size_t>(y) * framebufferWidth + x) * 3u;
+}
+
+uint8_t* WriteFramebufferPixel(uint8_t* framebuffer, uint16_t framebufferWidth,
+                               uint16_t framebufferHeight, uint16_t x, uint16_t y,
+                               bool rotate3dsPhysical) {
+    return const_cast<uint8_t*>(ReadFramebufferPixel(framebuffer, framebufferWidth, framebufferHeight,
+                                                     x, y, rotate3dsPhysical));
+}
+
+bool WriteFramebufferBmp(const char* path, const uint8_t* framebuffer, uint16_t framebufferWidth,
+                         uint16_t framebufferHeight) {
+    if (path == nullptr || framebuffer == nullptr || framebufferWidth == 0 ||
+        framebufferHeight == 0) {
+        return false;
+    }
+
+    const bool rotate3dsPhysical =
+        framebufferWidth == 240u && (framebufferHeight == 400u || framebufferHeight == 320u);
+    const uint16_t outputWidth = rotate3dsPhysical ? framebufferHeight : framebufferWidth;
+    const uint16_t outputHeight = rotate3dsPhysical ? framebufferWidth : framebufferHeight;
+    const uint32_t rowBytes = static_cast<uint32_t>(outputWidth) * 3u;
+    const uint32_t padding = (4u - (rowBytes & 3u)) & 3u;
+    const uint32_t imageBytes = (rowBytes + padding) * outputHeight;
+    const uint32_t fileBytes = 14u + 40u + imageBytes;
+
+    FILE* file = std::fopen(path, "wb");
+    if (file == nullptr) return false;
+
+    std::fputc('B', file);
+    std::fputc('M', file);
+    WriteU32(file, fileBytes);
+    WriteU16(file, 0);
+    WriteU16(file, 0);
+    WriteU32(file, 14u + 40u);
+    WriteU32(file, 40u);
+    WriteU32(file, outputWidth);
+    WriteU32(file, outputHeight);
+    WriteU16(file, 1);
+    WriteU16(file, 24);
+    WriteU32(file, 0);
+    WriteU32(file, imageBytes);
+    WriteU32(file, 0);
+    WriteU32(file, 0);
+    WriteU32(file, 0);
+    WriteU32(file, 0);
+
+    bool ok = true;
+    for (int y = static_cast<int>(outputHeight) - 1; y >= 0 && ok; --y) {
+        for (uint16_t x = 0; x < outputWidth; ++x) {
+            const uint8_t* pixel =
+                ReadFramebufferPixel(framebuffer, framebufferWidth, framebufferHeight, x,
+                                     static_cast<uint16_t>(y), rotate3dsPhysical);
+            if (std::fwrite(pixel, 1, 3, file) != 3) {
+                ok = false;
+                break;
+            }
+        }
+        for (uint32_t p = 0; p < padding && ok; ++p) {
+            ok = std::fputc(0, file) != EOF;
+        }
+    }
+
+    if (std::fclose(file) != 0) ok = false;
+    if (!ok) std::remove(path);
+    return ok;
+}
+
+void DrawFramebufferRect(uint8_t* framebuffer, uint16_t framebufferWidth, uint16_t framebufferHeight,
+                         int x, int y, int width, int height, uint8_t shade) {
+    const bool rotate3dsPhysical =
+        framebufferWidth == 240u && (framebufferHeight == 400u || framebufferHeight == 320u);
+    const int outputWidth = rotate3dsPhysical ? framebufferHeight : framebufferWidth;
+    const int outputHeight = rotate3dsPhysical ? framebufferWidth : framebufferHeight;
+    const int x0 = std::max(0, x);
+    const int y0 = std::max(0, y);
+    const int x1 = std::min(outputWidth, x + width);
+    const int y1 = std::min(outputHeight, y + height);
+    for (int py = y0; py < y1; ++py) {
+        for (int px = x0; px < x1; ++px) {
+            uint8_t* pixel = WriteFramebufferPixel(framebuffer, framebufferWidth, framebufferHeight,
+                                                   static_cast<uint16_t>(px),
+                                                   static_cast<uint16_t>(py), rotate3dsPhysical);
+            pixel[0] = shade;
+            pixel[1] = shade;
+            pixel[2] = shade;
+        }
+    }
+}
+
+const char* GlyphRows(char ch) {
+    switch (ch) {
+        case 'A': return "01110100011000111111100011000110001";
+        case 'D': return "11110100011000110001100011000111110";
+        case 'E': return "11111100001000011110100001000011111";
+        case 'M': return "10001110111010110101100011000110001";
+        case 'P': return "11110100011000111110100001000010000";
+        case 'S': return "01111100001000001110000010000111110";
+        case 'U': return "10001100011000110001100011000101110";
+        case 'V': return "10001100011000110001100010101000100";
+        default: return "00000000000000000000000000000000000";
+    }
+}
+
+void DrawFramebufferText(uint8_t* framebuffer, uint16_t framebufferWidth, uint16_t framebufferHeight,
+                         int x, int y, const char* text, int scale) {
+    if (text == nullptr || scale <= 0) return;
+    int cursor = x;
+    for (const char* p = text; *p != '\0'; ++p) {
+        if (*p == ' ') {
+            cursor += 4 * scale;
+            continue;
+        }
+        const char* rows = GlyphRows(*p);
+        for (int gy = 0; gy < 7; ++gy) {
+            for (int gx = 0; gx < 5; ++gx) {
+                if (rows[gy * 5 + gx] == '1') {
+                    DrawFramebufferRect(framebuffer, framebufferWidth, framebufferHeight,
+                                        cursor + gx * scale, y + gy * scale, scale, scale, 255);
+                }
+            }
+        }
+        cursor += 6 * scale;
+    }
+}
+
+void DrawDumpSavedOverlayOnce() {
+    uint16_t width = 0;
+    uint16_t height = 0;
+    uint8_t* framebuffer = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &width, &height);
+    if (framebuffer == nullptr || width == 0 || height == 0) return;
+
+    DrawFramebufferRect(framebuffer, width, height, 126, 10, 148, 28, 0);
+    DrawFramebufferRect(framebuffer, width, height, 128, 12, 144, 24, 32);
+    DrawFramebufferText(framebuffer, width, height, 142, 17, "DUMP SAVED", 2);
+
+    const size_t bytes = static_cast<size_t>(width) * height * 3u;
+    GSPGPU_FlushDataCache(framebuffer, bytes);
+}
+
+void ShowDumpSavedOverlay() {
+    for (int pass = 0; pass < 2; ++pass) {
+        DrawDumpSavedOverlayOnce();
+        gfxFlushBuffers();
+        gfxSwapBuffers();
+        gspWaitForVBlank();
+    }
+    for (int frame = 0; frame < 45; ++frame) {
+        gspWaitForVBlank();
+    }
+}
+
+void WriteScreenCapture(FILE* manifest, const char* directory, gfxScreen_t screen,
+                        gfx3dSide_t side, const char* name) {
+    uint16_t width = 0;
+    uint16_t height = 0;
+    const uint8_t* framebuffer = gfxGetFramebuffer(screen, side, &width, &height);
+    if (framebuffer == nullptr || width == 0 || height == 0) {
+        if (manifest != nullptr) std::fprintf(manifest, "%s: unavailable\n", name);
+        return;
+    }
+
+    char path[256] = {};
+    std::snprintf(path, sizeof(path), "%s/%s-screen.rgb", directory, name);
+    const size_t rawBytes = static_cast<size_t>(width) * height * 3u;
+    const bool rawOk = WriteBlob(path, framebuffer, rawBytes);
+
+    std::snprintf(path, sizeof(path), "%s/%s-screen.bmp", directory, name);
+    const bool bmpOk = WriteFramebufferBmp(path, framebuffer, width, height);
+
+    if (manifest != nullptr) {
+        const bool rotated = width == 240u && (height == 400u || height == 320u);
+        std::fprintf(manifest,
+                     "%s: framebuffer=%ux%u rgb8/bgr8 bytes=%lu raw=%s bmp=%s bmpLogical=%ux%u\n",
+                     name, width, height, static_cast<unsigned long>(rawBytes),
+                     rawOk ? "ok" : "failed", bmpOk ? "ok" : "failed",
+                     rotated ? height : width, rotated ? width : height);
+    }
+}
+
+void WriteScreenCaptures(const char* directory) {
+    char path[256] = {};
+    std::snprintf(path, sizeof(path), "%s/screens.txt", directory);
+    FILE* manifest = std::fopen(path, "wb");
+    if (manifest != nullptr) {
+        std::fprintf(manifest, "Physical 3DS framebuffer capture\n");
+        std::fprintf(manifest, "Source: gfxGetFramebuffer, not renderer readback\n");
+        std::fprintf(manifest, "Raw files preserve framebuffer memory exactly; BMP files rotate the native 3DS 240x400/240x320 layout into visible screen orientation.\n\n");
+    }
+
+    WriteScreenCapture(manifest, directory, GFX_TOP, GFX_LEFT, "top");
+    WriteScreenCapture(manifest, directory, GFX_BOTTOM, GFX_LEFT, "bottom");
+
+    if (manifest != nullptr) std::fclose(manifest);
 }
 
 void MakeTimestamp(char* output, size_t outputSize) {
@@ -175,7 +407,7 @@ void CopyRuntimeLog(const char* directory) {
     std::fclose(source);
 }
 
-void WriteQuickDump() {
+void WriteQuickDump(const char* trigger) {
     char directory[192] = {};
     if (!CreateSessionDirectory(directory, sizeof(directory))) {
         LogLine("dump failed: ", "could not create session directory");
@@ -196,9 +428,10 @@ void WriteQuickDump() {
         s32 priority = -1;
         svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
         std::fprintf(info, "Mario Kart 64 3DS diagnostic dump\n");
-        std::fprintf(info, "Trigger: L + R + A\n");
+        std::fprintf(info, "Trigger: %s\n", trigger == nullptr ? "unknown" : trigger);
         std::fprintf(info, "Uptime ms: %llu\n",
                      static_cast<unsigned long long>(osGetTime() - sStartTime));
+        std::fprintf(info, "Game/audio paused during dump: yes\n");
         std::fprintf(info, "Stage: %s\n", stage);
         std::fprintf(info, "Last resource: %s\n", resource);
         std::fprintf(info, "Archive entries / loaded resources: %lu / %lu\n",
@@ -240,6 +473,8 @@ void WriteQuickDump() {
         std::fclose(info);
     }
 
+    WriteScreenCaptures(directory);
+
     const uintptr_t arena = sArenaBase.load(std::memory_order_acquire);
     const size_t arenaCapacity = std::min(sArenaCapacity.load(std::memory_order_relaxed), kMaxArenaDump);
     if (arena != 0 && arenaCapacity != 0) {
@@ -256,13 +491,16 @@ void WriteQuickDump() {
 
     CopyRuntimeLog(directory);
     LogLine("dump written: ", directory);
+    ShowDumpSavedOverlay();
 }
 
 void DiagnosticThread(void*) {
     bool comboWasHeld = false;
+    bool selectWasHeld = false;
     while (sRunning.load(std::memory_order_acquire)) {
         hidScanInput();
         const uint32_t keys = hidKeysHeld();
+        const uint32_t gameKeys = keys & ~static_cast<uint32_t>(KEY_SELECT);
         circlePosition circle = {};
         circlePosition cstick = {};
         hidCircleRead(&circle);
@@ -271,11 +509,21 @@ void DiagnosticThread(void*) {
         sCircleY.store(circle.dy, std::memory_order_relaxed);
         sCstickX.store(cstick.dx, std::memory_order_relaxed);
         sCstickY.store(cstick.dy, std::memory_order_relaxed);
-        sKeysHeld.store(keys, std::memory_order_release);
+        sKeysHeld.store(gameKeys, std::memory_order_release);
         sInputReady.store(true, std::memory_order_release);
 
+        const bool select = (keys & KEY_SELECT) != 0;
         const bool combo = (keys & (KEY_L | KEY_R | KEY_A)) == (KEY_L | KEY_R | KEY_A);
-        if (combo && !comboWasHeld) WriteQuickDump();
+        const bool selectPressed = select && !selectWasHeld;
+        const bool comboPressed = combo && !comboWasHeld;
+        if (selectPressed || comboPressed) {
+            unsigned expected = kDumpRequestNone;
+            const unsigned request = selectPressed ? kDumpRequestSelect : kDumpRequestCombo;
+            if (sDumpRequest.compare_exchange_strong(expected, request, std::memory_order_acq_rel)) {
+                LogLine("dump requested: ", DumpTriggerName(request));
+            }
+        }
+        selectWasHeld = select;
         comboWasHeld = combo;
         svcSleepThread(16000000LL);
     }
@@ -328,6 +576,25 @@ extern "C" void Mk64Diagnostics3DSStop() {
 
 extern "C" bool Mk64Diagnostics3DSOwnsHid() {
     return sRunning.load(std::memory_order_acquire);
+}
+
+extern "C" bool Mk64Diagnostics3DSIsPaused() {
+    return sDumpPaused.load(std::memory_order_acquire);
+}
+
+extern "C" bool Mk64Diagnostics3DSServiceDumpIfRequested() {
+    const unsigned request = sDumpRequest.exchange(kDumpRequestNone, std::memory_order_acq_rel);
+    if (request == kDumpRequestNone) return false;
+
+    const char* trigger = DumpTriggerName(request);
+    sDumpPaused.store(true, std::memory_order_release);
+    Mk64Diagnostics3DSSetStage("diagnostic-dump-paused");
+    LogLine("dump trigger: ", trigger);
+    if (Mk64GameAudio3DSSetPaused != nullptr) Mk64GameAudio3DSSetPaused(true);
+    WriteQuickDump(trigger);
+    if (Mk64GameAudio3DSSetPaused != nullptr) Mk64GameAudio3DSSetPaused(false);
+    sDumpPaused.store(false, std::memory_order_release);
+    return true;
 }
 
 extern "C" bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input) {

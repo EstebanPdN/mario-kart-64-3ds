@@ -58,9 +58,6 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     if ((keys & KEY_START) != 0) {
         pad->buttons |= MK64_N64_START;
     }
-    if ((keys & KEY_SELECT) != 0) {
-        pad->buttons |= MK64_N64_Z;
-    }
     if ((keys & KEY_L) != 0) {
         pad->buttons |= MK64_N64_L;
     }

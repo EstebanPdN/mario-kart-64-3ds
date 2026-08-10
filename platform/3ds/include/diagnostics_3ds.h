@@ -19,6 +19,8 @@ typedef struct Mk64DiagnosticsInput3DS {
 bool Mk64Diagnostics3DSStart(void);
 void Mk64Diagnostics3DSStop(void);
 bool Mk64Diagnostics3DSOwnsHid(void);
+bool Mk64Diagnostics3DSIsPaused(void);
+bool Mk64Diagnostics3DSServiceDumpIfRequested(void);
 bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input);
 
 void Mk64Diagnostics3DSCheckpoint(const char* stage);
