@@ -55,6 +55,12 @@ extern "C" bool Mk64GameAudio3DSInit() {
     return sReady;
 }
 
+extern "C" void Mk64GameAudio3DSSetPaused(bool paused) {
+    if (sReady) {
+        Mk64Audio3DSSetPaused(paused);
+    }
+}
+
 extern "C" void Mk64GameAudio3DSPump() {
     if (!sReady || Mk64Audio3DSBufferedFrames() > kStereoFramesPerGameFrame * 2) {
         return;

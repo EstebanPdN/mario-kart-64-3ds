@@ -118,6 +118,14 @@ int main() {
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-ready");
 
     while (WindowIsRunning()) {
+        if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
+            continue;
+        }
+        if (Mk64Diagnostics3DSIsPaused()) {
+            Mk64Diagnostics3DSSetStage("diagnostic-dump-paused");
+            svcSleepThread(16000000LL);
+            continue;
+        }
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
         thread5_iteration();
         Mk64Diagnostics3DSSetStage("game-loop-audio");

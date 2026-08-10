@@ -7,6 +7,7 @@ extern "C" {
 #endif
 
 bool Mk64GameAudio3DSInit(void);
+void Mk64GameAudio3DSSetPaused(bool paused);
 void Mk64GameAudio3DSPump(void);
 void Mk64GameAudio3DSShutdown(void);
 

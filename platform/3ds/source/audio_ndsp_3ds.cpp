@@ -93,6 +93,12 @@ extern "C" void Mk64Audio3DSShutdown(void) {
     sDroppedBuffers.store(0, std::memory_order_relaxed);
 }
 
+extern "C" void Mk64Audio3DSSetPaused(bool paused) {
+    if (sInitialized) {
+        ndspChnSetPaused(kChannel, paused);
+    }
+}
+
 extern "C" uint32_t Mk64Audio3DSBufferedFrames(void) {
     if (!sInitialized) {
         return 0;
