@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <utility>
 #include <vector>
 
@@ -21,10 +22,11 @@ constexpr uint32_t kMaxSourceVertices = 256 * 3;
 constexpr uint32_t kMaxDrawVertices = 256 * 6;
 constexpr uint32_t kVertexBufferCapacity = 32 * 1024;
 constexpr uint32_t kPackedVertexFloats = 12;
-// The largest texture in the vanilla MK64 O2R data is 320 pixels wide. A
-// 512-pixel cap preserves the required power-of-two backing texture while
-// reducing Fast3D's RGBA upload buffer from 4 MiB to 1 MiB on Old 3DS.
-constexpr uint32_t kMaxTextureSize = 512;
+// The largest dimension in the vanilla MK64 O2R texture set is 320 pixels.
+// Advertising that real source limit reduces Fast3D's square RGBA conversion
+// buffer from 1 MiB to 400 KiB; the Citro3D backing allocation can still round
+// a 320-pixel source up to 512 internally.
+constexpr uint32_t kMaxTextureSize = 320;
 constexpr float kClipWEpsilon = 1.0e-4f;
 constexpr size_t kMaxVertexStrideFloats = 64;
 
@@ -220,6 +222,7 @@ struct GfxRenderingAPICitro3D::Impl {
     struct TextureSlot {
         C3D_Tex texture = {};
         bool initialized = false;
+        bool hasTransparency = false;
         uint16_t sourceWidth = 0;
         uint16_t sourceHeight = 0;
     };
@@ -255,7 +258,11 @@ struct GfxRenderingAPICitro3D::Impl {
     std::vector<float> clipScratch;
     ShaderProgram* currentProgram = nullptr;
     std::unordered_map<uint64_t, std::unique_ptr<ShaderProgram>> shaderPrograms;
-    std::vector<TextureSlot> textures = { TextureSlot{} };
+    // Citro3D retains C3D_Tex pointers after C3D_TexBind. A vector can move
+    // every slot when NewTexture grows it, leaving the GPU state pointing at
+    // freed storage. deque keeps existing slot addresses stable while the
+    // Fast3D cache creates textures incrementally.
+    std::deque<TextureSlot> textures = { TextureSlot{} };
     std::vector<std::unique_ptr<FramebufferSlot>> framebuffers;
     std::array<uint32_t, 6> selectedTextures = {};
     std::array<int, 6> selectedFramebuffers = {};
@@ -366,14 +373,17 @@ ShaderProgram* GfxRenderingAPICitro3D::CreateAndLoadNewShader(uint64_t shaderId0
                     program->numInputs = std::max(program->numInputs, static_cast<uint8_t>(source));
                 } else if (source == SourceTexel0 || source == SourceTexel0Alpha ||
                            source == SourceTexel1 || source == SourceTexel1Alpha) {
-                    int texture = (source == SourceTexel0 || source == SourceTexel0Alpha) ? 0 : 1;
-                    // The RDP swaps TEXEL0 and TEXEL1 for the second combiner
-                    // cycle. Match the desktop shaders and request/bind the
-                    // texture that is actually sampled by that cycle.
-                    if (program->twoCycle && cycle == 1) {
-                        texture ^= 1;
-                    }
+                    const int texture =
+                        (source == SourceTexel0 || source == SourceTexel0Alpha) ? 0 : 1;
                     program->usedTextures[texture] = true;
+                    // Fast3D supplies both coordinate sets for two-cycle
+                    // programs because the RDP swaps TEXEL0/TEXEL1 between
+                    // cycles. Keep ShaderGetInfo's vertex layout identical to
+                    // the desktop backends even if only one token appears in
+                    // the packed combiner.
+                    if (program->twoCycle) {
+                        program->usedTextures[texture ^ 1] = true;
+                    }
                 }
             }
         }
@@ -446,6 +456,7 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     if (rgba32Buf == nullptr || width == 0 || height == 0 || width > kMaxTextureSize || height > kMaxTextureSize) {
         return;
     }
+
     const uint32_t textureId = mImpl->selectedTextures[mImpl->selectedTextureUnit];
     if (textureId == 0 || textureId >= mImpl->textures.size()) {
         return;
@@ -463,14 +474,21 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
         return;
     }
     slot.initialized = true;
+    slot.hasTransparency = false;
     slot.sourceWidth = static_cast<uint16_t>(width);
     slot.sourceHeight = static_cast<uint16_t>(height);
 
-    // Fast3D supplies RGBA bytes, while PICA's GPU_RGBA8 texels are stored as
-    // A-B-G-R on this little-endian CPU. A raw upload makes
-    // red become alpha and produces the cyan/transparent corruption seen on
-    // the title screen. Build PICA's 8x8 Morton layout on the CPU; this also
-    // avoids emulator-specific linear-to-tiled display-transfer corruption.
+    for (size_t pixel = 0; pixel < static_cast<size_t>(width) * height; ++pixel) {
+        if (rgba32Buf[pixel * 4 + 3] != 0xFF) {
+            slot.hasTransparency = true;
+            break;
+        }
+    }
+
+    // Fast3D supplies RGBA bytes while PICA stores GPU_RGBA8 texels in tiled
+    // A-B-G-R byte order. Swap each host word while building the Morton layout;
+    // otherwise red is interpreted as alpha. Direct swizzling also avoids an
+    // extra transfer and allocation.
     // Fill POT padding by wrapping so filtering cannot sample transparent
     // border texels. C3D_TexInit already provides writable linear memory, so
     // write its Morton layout directly and avoid a second allocation, cache
@@ -482,7 +500,12 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
             uint32_t* tile = texturePixels +
                 (static_cast<size_t>(tileY / 8U) * tilesPerRow + tileX / 8U) * 64U;
             for (uint32_t row = 0; row < 8U; ++row) {
-                const uint32_t sourceRow = (tileY + row) % height;
+                // PICA texture memory has a bottom-left sampling origin while
+                // Fast3D supplies rows top-down. Flip within the logical image
+                // before wrapping POT padding; using textureHeight here shifts
+                // every non-power-of-two sprite by the padding amount.
+                const uint32_t wrappedRow = (tileY + row) % height;
+                const uint32_t sourceRow = height - 1U - wrappedRow;
                 for (uint32_t column = 0; column < 8U; ++column) {
                     const uint32_t sourceColumn = (tileX + column) % width;
                     uint32_t pixel = 0;
@@ -644,6 +667,28 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         }
     }
 
+    bool useTextureAlpha = false;
+    if (!program->alpha) {
+        const int cycleCount = program->twoCycle ? 2 : 1;
+        for (int cycle = 0; cycle < cycleCount && !useTextureAlpha; ++cycle) {
+            for (int term = 0; term < 4 && !useTextureAlpha; ++term) {
+                const int source = program->combiner[cycle][1][term];
+                int texture = -1;
+                if (source == SourceTexel0 || source == SourceTexel0Alpha) {
+                    texture = cycle == 0 ? 0 : 1;
+                } else if (source == SourceTexel1 || source == SourceTexel1Alpha) {
+                    texture = cycle == 0 ? 1 : 0;
+                }
+                if (texture >= 0) {
+                    const uint32_t textureId = mImpl->selectedTextures[texture];
+                    useTextureAlpha = textureId < mImpl->textures.size() &&
+                                      mImpl->textures[textureId].initialized &&
+                                      mImpl->textures[textureId].hasTransparency;
+                }
+            }
+        }
+    }
+
     for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
         const float* source = drawVertices + vertex * program->strideFloats;
         float* destination = mImpl->packedVertices + (firstVertex + vertex) * kPackedVertexFloats;
@@ -703,8 +748,9 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     const int cycleCount = program->twoCycle ? 2 : 1;
     for (int cycle = 0; cycle < cycleCount && stage < 6; ++cycle) {
         const ChannelPlan rgbPlan = BuildChannelPlan(program->combiner[cycle][0]);
-        const ChannelPlan alphaPlan = program->alpha ? BuildChannelPlan(program->combiner[cycle][1])
-                                                     : ChannelPlan{ PassPrevious() };
+        const ChannelPlan alphaPlan = program->alpha || useTextureAlpha
+                                          ? BuildChannelPlan(program->combiner[cycle][1])
+                                          : ChannelPlan{ PassPrevious() };
         const size_t operationCount = std::max(rgbPlan.size(), alphaPlan.size());
         for (size_t operationIndex = 0; operationIndex < operationCount && stage < 6; ++operationIndex, ++stage) {
             const ChannelOperation rgbOperation =
@@ -745,9 +791,16 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                   program->textureEdge ? 0x7F : 0x08);
     C3D_DepthTest(mImpl->depthTest, mImpl->depthTest ? GPU_GREATER : GPU_ALWAYS,
                   static_cast<GPU_WRITEMASK>(GPU_WRITE_COLOR | (mImpl->depthWrite ? GPU_WRITE_DEPTH : 0)));
+    if (useTextureAlpha) {
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
+                       GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+    }
     GSPGPU_FlushDataCache(mImpl->packedVertices + firstVertex * kPackedVertexFloats,
                           vertexCount * kPackedVertexFloats * sizeof(float));
     C3D_DrawArrays(GPU_TRIANGLES, static_cast<int>(firstVertex), static_cast<int>(vertexCount));
+    if (useTextureAlpha) {
+        SetUseAlpha(mImpl->useAlpha);
+    }
     mImpl->packedVertexCount += vertexCount;
 }
 

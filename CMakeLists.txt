@@ -74,7 +74,7 @@ if(MK64_3DS_BUILD_GAME_CORE)
     list(FILTER SPAGHETTIKART_GAME_RECURSIVE EXCLUDE REGEX ".*/crash_screen_enhancement\\.c$")
 
     # The desktop port reserves 256 MiB in racing/memory.c. Generate a 3DS-only
-    # translation unit with a runtime-allocated 16 MiB arena while leaving
+    # translation unit with a runtime-allocated 8 MiB arena while leaving
     # upstream clean. Keeping this arena out of .bss leaves enough heap for the
     # first-run on-device O2R installer on Old 3DS.
     set(SPAGHETTIKART_MEMORY_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/memory.c")
@@ -83,7 +83,7 @@ if(MK64_3DS_BUILD_GAME_CORE)
     file(READ "${SPAGHETTIKART_MEMORY_SOURCE}" SPAGHETTIKART_MEMORY_TEXT)
     string(REPLACE
         "static u8 sMemoryPool[0x10000000] ALIGNED4096;"
-        "static u8* sMemoryPool = NULL;\nint Mk64MemoryArena3DSIsReady(void) { return sMemoryPool != NULL; }"
+        "static u8* sMemoryPool = NULL;\nstatic size_t sMemoryPoolSize = 0;\nint Mk64MemoryArena3DSIsReady(void) { return sMemoryPool != NULL; }\nsize_t Mk64MemoryArena3DSCapacity(void) { return sMemoryPoolSize; }"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_MEMORY_TEXT}"
     )
@@ -101,19 +101,19 @@ if(MK64_3DS_BUILD_GAME_CORE)
     )
     string(REPLACE
         "    // Clear pool\n    memset(sMemoryPool, 0, sizeof(sMemoryPool));\n\n    // Force the pointer to be exactly at the start of the aligned array\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    \n    // Ensure sPoolEnd is exactly at the end of the 256MB block\n    sPoolEnd = poolStart + sizeof(sMemoryPool);"
-        "    if (sMemoryPool == NULL) {\n        sMemoryPool = (u8*)aligned_alloc(4096, 0x01000000);\n        if (sMemoryPool == NULL) {\n            printf(\"[memory.c] initialize_memory_pool(): 3DS arena allocation failed!\\n\");\n            return;\n        }\n    }\n    memset(sMemoryPool, 0, 0x01000000);\n\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    sPoolEnd = poolStart + 0x01000000;\n    if (Mk64Diagnostics3DSSetGameArena != NULL) {\n        Mk64Diagnostics3DSSetGameArena(sMemoryPool, 0x01000000);\n    }"
+        "    if (sMemoryPool == NULL) {\n        sMemoryPoolSize = 0x00800000;\n        sMemoryPool = (u8*)aligned_alloc(4096, sMemoryPoolSize);\n        if (sMemoryPool == NULL) {\n            sMemoryPoolSize = 0;\n            printf(\"[memory.c] initialize_memory_pool(): 3DS arena allocation failed!\\n\");\n            return;\n        }\n    }\n    memset(sMemoryPool, 0, sMemoryPoolSize);\n\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    sPoolEnd = poolStart + sMemoryPoolSize;\n    if (Mk64Diagnostics3DSSetGameArena != NULL) {\n        Mk64Diagnostics3DSSetGameArena(sMemoryPool, sMemoryPoolSize);\n    }"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
     )
     string(REPLACE
         "(((sMemoryPool + sizeof(sMemoryPool)) - sMemoryPool))"
-        "((uintptr_t)0x01000000)"
+        "((uintptr_t)sMemoryPoolSize)"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
     )
     string(REPLACE
         "(void*) (sMemoryPool + sizeof(sMemoryPool))"
-        "(void*) (sMemoryPool + 0x01000000)"
+        "(void*) (sMemoryPool + sMemoryPoolSize)"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
     )
@@ -490,6 +490,34 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
+        set(SPAGHETTIKART_3DS_POINTER_GUARD_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[#else
+    if (i <= 0x0FFFFFFF) {
+        return false;
+    }
+#endif]=]
+            [=[#else
+#if defined(__3DS__)
+    // 3DS application-heap pointers commonly live below 0x10000000, so the
+    // desktop numeric-address guard rejects valid framebuffer and sprite data.
+    // A segmented address is unresolved only when SegAddr returns the original
+    // tagged command word unchanged.
+    if ((cmd->words.w1 & 1U) != 0 && i == static_cast<uintptr_t>(cmd->words.w1)) {
+        return false;
+    }
+#else
+    if (i <= 0x0FFFFFFF) {
+        return false;
+    }
+#endif
+#endif]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_POINTER_GUARD_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D texture pointer guard insertion point changed")
+        endif()
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_INTERPRETER_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D interpreter watchdog insertion points changed")
         endif()

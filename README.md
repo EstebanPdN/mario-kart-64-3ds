@@ -17,9 +17,10 @@ The unbounded desktop matrix-recording interpolation path used by v0.11 is disab
 Old 3DS build during startup. A bounded 3DS-specific 60 Hz path remains future work; sustained 60 FPS is not claimed.
 
 The v0.12 test build enables native 26.8 kHz stereo NDSP output, corrects independent two-texture UVs and
-second-cycle RDP texture selection, removes the extra per-upload texture staging allocation, and initializes the
-game memory arena before resource and renderer allocations. The CIA uses the supplied custom icon and a compact
-flat HOME Menu banner.
+second-cycle RDP texture selection, accepts valid 3DS heap-backed texture pointers, and preserves texture alpha for
+2D sprites. It also removes the extra per-upload texture staging allocation and initializes the 8 MiB game memory
+arena before resource and renderer allocations. The CIA uses the supplied custom icon and a compact flat HOME Menu
+banner.
 
 Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
 3DS and New Nintendo 3DS performance still require real-hardware profiling.
@@ -87,7 +88,7 @@ It is created on the SD card only; do not attach it to a public issue or release
 details.
 
 During this first-run step the top screen shows the bundled loading image with an overlaid progress bar, while the
-bottom screen mirrors the live installer output. The game memory arena is allocated only after game-data preparation,
+bottom screen mirrors the live installer output. The game memory arena is reserved before game-data preparation,
 the ROM is loaded after the Torch configuration is parsed, and the 3DS O2R writer spools the ZIP central directory to
 the SD card instead of keeping it in RAM. The 3DS cartridge-header reader does not duplicate the full ROM, incremental
 Torch hash-cache generation is disabled for this one-shot installer, and memory checkpoints are included in the local

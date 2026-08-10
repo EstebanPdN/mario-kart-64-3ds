@@ -47,20 +47,27 @@ int ShowError(const char* message) {
 }
 
 int main() {
+    Mk64Diagnostics3DSStart();
+    Mk64Diagnostics3DSCheckpoint("game-arena-init");
+
     // Hold the vanilla game's arena before O2R and Citro3D allocate from the
     // much smaller Old 3DS application heap. setup_game_memory() resets this
     // same arena later; this early call exists solely to make the reservation
     // deterministic and to turn allocation failure into a visible error.
     initialize_memory_pool();
     if (!Mk64MemoryArena3DSIsReady()) {
-        return ShowError("Not enough application memory for the 16 MiB game arena.");
+        Mk64Diagnostics3DSCheckpoint("game-arena-init-failed");
+        Mk64Diagnostics3DSStop();
+        return ShowError("Not enough application memory for the 8 MiB game arena.");
     }
+    Mk64Diagnostics3DSCheckpoint("game-arena-ready");
 
     const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
     if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
+        Mk64Diagnostics3DSCheckpoint("game-data-failed");
+        Mk64Diagnostics3DSStop();
         return ShowError(data.message);
     }
-    Mk64Diagnostics3DSStart();
     Mk64Diagnostics3DSCheckpoint("game-data-ready");
     Mk64Diagnostics3DSCheckpoint("resource-runtime-init");
     if (!Mk64Resource3DSInit(data.archivePath)) {
