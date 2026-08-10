@@ -56,6 +56,32 @@ const std::array<VanillaTrack, 20> kTracks = {{
 
 size_t sTrackIndex = 0;
 
+void RegisterVanillaTracks() {
+    gTrackRegistry.Clear();
+    for (const VanillaTrack& track : kTracks) {
+        TrackInfo info = {
+            .ResourceName = track.resourceName,
+            .Name = track.name,
+            .DebugName = track.debugName,
+            .Length = track.length,
+            .MinimapTexture = track.minimap,
+        };
+        gTrackRegistry.Add(info, [select = track.select]() { select(); });
+    }
+
+    // The ceremony is not selectable in the browser's 20-course index, but
+    // it still goes through Track::Load after a Grand Prix. Keep it in the
+    // registry so that path initializes its collision arena as well.
+    TrackInfo podium = {
+        .ResourceName = "mk:podium_ceremony",
+        .Name = "podium ceremony",
+        .DebugName = "podium",
+        .Length = "1025m",
+        .MinimapTexture = nullptr,
+    };
+    gTrackRegistry.Add(podium, []() { SelectPodiumCeremony(); });
+}
+
 void SelectIndex(size_t index) {
     if (index >= kTracks.size()) return;
     sTrackIndex = index;
@@ -65,6 +91,7 @@ void SelectIndex(size_t index) {
 
 extern "C" bool Mk64GameState3DSInit() {
     gSky = std::make_unique<Sky>();
+    RegisterVanillaTracks();
 
     gMushroomCup = std::make_unique<Cup>("mk:mushroom_cup", "Mushroom Cup",
         std::vector<std::string>{ "mk:luigi_raceway", "mk:moo_moo_farm", "mk:koopa_troopa_beach", "mk:kalimari_desert" });
@@ -76,6 +103,12 @@ extern "C" bool Mk64GameState3DSInit() {
         std::vector<std::string>{ "mk:dk_jungle", "mk:yoshi_valley", "mk:banshee_boardwalk", "mk:rainbow_road" });
     gBattleCup = std::make_unique<Cup>("mk:battle_cup", "Battle Cup",
         std::vector<std::string>{ "mk:big_donut", "mk:block_fort", "mk:double_deck", "mk:skyscraper" });
+
+    gMushroomCup->ValidateTrackIds(gTrackRegistry);
+    gFlowerCup->ValidateTrackIds(gTrackRegistry);
+    gStarCup->ValidateTrackIds(gTrackRegistry);
+    gSpecialCup->ValidateTrackIds(gTrackRegistry);
+    gBattleCup->ValidateTrackIds(gTrackRegistry);
 
     World* world = GetWorld();
     if (world == nullptr) return false;

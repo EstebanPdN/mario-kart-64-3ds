@@ -78,6 +78,11 @@ uint8_t ToByte(float value) {
     return static_cast<uint8_t>(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
 }
 
+constexpr uint32_t MortonOffset8x8(uint32_t x, uint32_t y) {
+    return (x & 1U) | ((y & 1U) << 1U) | ((x & 2U) << 1U) | ((y & 2U) << 2U) |
+           ((x & 4U) << 2U) | ((y & 4U) << 3U);
+}
+
 uint32_t PackColor(const std::array<float, 4>& color) {
     return static_cast<uint32_t>(ToByte(color[0])) | (static_cast<uint32_t>(ToByte(color[1])) << 8U) |
            (static_cast<uint32_t>(ToByte(color[2])) << 16U) |
@@ -316,7 +321,9 @@ int GfxRenderingAPICitro3D::GetMaxTextureSize() {
 }
 
 GfxClipParameters GfxRenderingAPICitro3D::GetClipParameters() {
-    return { true, false };
+    // Fast3D emits OpenGL-style clip Z in [-w, w]. StartFrame's projection
+    // matrix performs the sole conversion to PICA's [-w, 0] range.
+    return { false, false };
 }
 
 void GfxRenderingAPICitro3D::UnloadShader(ShaderProgram* oldPrg) {
@@ -459,19 +466,31 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
         slot.initialized = false;
         return;
     }
-    std::memset(staging, 0, stagingSize);
-    for (uint32_t row = 0; row < height; ++row) {
-        std::memcpy(staging + static_cast<size_t>(row) * textureWidth * 4,
-                    rgba32Buf + static_cast<size_t>(row) * width * 4, static_cast<size_t>(width) * 4);
+    // Fast3D supplies RGBA bytes, while PICA's GPU_RGBA8 texels are stored as
+    // A-B-G-R on this little-endian CPU. A raw upload makes
+    // red become alpha and produces the cyan/transparent corruption seen on
+    // the title screen. Build PICA's 8x8 Morton layout on the CPU; this also
+    // avoids emulator-specific linear-to-tiled display-transfer corruption.
+    // Fill POT padding by wrapping so filtering cannot sample transparent
+    // border texels.
+    auto* stagingPixels = reinterpret_cast<uint32_t*>(staging);
+    const uint32_t tilesPerRow = textureWidth / 8U;
+    for (uint32_t row = 0; row < textureHeight; ++row) {
+        const uint32_t sourceRow = (textureHeight - 1U - row) % height;
+        for (uint32_t column = 0; column < textureWidth; ++column) {
+            const uint32_t sourceColumn = column % width;
+            uint32_t pixel = 0;
+            std::memcpy(&pixel, rgba32Buf + (static_cast<size_t>(sourceRow) * width + sourceColumn) * 4,
+                        sizeof(pixel));
+            const size_t tile = static_cast<size_t>(row / 8U) * tilesPerRow + column / 8U;
+            const size_t tiledOffset = tile * 64U + MortonOffset8x8(column & 7U, row & 7U);
+            stagingPixels[tiledOffset] = __builtin_bswap32(pixel);
+        }
     }
 
     GSPGPU_FlushDataCache(staging, stagingSize);
-    C3D_SyncDisplayTransfer(reinterpret_cast<uint32_t*>(staging), GX_BUFFER_DIM(textureWidth, textureHeight),
-                            static_cast<uint32_t*>(slot.texture.data), GX_BUFFER_DIM(textureWidth, textureHeight),
-                            GX_TRANSFER_FLIP_VERT(1) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
-                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    C3D_TexUpload(&slot.texture, staging);
+    C3D_TexFlush(&slot.texture);
     linearFree(staging);
     C3D_TexSetFilter(&slot.texture, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&slot.texture, GPU_REPEAT, GPU_REPEAT);
@@ -512,7 +531,11 @@ void GfxRenderingAPICitro3D::SetDepthTestAndMask(bool depthTest, bool zUpdate) {
 
 void GfxRenderingAPICitro3D::SetZmodeDecal(bool decal) {
     mImpl->decal = decal;
-    C3D_DepthMap(true, decal ? -0.9995f : -1.0f, decal ? 0.9995f : 1.0f);
+    // The vertex shader maps OpenGL clip depth into PICA's [-w, 0] range.
+    // Reverse that range onto [1, 0] for GPU_GREATER and the zero-cleared
+    // depth buffer. An offset of +1 saturates nearly every fragment at 1 and
+    // makes later geometry fail the depth test.
+    C3D_DepthMap(true, -1.0f, decal ? -0.001f : 0.0f);
 }
 
 void GfxRenderingAPICitro3D::SetViewport(int x, int y, int width, int height) {
@@ -781,7 +804,7 @@ void GfxRenderingAPICitro3D::Init() {
     BufInfo_Init(bufferInfo);
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 3, 0x210);
     C3D_CullFace(GPU_CULL_NONE);
-    C3D_DepthMap(true, -1.0f, 1.0f);
+    C3D_DepthMap(true, -1.0f, 0.0f);
     C3D_FrameRate(30.0f);
     SetUseAlpha(false);
     SetDepthTestAndMask(false, false);
