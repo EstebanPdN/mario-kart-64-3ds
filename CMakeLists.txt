@@ -44,6 +44,7 @@ target_compile_features(mk64-3ds-platform PUBLIC cxx_std_17)
 target_compile_definitions(mk64-3ds-platform PRIVATE MK64_3DS_ENABLE_NDSP_AUDIO=1)
 target_compile_options(mk64-3ds-platform PRIVATE
     -O3
+    -fomit-frame-pointer
     -ffunction-sections
     -fdata-sections
     -Wall
@@ -80,6 +81,9 @@ if(MK64_3DS_BUILD_GAME_CORE)
     set(SPAGHETTIKART_MEMORY_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/memory.c")
     set(SPAGHETTIKART_3DS_MEMORY_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/memory_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_MEMORY_SOURCE}")
+    set(SPAGHETTIKART_COLLISION_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/collision.c")
+    set(SPAGHETTIKART_3DS_COLLISION_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/collision_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_COLLISION_SOURCE}")
     file(READ "${SPAGHETTIKART_MEMORY_SOURCE}" SPAGHETTIKART_MEMORY_TEXT)
     string(REPLACE
         "static u8 sMemoryPool[0x10000000] ALIGNED4096;"
@@ -134,6 +138,106 @@ if(MK64_3DS_BUILD_GAME_CORE)
         file(WRITE "${SPAGHETTIKART_3DS_MEMORY_SOURCE}" "${SPAGHETTIKART_3DS_MEMORY_TEXT}")
     endif()
 
+    # The desktop collision-mesh builder recursively walks course display lists
+    # while loading O2R resources. On 3DS that path needs hard safety bounds:
+    # repeated/corrupt display lists can exhaust heap or overrun the vanilla
+    # collision arrays before a race is visible. Generate a 3DS copy with those
+    # guards while keeping the public upstream submodule clean.
+    file(READ "${SPAGHETTIKART_COLLISION_SOURCE}" SPAGHETTIKART_COLLISION_TEXT)
+    string(REPLACE
+        "#include <stdio.h>"
+        "#include <stdio.h>\n#include <stddef.h>\n#if defined(PLATFORM_3DS)\n#define MK64_3DS_MAX_COLLISION_DLS 2048\n#define MK64_3DS_MAX_COLLISION_COMMANDS 8192\n#define MK64_3DS_MAX_COLLISION_TRIANGLES 8192\n#define MK64_3DS_MAX_COLLISION_INDICES 32768\n#endif"
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "u32 numTimes = 0;"
+        [=[u32 numTimes = 0;
+
+#if defined(PLATFORM_3DS)
+typedef struct {
+    uintptr_t addr;
+    s8 surfaceType;
+    u16 sectionId;
+} Mk64CollisionVisit3DS;
+
+static Mk64CollisionVisit3DS sCollisionVisits3DS[MK64_3DS_MAX_COLLISION_DLS];
+static u32 sCollisionVisitCount3DS = 0;
+
+static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 sectionId) {
+    for (u32 i = 0; i < sCollisionVisitCount3DS; i++) {
+        if ((sCollisionVisits3DS[i].addr == addr) &&
+            (sCollisionVisits3DS[i].surfaceType == surfaceType) &&
+            (sCollisionVisits3DS[i].sectionId == sectionId)) {
+            return false;
+        }
+    }
+    if (sCollisionVisitCount3DS >= MK64_3DS_MAX_COLLISION_DLS) {
+        return false;
+    }
+    sCollisionVisits3DS[sCollisionVisitCount3DS].addr = addr;
+    sCollisionVisits3DS[sCollisionVisitCount3DS].surfaceType = surfaceType;
+    sCollisionVisits3DS[sCollisionVisitCount3DS].sectionId = sectionId;
+    sCollisionVisitCount3DS++;
+    return true;
+}
+#endif]=]
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "void add_collision_triangle(Vtx* vtx1, Vtx* vtx2, Vtx* vtx3, s8 surfaceType, u16 sectionId) {\n    CollisionTriangle* triangle = &gCollisionMesh[gCollisionMeshCount];"
+        "void add_collision_triangle(Vtx* vtx1, Vtx* vtx2, Vtx* vtx3, s8 surfaceType, u16 sectionId) {\n#if defined(PLATFORM_3DS)\n    if ((vtx1 == NULL) || (vtx2 == NULL) || (vtx3 == NULL) ||\n        (gCollisionMeshCount >= MK64_3DS_MAX_COLLISION_TRIANGLES)) {\n        return;\n    }\n#endif\n    CollisionTriangle* triangle = &gCollisionMesh[gCollisionMeshCount];"
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "void set_vtx_buffer(uintptr_t addr, u32 numVertices, u32 bufferIndex) {\n    u32 i;\n    Vtx* vtx = (Vtx*) addr;"
+        "void set_vtx_buffer(uintptr_t addr, u32 numVertices, u32 bufferIndex) {\n    u32 i;\n#if defined(PLATFORM_3DS)\n    if ((addr == 0) || (bufferIndex >= 32)) {\n        return;\n    }\n    if (numVertices > (32 - bufferIndex)) {\n        numVertices = 32 - bufferIndex;\n    }\n#endif\n    Vtx* vtx = (Vtx*) addr;"
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "                    gCollisionGrid[index].numTriangles++;\n                    gCollisionIndices[gNumCollisionTriangles] = (u16) i;"
+        "                    gCollisionGrid[index].numTriangles++;\n#if defined(PLATFORM_3DS)\n                    if (gNumCollisionTriangles >= MK64_3DS_MAX_COLLISION_INDICES) {\n                        continue;\n                    }\n#endif\n                    gCollisionIndices[gNumCollisionTriangles] = (u16) i;"
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "void generate_collision_mesh(Gfx* addr, s8 surfaceType, u16 sectionId) {\n    if (GameEngine_OTRSigCheck((char*)addr)) {\n        addr = LOAD_ASSET(addr);\n    }"
+        "void generate_collision_mesh(Gfx* addr, s8 surfaceType, u16 sectionId) {\n#if defined(PLATFORM_3DS)\n    if (addr == NULL) {\n        return;\n    }\n#endif\n    if (GameEngine_OTRSigCheck((char*)addr)) {\n        addr = LOAD_ASSET(addr);\n    }\n#if defined(PLATFORM_3DS)\n    if ((addr == NULL) || !mk64_3ds_collision_mark_visited((uintptr_t)addr, surfaceType, sectionId)) {\n        return;\n    }\n#endif"
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "    while (run) {\n        lo = gfx->words.w0;"
+        "    size_t commandBudget = 0;\n    while (run) {\n#if defined(PLATFORM_3DS)\n        if (++commandBudget > MK64_3DS_MAX_COLLISION_COMMANDS) {\n            return;\n        }\n#endif\n        lo = gfx->words.w0;"
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "#include \"collision.h\""
+        "#include \"racing/collision.h\""
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    string(REPLACE
+        "#include \"math_util.h\""
+        "#include \"racing/math_util.h\""
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_COLLISION_TEXT STREQUAL SPAGHETTIKART_COLLISION_TEXT)
+        message(FATAL_ERROR "The upstream racing collision mesh insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_COLLISION_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_COLLISION_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_COLLISION_SOURCE}" SPAGHETTIKART_3DS_COLLISION_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_COLLISION_EXISTING STREQUAL SPAGHETTIKART_3DS_COLLISION_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_COLLISION_SOURCE}" "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
+    endif()
+
     set(SPAGHETTIKART_GAME_OS_MATH
         "${SPAGHETTIKART_ROOT}/src/os/guLookAtF.c"
         "${SPAGHETTIKART_ROOT}/src/os/guPerspectiveF.c"
@@ -153,6 +257,7 @@ if(MK64_3DS_BUILD_GAME_CORE)
         ${SPAGHETTIKART_GAME_RECURSIVE}
         ${SPAGHETTIKART_GAME_OS_MATH}
         "${SPAGHETTIKART_3DS_MEMORY_SOURCE}"
+        "${SPAGHETTIKART_3DS_COLLISION_SOURCE}"
     )
     target_include_directories(mk64-3ds-game-core PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/compat"
@@ -181,6 +286,7 @@ if(MK64_3DS_BUILD_GAME_CORE)
     target_compile_options(mk64-3ds-game-core PRIVATE
         -O3
         -ffast-math
+        -fomit-frame-pointer
         -ffunction-sections
         -fdata-sections
         -fno-strict-aliasing
@@ -330,6 +436,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
     target_compile_options(mk64-3ds-game-engine PRIVATE
         -O3
         -ffast-math
+        -fomit-frame-pointer
         -ffunction-sections
         -fdata-sections
         -fno-strict-aliasing
@@ -369,6 +476,7 @@ set_target_properties(mk64-3ds PROPERTIES
 )
 target_compile_options(mk64-3ds PRIVATE
     -O3
+    -fomit-frame-pointer
     -ffunction-sections
     -fdata-sections
     -fno-strict-aliasing
@@ -409,6 +517,7 @@ if(MK64_3DS_ENABLE_O2R_READER)
     endif()
     target_compile_options(mk64-3ds-o2r-reader PRIVATE
         -O3
+        -fomit-frame-pointer
         -ffunction-sections
         -fdata-sections
         -Wall
@@ -434,6 +543,7 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
     target_compile_features(mk64-3ds-fast3d-renderer PUBLIC cxx_std_17)
     target_compile_options(mk64-3ds-fast3d-renderer PRIVATE
         -O3
+        -fomit-frame-pointer
         -ffunction-sections
         -fdata-sections
         -fno-strict-aliasing
@@ -455,6 +565,7 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         target_compile_features(mk64-3ds-renderer-probe PRIVATE cxx_std_17)
         target_compile_options(mk64-3ds-renderer-probe PRIVATE
             -O3
+            -fomit-frame-pointer
             -ffunction-sections
             -fdata-sections
             -Wall
@@ -518,6 +629,55 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_POINTER_GUARD_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D texture pointer guard insertion point changed")
         endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_CACHE_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "#define TEXTURE_CACHE_MAX_SIZE 1024"
+            "#define TEXTURE_CACHE_MAX_SIZE 96"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_CACHE_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D texture cache limit insertion point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_DEPTH_READ_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[void Interpreter::GetPixelDepthPrepare(float x, float y) {
+    AdjustPixelDepthCoordinates(x, y);
+    mGetPixelDepthPending.emplace(x, y);
+}
+
+uint16_t Interpreter::GetPixelDepth(float x, float y) {
+    AdjustPixelDepthCoordinates(x, y);
+
+    if (auto it = mGetPixelDepthCached.find(std::make_pair(x, y)); it != mGetPixelDepthCached.end()) {
+        return it->second;
+    }
+
+    mGetPixelDepthPending.emplace(x, y);
+
+    std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff> res =
+        mRapi->GetPixelDepth(mRendersToFb ? mGameFb : 0, mGetPixelDepthPending);
+    mGetPixelDepthCached.merge(res);
+    mGetPixelDepthPending.clear();
+
+    return mGetPixelDepthCached.find(std::make_pair(x, y))->second;
+}]=]
+            [=[void Interpreter::GetPixelDepthPrepare(float x, float y) {
+    (void)x;
+    (void)y;
+}
+
+uint16_t Interpreter::GetPixelDepth(float x, float y) {
+    (void)x;
+    (void)y;
+    return 0;
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_DEPTH_READ_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D pixel depth insertion point changed")
+        endif()
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_INTERPRETER_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D interpreter watchdog insertion points changed")
         endif()
@@ -552,6 +712,7 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         endif()
         target_compile_options(mk64-3ds-fast3d-interpreter PRIVATE
             -O3
+            -fomit-frame-pointer
             -ffunction-sections
             -fdata-sections
             -fno-strict-aliasing
@@ -577,6 +738,7 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         target_compile_definitions(mk64-3ds-interpreter-probe PRIVATE F3DEX_GBI=1)
         target_compile_options(mk64-3ds-interpreter-probe PRIVATE
             -O3
+            -fomit-frame-pointer
             -ffunction-sections
             -fdata-sections
             -Wno-unused-parameter
@@ -629,6 +791,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
     target_compile_options(mk64-3ds-game-runtime PRIVATE
         -O3
         -ffast-math
+        -fomit-frame-pointer
         -ffunction-sections
         -fdata-sections
         -fno-strict-aliasing
@@ -665,6 +828,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
     target_compile_options(mk64-3ds-game PRIVATE
         -O3
         -ffast-math
+        -fomit-frame-pointer
         -ffunction-sections
         -fdata-sections
         -fno-strict-aliasing

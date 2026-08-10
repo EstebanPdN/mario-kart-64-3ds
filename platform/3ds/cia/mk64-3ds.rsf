@@ -98,6 +98,7 @@ SystemControlInfo:
   RemasterVersion: 3
   StackSize: 0x100000
   Dependency:
+    dsp: 0x0004013000001a02
     gsp: 0x0004013000001c02
     hid: 0x0004013000001d02
     ptm: 0x0004013000002202

@@ -12,15 +12,18 @@ workspace.
 
 The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O2R resource runtime, 3DS input,
 NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game remains a work in
-progress and is not yet a stable release. The original game simulation and the current 3DS renderer remain at 30 Hz.
+progress and is not yet a stable release. The original game simulation remains tied to the vanilla loop while
+the 3DS presentation path now targets the top LCD's 60 Hz refresh.
 The unbounded desktop matrix-recording interpolation path used by v0.11 is disabled because it terminated the
 Old 3DS build during startup. A bounded 3DS-specific 60 Hz path remains future work; sustained 60 FPS is not claimed.
 
-The v0.12 test build enables native 26.8 kHz stereo NDSP output, corrects independent two-texture UVs and
+The v0.13 test build adds the DSP module dependency needed by the NDSP audio path on hardware, keeps the native
+26.8 kHz stereo NDSP path built in while audible output remains unconfirmed, enables the 60 Hz presentation target, corrects independent two-texture UVs and
 second-cycle RDP texture selection, accepts valid 3DS heap-backed texture pointers, and preserves texture alpha for
-2D sprites. It also removes the extra per-upload texture staging allocation and initializes the 8 MiB game memory
-arena before resource and renderer allocations. The CIA uses the supplied custom icon and a compact flat HOME Menu
-banner.
+2D sprites. It also removes the extra per-upload texture staging allocation, bounds the 3DS texture cache, skips
+unused depth-read allocations, adds 3DS safety limits to the recursive course collision-mesh builder, and treats
+cutout texture-edge geometry as alpha-tested opaque pixels instead of translucent blended geometry. The CIA uses the
+supplied custom icon and a compact flat HOME Menu banner.
 
 Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
 3DS and New Nintendo 3DS performance still require real-hardware profiling.
@@ -43,8 +46,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.12.3dsx
-build-3ds/game/mk64-3ds-v0.12.cia
+build-3ds/game/mk64-3ds-game-v0.13.3dsx
+build-3ds/game/mk64-3ds-v0.13.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
