@@ -88,6 +88,9 @@ if(MK64_3DS_BUILD_GAME_CORE)
     set(SPAGHETTIKART_AUDIO_PORT_SOURCE "${SPAGHETTIKART_ROOT}/src/audio/port_eu.c")
     set(SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/port_eu_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_AUDIO_PORT_SOURCE}")
+    set(SPAGHETTIKART_SEQPLAYER_SOURCE "${SPAGHETTIKART_ROOT}/src/audio/seqplayer.c")
+    set(SPAGHETTIKART_3DS_SEQPLAYER_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/seqplayer_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_SEQPLAYER_SOURCE}")
     file(READ "${SPAGHETTIKART_MEMORY_SOURCE}" SPAGHETTIKART_MEMORY_TEXT)
     string(REPLACE
         "static u8 sMemoryPool[0x10000000] ALIGNED4096;"
@@ -168,6 +171,10 @@ typedef struct {
 static Mk64CollisionVisit3DS sCollisionVisits3DS[MK64_3DS_MAX_COLLISION_DLS];
 static u32 sCollisionVisitCount3DS = 0;
 
+void mk64_3ds_collision_reset_visits(void) {
+    sCollisionVisitCount3DS = 0;
+}
+
 static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 sectionId) {
     for (u32 i = 0; i < sCollisionVisitCount3DS; i++) {
         if ((sCollisionVisits3DS[i].addr == addr) &&
@@ -202,8 +209,8 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
     )
     string(REPLACE
-        "                    gCollisionGrid[index].numTriangles++;\n                    gCollisionIndices[gNumCollisionTriangles] = (u16) i;"
-        "                    gCollisionGrid[index].numTriangles++;\n#if defined(PLATFORM_3DS)\n                    if (gNumCollisionTriangles >= MK64_3DS_MAX_COLLISION_INDICES) {\n                        continue;\n                    }\n#endif\n                    gCollisionIndices[gNumCollisionTriangles] = (u16) i;"
+        "                    if (gCollisionGrid[index].numTriangles == 0) {\n                        gCollisionGrid[index].triangle = gNumCollisionTriangles;\n                    }\n                    gCollisionGrid[index].numTriangles++;\n                    gCollisionIndices[gNumCollisionTriangles] = (u16) i;"
+        "#if defined(PLATFORM_3DS)\n                    if (gNumCollisionTriangles >= MK64_3DS_MAX_COLLISION_INDICES) {\n                        continue;\n                    }\n#endif\n                    if (gCollisionGrid[index].numTriangles == 0) {\n                        gCollisionGrid[index].triangle = gNumCollisionTriangles;\n                    }\n                    gCollisionGrid[index].numTriangles++;\n                    gCollisionIndices[gNumCollisionTriangles] = (u16) i;"
         SPAGHETTIKART_3DS_COLLISION_TEXT
         "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
     )
@@ -264,6 +271,48 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         file(WRITE "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}" "${SPAGHETTIKART_3DS_AUDIO_PORT_TEXT}")
     endif()
 
+    # Reject malformed layer opcodes before they can index beyond the four
+    # SequenceChannel layer slots. Valid MK64 sequences use only layers 0..3;
+    # this guard turns corrupt archive/script data into a skipped command instead
+    # of aliasing soundScriptIO and dereferencing values such as 0xffffffff.
+    file(READ "${SPAGHETTIKART_SEQPLAYER_SOURCE}" SPAGHETTIKART_SEQPLAYER_TEXT)
+    string(REPLACE
+        "s32 seq_channel_set_layer(struct SequenceChannel* seqChannel, s32 layerIndex) {\n    struct SequenceChannelLayer* layer;"
+        "s32 seq_channel_set_layer(struct SequenceChannel* seqChannel, s32 layerIndex) {\n    struct SequenceChannelLayer* layer;\n\n#if defined(PLATFORM_3DS)\n    if (layerIndex < 0 || layerIndex >= LAYERS_MAX) {\n        return -1;\n    }\n#endif"
+        SPAGHETTIKART_3DS_SEQPLAYER_TEXT
+        "${SPAGHETTIKART_SEQPLAYER_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_SEQPLAYER_SET_LAYER_TEXT "${SPAGHETTIKART_3DS_SEQPLAYER_TEXT}")
+    if(SPAGHETTIKART_3DS_SEQPLAYER_SET_LAYER_TEXT STREQUAL SPAGHETTIKART_SEQPLAYER_TEXT)
+        message(FATAL_ERROR "The upstream sequence-layer allocation guard insertion point changed")
+    endif()
+    string(REPLACE
+        "void seq_channel_layer_free(struct SequenceChannel* seqChannel, s32 layerIndex) {\n    struct SequenceChannelLayer* layer = seqChannel->layers[layerIndex];"
+        "void seq_channel_layer_free(struct SequenceChannel* seqChannel, s32 layerIndex) {\n#if defined(PLATFORM_3DS)\n    if (layerIndex < 0 || layerIndex >= LAYERS_MAX) {\n        return;\n    }\n#endif\n    struct SequenceChannelLayer* layer = seqChannel->layers[layerIndex];"
+        SPAGHETTIKART_3DS_SEQPLAYER_TEXT
+        "${SPAGHETTIKART_3DS_SEQPLAYER_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_SEQPLAYER_FREE_LAYER_TEXT "${SPAGHETTIKART_3DS_SEQPLAYER_TEXT}")
+    if(SPAGHETTIKART_3DS_SEQPLAYER_FREE_LAYER_TEXT STREQUAL SPAGHETTIKART_3DS_SEQPLAYER_SET_LAYER_TEXT)
+        message(FATAL_ERROR "The upstream sequence-layer free guard insertion point changed")
+    endif()
+    string(REPLACE
+        "                        if (seqChannel->layers[loBits] != NULL) {"
+        "                        if (loBits < LAYERS_MAX && seqChannel->layers[loBits] != NULL) {"
+        SPAGHETTIKART_3DS_SEQPLAYER_TEXT
+        "${SPAGHETTIKART_3DS_SEQPLAYER_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_SEQPLAYER_TEXT STREQUAL SPAGHETTIKART_3DS_SEQPLAYER_FREE_LAYER_TEXT)
+        message(FATAL_ERROR "The upstream sequence-layer read guard insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_SEQPLAYER_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}" SPAGHETTIKART_3DS_SEQPLAYER_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_SEQPLAYER_EXISTING STREQUAL SPAGHETTIKART_3DS_SEQPLAYER_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}" "${SPAGHETTIKART_3DS_SEQPLAYER_TEXT}")
+    endif()
+
     set(SPAGHETTIKART_GAME_OS_MATH
         "${SPAGHETTIKART_ROOT}/src/os/guLookAtF.c"
         "${SPAGHETTIKART_ROOT}/src/os/guPerspectiveF.c"
@@ -285,6 +334,7 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         "${SPAGHETTIKART_3DS_MEMORY_SOURCE}"
         "${SPAGHETTIKART_3DS_COLLISION_SOURCE}"
         "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}"
+        "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}"
     )
     target_include_directories(mk64-3ds-game-core PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/compat"
@@ -404,6 +454,31 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/src/engine/tracks/*.cpp"
     )
     list(FILTER SPAGHETTIKART_ENGINE_TRACKS EXCLUDE REGEX ".*/(CustomTrack|Harbour|TestTrack)\\.cpp$")
+    set(SPAGHETTIKART_TRACK_SOURCE "${SPAGHETTIKART_ROOT}/src/engine/tracks/Track.cpp")
+    set(SPAGHETTIKART_3DS_TRACK_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/Track_3ds.cpp")
+    list(REMOVE_ITEM SPAGHETTIKART_ENGINE_TRACKS "${SPAGHETTIKART_TRACK_SOURCE}")
+    file(READ "${SPAGHETTIKART_TRACK_SOURCE}" SPAGHETTIKART_TRACK_TEXT)
+    string(REPLACE
+        "extern \"C\" {\n#include \"main.h\""
+        "extern \"C\" {\nvoid mk64_3ds_collision_reset_visits(void);\n#include \"main.h\""
+        SPAGHETTIKART_3DS_TRACK_TEXT
+        "${SPAGHETTIKART_TRACK_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_TRACK_DECL_TEXT "${SPAGHETTIKART_3DS_TRACK_TEXT}")
+    if(SPAGHETTIKART_3DS_TRACK_DECL_TEXT STREQUAL SPAGHETTIKART_TRACK_TEXT)
+        message(FATAL_ERROR "The upstream Track collision-reset declaration insertion point changed")
+    endif()
+    string(REPLACE
+        "    gCollisionMeshCount = 0;\n    gCollisionMesh = (CollisionTriangle*) gNextFreeMemoryAddress;"
+        "    gCollisionMeshCount = 0;\n    mk64_3ds_collision_reset_visits();\n    gCollisionMesh = (CollisionTriangle*) gNextFreeMemoryAddress;"
+        SPAGHETTIKART_3DS_TRACK_TEXT
+        "${SPAGHETTIKART_3DS_TRACK_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_TRACK_TEXT STREQUAL SPAGHETTIKART_3DS_TRACK_DECL_TEXT)
+        message(FATAL_ERROR "The upstream Track collision-reset call insertion point changed")
+    endif()
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    file(WRITE "${SPAGHETTIKART_3DS_TRACK_SOURCE}" "${SPAGHETTIKART_3DS_TRACK_TEXT}")
     file(GLOB SPAGHETTIKART_ENGINE_VEHICLES CONFIGURE_DEPENDS
         "${SPAGHETTIKART_ROOT}/src/engine/vehicles/*.cpp"
     )
@@ -437,6 +512,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         ${SPAGHETTIKART_ENGINE_PARTICLES}
         ${SPAGHETTIKART_ENGINE_SKY}
         ${SPAGHETTIKART_ENGINE_TRACKS}
+        "${SPAGHETTIKART_3DS_TRACK_SOURCE}"
         ${SPAGHETTIKART_ENGINE_VEHICLES}
         ${SPAGHETTIKART_ENGINE_REGISTRY}
     )
@@ -447,6 +523,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/include"
         "${SPAGHETTIKART_ROOT}/include/assets"
         "${SPAGHETTIKART_ROOT}/src"
+        "${SPAGHETTIKART_ROOT}/src/engine/tracks"
         "${SPAGHETTIKART_ROOT}/libultraship/include"
         "${SPAGHETTIKART_ROOT}/libultraship/include/libultraship"
     )

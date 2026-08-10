@@ -399,6 +399,40 @@ extern "C" void Mk64Diagnostics3DSAudio(uint32_t pump, uint32_t bufferedFrames, 
     LogLine("audio: ", value);
 }
 
+extern "C" void Mk64Diagnostics3DSAudioState(uint32_t resetStatus, uint32_t resetPreset,
+                                             uint32_t sequenceCount, uint32_t activePlayers,
+                                             uint32_t activeNotes, uint32_t audioErrors) {
+    char value[160] = {};
+    std::snprintf(value, sizeof(value),
+                  "reset=%lu preset=%lu seqs=%lu activePlayers=%lu activeNotes=%lu errors=0x%08lX",
+                  static_cast<unsigned long>(resetStatus), static_cast<unsigned long>(resetPreset),
+                  static_cast<unsigned long>(sequenceCount), static_cast<unsigned long>(activePlayers),
+                  static_cast<unsigned long>(activeNotes), static_cast<unsigned long>(audioErrors));
+    LogLine("audio-state: ", value);
+}
+
+extern "C" void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResources, size_t textureSlots,
+                                         size_t initializedTextures, size_t textureBytes,
+                                         size_t shaderPrograms, size_t clipScratchBytes) {
+    const struct mallinfo heap = mallinfo();
+    char value[320] = {};
+    std::snprintf(value, sizeof(value),
+                  "%s resources=%lu texSlots=%lu texLive=%lu texBytes=%lu shaders=%lu clipScratch=%lu "
+                  "appFree=%lu heapFree=%d heapUsed=%d linearFree=%lu vramFree=%lu",
+                  label == nullptr ? "snapshot" : label,
+                  static_cast<unsigned long>(loadedResources),
+                  static_cast<unsigned long>(textureSlots),
+                  static_cast<unsigned long>(initializedTextures),
+                  static_cast<unsigned long>(textureBytes),
+                  static_cast<unsigned long>(shaderPrograms),
+                  static_cast<unsigned long>(clipScratchBytes),
+                  static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
+                  heap.fordblks, heap.uordblks,
+                  static_cast<unsigned long>(linearSpaceFree()),
+                  static_cast<unsigned long>(vramSpaceFree()));
+    LogLine("memory: ", value);
+}
+
 extern "C" void Mk64Diagnostics3DSGfxWatchdog(const void* command, uint32_t word0, uint32_t word1,
                                                 size_t commandCount) {
     sWatchdogCommand.store(reinterpret_cast<uintptr_t>(command), std::memory_order_relaxed);

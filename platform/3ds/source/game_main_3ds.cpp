@@ -105,6 +105,10 @@ int main() {
         Mk64Diagnostics3DSCheckpoint("audio-ready");
     } else {
         Mk64Diagnostics3DSCheckpoint("audio-init-failed");
+        Mk64Graphics3DSShutdown();
+        Mk64Resource3DSShutdown();
+        Mk64Diagnostics3DSStop();
+        ExitWithError("DSP audio could not start. Dump DSP firmware with a current homebrew setup, then try again.");
     }
 
     // Skip the desktop-only Harbour Masters splash and enter the stock logo.

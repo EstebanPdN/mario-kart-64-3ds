@@ -32,6 +32,12 @@ void Mk64Diagnostics3DSSetFrame(uint64_t frame, unsigned presentation);
 void Mk64Diagnostics3DSAudio(uint32_t pump, uint32_t bufferedFrames, uint32_t peak,
                              uint32_t nonzeroSamples, uint32_t queuedBuffers,
                              uint32_t droppedBuffers);
+void Mk64Diagnostics3DSAudioState(uint32_t resetStatus, uint32_t resetPreset,
+                                  uint32_t sequenceCount, uint32_t activePlayers,
+                                  uint32_t activeNotes, uint32_t audioErrors);
+void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResources, size_t textureSlots,
+                              size_t initializedTextures, size_t textureBytes,
+                              size_t shaderPrograms, size_t clipScratchBytes);
 void Mk64Diagnostics3DSGfxWatchdog(const void* command, uint32_t word0, uint32_t word1,
                                    size_t commandCount);
 

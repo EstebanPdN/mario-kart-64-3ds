@@ -1,3 +1,4 @@
+#include "game_data_archive_3ds.hpp"
 #include "o2r_archive_reader.hpp"
 
 #include <cstdio>
@@ -34,6 +35,18 @@ int main(int argc, char** argv) {
     if (argc != 2 && argc != 3) {
         std::fprintf(stderr, "usage: %s <archive.o2r> [--types]\n", argv[0]);
         return 2;
+    }
+
+    const mk64_3ds::Mk64O2rValidationResult validation = mk64_3ds::ValidateMk64O2rArchive(argv[1]);
+    if (!validation.IsValid()) {
+        if (validation.component != nullptr) {
+            std::fprintf(stderr, "archive validation failed: %s (%s)\n",
+                         mk64_3ds::Mk64O2rValidationMessage(validation.error), validation.component);
+        } else {
+            std::fprintf(stderr, "archive validation failed: %s\n",
+                         mk64_3ds::Mk64O2rValidationMessage(validation.error));
+        }
+        return 1;
     }
 
     mk64_3ds::O2rArchiveReader archive(argv[1]);

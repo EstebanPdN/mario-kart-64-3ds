@@ -81,6 +81,8 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void SetSrgbMode() override;
     ImTextureID GetTextureById(int id) override;
     void SetCurrentPrimDepth(float depth) override;
+    void GetDebugStats(size_t* textureSlots, size_t* initializedTextures, size_t* textureBytes,
+                       size_t* shaderPrograms, size_t* clipScratchBytes) const;
 
   private:
     struct Impl;
