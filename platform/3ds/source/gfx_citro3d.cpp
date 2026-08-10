@@ -810,7 +810,7 @@ void GfxRenderingAPICitro3D::Init() {
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 4, 0x3210);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
-    C3D_FrameRate(60.0f);
+    C3D_FrameRate(30.0f);
     SetUseAlpha(false);
     SetDepthTestAndMask(false, false);
     mImpl->ready = true;

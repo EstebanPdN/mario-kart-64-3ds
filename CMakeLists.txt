@@ -279,14 +279,8 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/src/engine/registry/RegisterItemTables.cpp"
     )
     set(SPAGHETTIKART_GAME_BRIDGE_SOURCE "${SPAGHETTIKART_ROOT}/src/port/Game.cpp")
-    set(SPAGHETTIKART_INTERPOLATION_SOURCE
-        "${SPAGHETTIKART_ROOT}/src/port/interpolation/FrameInterpolation.cpp"
-    )
     set_source_files_properties("${SPAGHETTIKART_GAME_BRIDGE_SOURCE}" PROPERTIES
         COMPILE_DEFINITIONS "main=spaghettikart_desktop_main;Graphics_PushFrame=Graphics_PushFrameDesktop;CustomEngineInit=DesktopCustomEngineInit;CustomEngineDestroy=DesktopCustomEngineDestroy"
-    )
-    set_source_files_properties("${SPAGHETTIKART_INTERPOLATION_SOURCE}" PROPERTIES
-        COMPILE_OPTIONS "-include;common_structs.h"
     )
 
     add_library(mk64-3ds-game-engine STATIC
@@ -301,7 +295,6 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/loading_image_3ds.cpp
         platform/3ds/source/torch_o2r_3ds.cpp
         platform/3ds/source/vanilla_stubs_3ds.cpp
-        "${SPAGHETTIKART_INTERPOLATION_SOURCE}"
         "${SPAGHETTIKART_ROOT}/src/engine/editor/GameObject.cpp"
         ${SPAGHETTIKART_GAME_BRIDGE_SOURCE}
         ${SPAGHETTIKART_ENGINE_ROOT}
