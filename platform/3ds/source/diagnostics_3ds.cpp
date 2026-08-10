@@ -388,6 +388,17 @@ extern "C" void Mk64Diagnostics3DSSetFrame(uint64_t frame, unsigned presentation
     sPresentation.store(presentation, std::memory_order_relaxed);
 }
 
+extern "C" void Mk64Diagnostics3DSAudio(uint32_t pump, uint32_t bufferedFrames, uint32_t peak,
+                                         uint32_t nonzeroSamples, uint32_t queuedBuffers,
+                                         uint32_t droppedBuffers) {
+    char value[128] = {};
+    std::snprintf(value, sizeof(value), "pump=%lu buffered=%lu peak=%lu nonzero=%lu queued=%lu dropped=%lu",
+                  static_cast<unsigned long>(pump), static_cast<unsigned long>(bufferedFrames),
+                  static_cast<unsigned long>(peak), static_cast<unsigned long>(nonzeroSamples),
+                  static_cast<unsigned long>(queuedBuffers), static_cast<unsigned long>(droppedBuffers));
+    LogLine("audio: ", value);
+}
+
 extern "C" void Mk64Diagnostics3DSGfxWatchdog(const void* command, uint32_t word0, uint32_t word1,
                                                 size_t commandCount) {
     sWatchdogCommand.store(reinterpret_cast<uintptr_t>(command), std::memory_order_relaxed);

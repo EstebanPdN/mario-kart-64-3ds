@@ -29,6 +29,9 @@ void Mk64Diagnostics3DSSetArchiveEntryCount(size_t entryCount);
 void Mk64Diagnostics3DSSetGameArena(const void* base, size_t capacity);
 void Mk64Diagnostics3DSSetDisplayList(const void* base, size_t size);
 void Mk64Diagnostics3DSSetFrame(uint64_t frame, unsigned presentation);
+void Mk64Diagnostics3DSAudio(uint32_t pump, uint32_t bufferedFrames, uint32_t peak,
+                             uint32_t nonzeroSamples, uint32_t queuedBuffers,
+                             uint32_t droppedBuffers);
 void Mk64Diagnostics3DSGfxWatchdog(const void* command, uint32_t word0, uint32_t word1,
                                    size_t commandCount);
 

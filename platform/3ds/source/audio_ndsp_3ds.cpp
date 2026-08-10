@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 
 namespace {
@@ -19,6 +20,8 @@ struct AudioBuffer {
 };
 
 std::array<AudioBuffer, kBufferCount> sBuffers;
+std::atomic<uint32_t> sQueuedBuffers{ 0 };
+std::atomic<uint32_t> sDroppedBuffers{ 0 };
 bool sInitialized = false;
 
 bool IsReusable(const ndspWaveBuf& wave) {
@@ -55,19 +58,22 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
 
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     ndspChnReset(kChannel);
-    ndspChnSetInterp(kChannel, NDSP_INTERP_POLYPHASE);
+    ndspChnWaveBufClear(kChannel);
+    ndspChnSetInterp(kChannel, NDSP_INTERP_LINEAR);
     ndspChnSetRate(kChannel, static_cast<float>(sampleRate));
     ndspChnSetFormat(kChannel, NDSP_FORMAT_STEREO_PCM16);
     float mix[12] = {};
     mix[0] = 1.0f;
     mix[1] = 1.0f;
     ndspChnSetMix(kChannel, mix);
+    ndspChnSetPaused(kChannel, false);
     sInitialized = true;
     return true;
 }
 
 extern "C" void Mk64Audio3DSShutdown(void) {
     if (sInitialized) {
+        ndspChnSetPaused(kChannel, true);
         ndspChnWaveBufClear(kChannel);
     }
     for (auto& buffer : sBuffers) {
@@ -77,10 +83,14 @@ extern "C" void Mk64Audio3DSShutdown(void) {
         }
         std::memset(&buffer.wave, 0, sizeof(buffer.wave));
     }
-    if (sInitialized) {
-        ndspExit();
-    }
+    // Do not call ndspExit from the Mario Kart shutdown path. The supplied
+    // hardware dump for v0.13 faults inside libctru's ndspFinalize/aptDspSleep
+    // finalizer path; the CIA process is exiting immediately afterwards, so the
+    // kernel can reclaim the DSP session more safely than unwinding through the
+    // global NDSP/APT cleanup hooks on real hardware.
     sInitialized = false;
+    sQueuedBuffers.store(0, std::memory_order_relaxed);
+    sDroppedBuffers.store(0, std::memory_order_relaxed);
 }
 
 extern "C" uint32_t Mk64Audio3DSBufferedFrames(void) {
@@ -97,14 +107,24 @@ extern "C" uint32_t Mk64Audio3DSBufferedFrames(void) {
     return frames;
 }
 
+extern "C" uint32_t Mk64Audio3DSQueuedCount(void) {
+    return sQueuedBuffers.load(std::memory_order_relaxed);
+}
+
+extern "C" uint32_t Mk64Audio3DSDroppedCount(void) {
+    return sDroppedBuffers.load(std::memory_order_relaxed);
+}
+
 extern "C" bool Mk64Audio3DSQueueStereoS16(const int16_t* samples, size_t frameCount) {
     if (!sInitialized || samples == nullptr || frameCount == 0 || frameCount > kFramesPerBuffer) {
+        sDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
     auto buffer = std::find_if(sBuffers.begin(), sBuffers.end(),
                                [](const AudioBuffer& candidate) { return IsReusable(candidate.wave); });
     if (buffer == sBuffers.end()) {
+        sDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
@@ -117,5 +137,7 @@ extern "C" bool Mk64Audio3DSQueueStereoS16(const int16_t* samples, size_t frameC
                              static_cast<u32>(byteCount));
     ResetWave(*buffer, frameCount);
     ndspChnWaveBufAdd(kChannel, &buffer->wave);
+    ndspChnSetPaused(kChannel, false);
+    sQueuedBuffers.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
