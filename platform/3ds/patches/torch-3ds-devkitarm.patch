@@ -50,24 +50,150 @@ index 089a7f5..af2dbea 100644
      void Write(int32_t value);
      void Write(int32_t valueA, int32_t valueB);
      void Write(uint32_t value);
+diff --git a/lib/binarytools/MemoryStream.cpp b/lib/binarytools/MemoryStream.cpp
+index d94b7d3..fa5d10c 100644
+--- a/lib/binarytools/MemoryStream.cpp
++++ b/lib/binarytools/MemoryStream.cpp
+@@ -10,10 +10,17 @@ LUS::MemoryStream::MemoryStream() {
+     // mBuffer.reserve(1024 * 16);
+     mBufferSize = 0;
+     mBaseAddress = 0;
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    mExternalReadBuffer = nullptr;
++#endif
+ }
+ 
+ LUS::MemoryStream::MemoryStream(char* nBuffer, size_t nBufferSize) : MemoryStream() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    mExternalReadBuffer = nBuffer;
++#else
+     mBuffer = std::vector<char>(nBuffer, nBuffer + nBufferSize);
++#endif
+     mBufferSize = nBufferSize;
+     mBaseAddress = 0;
+ }
+@@ -22,6 +29,11 @@ LUS::MemoryStream::~MemoryStream() {
+ }
+ 
+ uint64_t LUS::MemoryStream::GetLength() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if (mExternalReadBuffer != nullptr) {
++        return mBufferSize;
++    }
++#endif
+     return mBuffer.size();
+ }
+ 
+@@ -38,22 +50,43 @@ void LUS::MemoryStream::Seek(int32_t offset, SeekOffsetType seekType) {
+ std::unique_ptr<char[]> LUS::MemoryStream::Read(size_t length) {
+     std::unique_ptr<char[]> result = std::make_unique<char[]>(length);
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    const char* source = mExternalReadBuffer != nullptr ? mExternalReadBuffer : mBuffer.data();
++    memcpy_s(result.get(), length, &source[mBaseAddress], length);
++#else
+     memcpy_s(result.get(), length, &mBuffer[mBaseAddress], length);
++#endif
+     mBaseAddress += length;
+ 
+     return result;
+ }
+ 
+ void LUS::MemoryStream::Read(const char* dest, size_t length) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    const char* source = mExternalReadBuffer != nullptr ? mExternalReadBuffer : mBuffer.data();
++    memcpy_s((void*)dest, length, &source[mBaseAddress], length);
++#else
+     memcpy_s((void*)dest, length, &mBuffer[mBaseAddress], length);
++#endif
+     mBaseAddress += length;
+ }
+ 
+ int8_t LUS::MemoryStream::ReadByte() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if (mExternalReadBuffer != nullptr) {
++        return mExternalReadBuffer[mBaseAddress++];
++    }
++#endif
+     return mBuffer[mBaseAddress++];
+ }
+ 
+ void LUS::MemoryStream::Write(char* srcBuffer, size_t length) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if (mExternalReadBuffer != nullptr) {
++        mBuffer.assign(mExternalReadBuffer, mExternalReadBuffer + mBufferSize);
++        mExternalReadBuffer = nullptr;
++    }
++#endif
+     if (mBaseAddress + length >= mBuffer.size()) {
+         mBuffer.resize(mBaseAddress + length);
+         mBufferSize += length;
+@@ -64,6 +97,12 @@ void LUS::MemoryStream::Write(char* srcBuffer, size_t length) {
+ }
+ 
+ void LUS::MemoryStream::WriteByte(int8_t value) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if (mExternalReadBuffer != nullptr) {
++        mBuffer.assign(mExternalReadBuffer, mExternalReadBuffer + mBufferSize);
++        mExternalReadBuffer = nullptr;
++    }
++#endif
+     if (mBaseAddress >= mBuffer.size()) {
+         mBuffer.resize(mBaseAddress + 1);
+         mBufferSize = mBaseAddress;
+@@ -73,6 +112,11 @@ void LUS::MemoryStream::WriteByte(int8_t value) {
+ }
+ 
+ std::vector<char> LUS::MemoryStream::ToVector() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    if (mExternalReadBuffer != nullptr) {
++        return std::vector<char>(mExternalReadBuffer, mExternalReadBuffer + mBufferSize);
++    }
++#endif
+     return mBuffer;
+ }
+ 
+diff --git a/lib/binarytools/MemoryStream.h b/lib/binarytools/MemoryStream.h
+index 9f38169..4c63daa 100644
+--- a/lib/binarytools/MemoryStream.h
++++ b/lib/binarytools/MemoryStream.h
+@@ -30,5 +30,11 @@ class MemoryStream : public Stream {
+   protected:
+     std::vector<char> mBuffer;
+     std::size_t mBufferSize;
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    // BinaryReader inputs remain owned by their caller for the reader's
++    // lifetime. Borrow them on memory-constrained 3DS builds instead of
++    // duplicating every ROM or decompressed segment in a second vector.
++    const char* mExternalReadBuffer;
++#endif
+ };
+ } // namespace LUS
 diff --git a/src/Companion.cpp b/src/Companion.cpp
 index a881533..8c60316 100644
 --- a/src/Companion.cpp
 +++ b/src/Companion.cpp
-@@ -12,6 +12,20 @@
+@@ -12,6 +12,27 @@
  #include <iostream>
  #include <filesystem>
  
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +#include <3ds.h>
++#include <malloc.h>
 +extern "C" void Mk64InstallLogWrite(const char* message);
 +extern "C" void Mk64InstallLogWritef(const char* format, ...);
 +
 +namespace {
 +void Mk64LogApplicationMemory(const char* phase) {
-+    Mk64InstallLogWritef("Torch memory at %s: %lu free / %lu application bytes.", phase,
-+                         static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
-+                         static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
++    const struct mallinfo heap = mallinfo();
++    Mk64InstallLogWritef(
++        "Torch memory at %s: heap arena=%lu allocated=%lu free=%lu releasable=%lu; linear free=%lu; "
++        "application region unused=%lu/%lu.",
++        phase, static_cast<unsigned long>(heap.arena), static_cast<unsigned long>(heap.uordblks),
++        static_cast<unsigned long>(heap.fordblks), static_cast<unsigned long>(heap.keepcost),
++        static_cast<unsigned long>(linearSpaceFree()),
++        static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
++        static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
 +}
 +}
 +#endif
@@ -75,7 +201,47 @@ index a881533..8c60316 100644
  #include "factories/GenericArrayFactory.h"
  #include "factories/VtxFactory.h"
  #include "factories/MtxFactory.h"
-@@ -507,6 +521,13 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
+@@ -128,6 +149,16 @@ static std::string GetTypeNode(YAML::Node& node) {
+ 
+ Companion* Companion::Instance;
+ 
++Companion::~Companion() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    // Process() owns the archive writer. Destroy it even when a factory throws
++    // so stdio handles are closed before the installer validates or moves the
++    // partial archive.
++    delete this->gCurrentWrapper;
++    this->gCurrentWrapper = nullptr;
++#endif
++}
++
+ void Companion::Init(const ExportType type) {
+ 
+     spdlog::set_level(spdlog::level::debug);
+@@ -383,13 +414,22 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
+ 
+                     this->gCurrentFile = externalFileName;
+                     this->gCurrentDirectory = std::filesystem::relative(externalFileName, this->gAssetPath).replace_extension("");
+ 
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++                    const std::string diagnosticPath =
++                        fs::path(externalFileName).lexically_relative(this->gSourceDirectory).generic_string();
++                    Mk64InstallLogWritef("Torch: loading dependent YAML: %s.",
++                                         diagnosticPath.empty() ? "(unknown metadata file)" : diagnosticPath.c_str());
++#endif
+                     YAML::Node root = YAML::LoadFile(externalFileName);
+ 
+                     if (!this->gProcessedFiles.contains(this->gCurrentFile)) {
+                         ProcessFile(root);
+                         this->gProcessedFiles.insert(this->gCurrentFile);
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++                        Mk64InstallLogWrite("Torch: completed dependent YAML.");
++#endif
+                     }
+ 
+                     SPDLOG_INFO("Finishing processing of file: {}", currentFile);
+ 
+@@ -507,6 +547,13 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
  }
  
  void Companion::ParseHash() {
@@ -89,7 +255,7 @@ index a881533..8c60316 100644
      const auto out = this->gDestinationDirectory / "torch.hash.yml";
  
      if(fs::exists(out)) {
-@@ -514,6 +535,7 @@ void Companion::ParseHash() {
+@@ -514,6 +561,7 @@ void Companion::ParseHash() {
      } else {
          this->gHashNode = YAML::Node();
      }
@@ -97,7 +263,7 @@ index a881533..8c60316 100644
  }
  
  std::string ExportTypeToString(ExportType type) {
-@@ -530,6 +552,12 @@ std::string ExportTypeToString(ExportType type) {
+@@ -530,6 +578,12 @@ std::string ExportTypeToString(ExportType type) {
  
  bool Companion::NodeHasChanges(const std::string& path) {
  
@@ -110,7 +276,7 @@ index a881533..8c60316 100644
      if(this->gConfig.modding) {
          return true;
      }
-@@ -734,12 +762,13 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -734,12 +788,13 @@ void Companion::ProcessFile(YAML::Node root) {
                  stream.clear();
                  exporter->get()->Export(stream, data, result.name, result.node, &result.name);
                  auto data = stream.str();
@@ -126,7 +292,7 @@ index a881533..8c60316 100644
                  }
  
                  break;
-@@ -789,7 +818,7 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -789,7 +844,7 @@ void Companion::ProcessFile(YAML::Node root) {
  
          this->gCompanionFiles.clear();
  
@@ -135,7 +301,7 @@ index a881533..8c60316 100644
              auto alignment = GetSafeNode<uint32_t>(result.node, "alignment", impl->GetAlignment());
              if(!endptr.has_value()) {
                  wEntry = {
-@@ -832,7 +861,16 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -832,7 +887,16 @@ void Companion::ProcessFile(YAML::Node root) {
              }
          }
  
@@ -153,15 +319,17 @@ index a881533..8c60316 100644
      }
  
      auto fsout = fs::path(this->gConfig.outputPath);
-@@ -1022,26 +1060,72 @@ void Companion::Process() {
+@@ -1022,26 +1086,76 @@ void Companion::Process() {
      auto configPath = this->gSourceDirectory / "config.yml";
  
      if(!fs::exists(configPath)) {
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +        Mk64InstallLogWrite(("Torch: config file not found: " + configPath.string()).c_str());
-+#endif
++        throw std::runtime_error("Torch config.yml is missing from the local extractor metadata.");
++#else
          SPDLOG_ERROR("No config file found");
          return;
++#endif
      }
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +    Mk64InstallLogWrite(("Torch: using config file: " + configPath.string()).c_str());
@@ -221,22 +389,64 @@ index a881533..8c60316 100644
  
          if(!config[this->gCartridge->GetHash()]){
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
-+            Mk64InstallLogWrite(("Torch: no matching config for SHA-1: " + this->gCartridge->GetHash()).c_str());
-+#endif
++            Mk64InstallLogWrite("Torch: verified ROM has no matching extractor configuration.");
++            throw std::runtime_error("The verified ROM has no matching Torch configuration.");
++#else
              SPDLOG_ERROR("No config found for {}", this->gCartridge->GetHash());
              return;
++#endif
          }
-@@ -1274,6 +1358,9 @@ void Companion::Process() {
+@@ -1090,10 +1204,15 @@ void Companion::Process() {
+     }
  
-     if (wrapper) {
+     auto cfg = rom["config"];
+     if(!cfg) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        Mk64InstallLogWrite("Torch: the selected ROM configuration has no extraction settings.");
++        throw std::runtime_error("The Torch extraction settings are missing.");
++#else
+         SPDLOG_ERROR("No config found for {}", !isDirectoryMode ? this->gCartridge->GetHash() : GetSafeNode<std::string>(config, "folder"));
+         return;
++#endif
+     }
+ 
+     if (rom["metadata"]) {
+         ProcessTables(rom);
+@@ -1165,10 +1284,15 @@ void Companion::Process() {
+         } else if (key == "F3DEX_MK64") {
+             this->gConfig.gbi.version = GBIVersion::f3dex;
+             this->gConfig.gbi.subversion = GBIMinorVersion::Mk64;
+         } else {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++            Mk64InstallLogWrite(("Torch: unsupported GBI setting in config.yml: " + key).c_str());
++            throw std::runtime_error("The Torch configuration contains an unsupported GBI setting.");
++#else
+             SPDLOG_ERROR("Invalid GBI version");
+             return;
++#endif
+         }
+ 
+         if(gbi_floats) {
+             this->gConfig.gbi.useFloats = gbi_floats.as<bool>();
+@@ -1271,12 +1395,15 @@ void Companion::Process() {
+                 throw std::runtime_error("Invalid archive type for export type Binary");
+         }
+     }
+ 
+-    if (wrapper) {
++    this->gCurrentWrapper = wrapper;
++    if (this->gCurrentWrapper != nullptr) {
          wrapper->CreateArchive();
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +        Mk64LogApplicationMemory("archive creation");
 +#endif
      }
-     this->gCurrentWrapper = wrapper;
+-    this->gCurrentWrapper = wrapper;
  
-@@ -1287,6 +1374,7 @@ void Companion::Process() {
+     auto vWriter = LUS::BinaryWriter();
+     vWriter.SetEndianness(Torch::Endianness::Big);
+     vWriter.Write(static_cast<uint8_t>(Torch::Endianness::Big));
+@@ -1287,6 +1414,7 @@ void Companion::Process() {
          vWriter.Write((uint32_t) 0);
      }
  
@@ -244,21 +454,45 @@ index a881533..8c60316 100644
      for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){
          if(entry.is_directory())  {
              continue;
-@@ -1309,6 +1397,13 @@ void Companion::Process() {
-         if (!this->gProcessedFiles.contains(this->gCurrentFile)) {
-             ProcessFile(root);
-             this->gProcessedFiles.insert(this->gCurrentFile);
-+            ++processedYamlFiles;
-+#if defined(__3DS__) || defined(PLATFORM_3DS)
-+            if((processedYamlFiles % 16) == 0) {
-+                Mk64InstallLogWritef("Torch: processed %zu YAML files.", processedYamlFiles);
-+                Mk64LogApplicationMemory("asset extraction");
-+            }
-+#endif
+@@ -1302,14 +1430,26 @@ void Companion::Process() {
+         if(yamlPath.find("config.yml") != std::string::npos) {
+             continue;
          }
+ 
+-        YAML::Node root = YAML::LoadFile(yamlPath);
+-        this->gCurrentDirectory = relative(entry.path(), this->gAssetPath).replace_extension("");
+         this->gCurrentFile = yamlPath;
+-
+-        if (!this->gProcessedFiles.contains(this->gCurrentFile)) {
+-            ProcessFile(root);
+-            this->gProcessedFiles.insert(this->gCurrentFile);
++        if (this->gProcessedFiles.contains(this->gCurrentFile)) {
++            continue;
++        }
++        this->gCurrentDirectory = relative(entry.path(), this->gAssetPath).replace_extension("");
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        const std::string diagnosticPath = entry.path().lexically_relative(this->gSourceDirectory).generic_string();
++        Mk64InstallLogWritef("Torch: loading YAML %zu: %s.", processedYamlFiles + 1,
++                             diagnosticPath.empty() ? "(unknown metadata file)" : diagnosticPath.c_str());
++#endif
++        YAML::Node root = YAML::LoadFile(yamlPath);
++        ProcessFile(root);
++        this->gProcessedFiles.insert(this->gCurrentFile);
++        ++processedYamlFiles;
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        Mk64InstallLogWritef("Torch: completed YAML %zu.", processedYamlFiles);
++        if((processedYamlFiles % 8) == 0) {
++            Mk64LogApplicationMemory("asset extraction");
+         }
++#endif
      }
  
-@@ -1320,7 +1415,7 @@ void Companion::Process() {
+@@ -1315,14 +1455,19 @@ void Companion::Process() {
+     if(wrapper != nullptr) {
+         // Add additional files specified by the user
+         for (const auto& filePath : this->gAdditionalFiles) {
+             std::ifstream input(this->gSourceDirectory / filePath, std::ios::binary);
+             if (input.is_open()) {
                  std::vector<char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
                  input.close();
                  std::string filename = fs::path(filePath).filename().string();
@@ -266,8 +500,15 @@ index a881533..8c60316 100644
 +                wrapper->AddFile(filename, std::move(data));
                  SPDLOG_INFO("Added additional file: {}", filename);
              } else {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++                Mk64InstallLogWrite(("Torch: required additional metadata file is missing: " + filePath).c_str());
++                throw std::runtime_error("A required additional Torch metadata file is missing.");
++#else
                  SPDLOG_WARN("Could not open additional file: {}", filePath);
-@@ -1333,10 +1428,15 @@ void Companion::Process() {
++#endif
+             }
+         }
+@@ -1333,10 +1478,15 @@ void Companion::Process() {
          wrapper->Close();
      }
  
@@ -283,7 +524,7 @@ index a881533..8c60316 100644
  
      auto end = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
      auto level = spdlog::get_level();
-@@ -1393,7 +1493,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
+@@ -1393,7 +1543,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
          std::replace(normalized.begin(), normalized.end(), '\\', '/');
          // Remove parent folder
          normalized = normalized.substr(folder.length() + 1);
@@ -292,7 +533,7 @@ index a881533..8c60316 100644
          SPDLOG_CRITICAL("> Added {}", normalized);
      }
  
-@@ -1710,7 +1810,7 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
+@@ -1710,7 +1860,7 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
          }
      }
  
@@ -314,6 +555,15 @@ index 40a664e..45022f2 100644
          this->gConfig.otrMode = otr;
          this->gConfig.debug = debug;
          this->gConfig.modding = modding;
+@@ -138,6 +138,8 @@ public:
+     explicit Companion(std::vector<uint8_t> rom, const ArchiveType otr, const bool debug, const std::string& srcDir = "", const std::string& destPath = "") :
+                        Companion(rom, otr, debug, false, srcDir, destPath) {}
+ 
++    ~Companion();
++
+     void Init(ExportType type);
+ 
+     bool NodeHasChanges(const std::string& string);
 @@ -156,7 +156,7 @@ public:
      GBIVersion GetGBIVersion() const { return this->gConfig.gbi.version; }
      GBIMinorVersion GetGBIMinorVersion() const { return  this->gConfig.gbi.subversion; }
@@ -323,6 +573,15 @@ index 40a664e..45022f2 100644
      bool IsUsingIndividualIncludes() const { return this->gIndividualIncludes; }
  
      std::optional<ParseResultData> GetParseDataByAddr(uint32_t addr);
+@@ -208,7 +210,7 @@ private:
+     std::shared_ptr<N64::Cartridge> gCartridge;
+     std::unordered_map<std::string, std::vector<YAML::Node>> gCourseMetadata;
+     std::unordered_map<std::string, std::unordered_map<int32_t, std::string>> gEnums;
+-    BinaryWrapper* gCurrentWrapper;
++    BinaryWrapper* gCurrentWrapper = nullptr;
+ 
+     // Temporal Variables
+     std::string gCurrentFile;
 diff --git a/src/archive/BinaryWrapper.h b/src/archive/BinaryWrapper.h
 index d6f4b39..9820fdb 100644
 --- a/src/archive/BinaryWrapper.h
@@ -366,7 +625,7 @@ diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
 index 6440b62..c062c0c 100644
 --- a/src/archive/ZWrapper.cpp
 +++ b/src/archive/ZWrapper.cpp
-@@ -5,21 +5,134 @@
+@@ -5,21 +5,166 @@
  
  #include "spdlog/spdlog.h"
  #include <Companion.h>
@@ -472,6 +731,38 @@ index 6440b62..c062c0c 100644
 +#endif
  }
  
++ZWrapper::~ZWrapper() {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    const int savedErrno = errno;
++    const bool aborted = this->mArchiveOpen;
++    if(this->mCentralDirectoryFile != nullptr) {
++        std::fclose(this->mCentralDirectoryFile);
++        this->mCentralDirectoryFile = nullptr;
++    }
++    if(this->mArchiveFile != nullptr) {
++        std::fflush(this->mArchiveFile);
++        std::fclose(this->mArchiveFile);
++        this->mArchiveFile = nullptr;
++    }
++    if(!this->mCentralDirectoryPath.empty()) {
++        std::remove(this->mCentralDirectoryPath.c_str());
++    }
++    this->mArchiveOpen = false;
++    if(aborted) {
++        char message[192] = {};
++        std::snprintf(message, sizeof(message),
++                      "O2R writer aborted cleanly after %lu entries and %llu payload bytes.",
++                      static_cast<unsigned long>(this->mEntriesWritten),
++                      static_cast<unsigned long long>(this->mPayloadBytesWritten));
++        Mk64InstallLogWrite(message);
++    }
++    errno = savedErrno;
++#else
++    delete this->mZip;
++    this->mZip = nullptr;
++#endif
++}
++
  int32_t ZWrapper::CreateArchive() {
      SPDLOG_INFO("Loaded ZIP (O2R) archive: {}", mPath.c_str());
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
@@ -637,7 +928,7 @@ diff --git a/src/archive/ZWrapper.h b/src/archive/ZWrapper.h
 index d1fe867..4f3eee5 100644
 --- a/src/archive/ZWrapper.h
 +++ b/src/archive/ZWrapper.h
-@@ -1,20 +1,36 @@
+@@ -1,20 +1,37 @@
  #pragma once
  
 +#include <cstdint>
@@ -656,6 +947,7 @@ index d1fe867..4f3eee5 100644
  class ZWrapper : public BinaryWrapper {
  public:
      explicit ZWrapper(const std::string& path);
++    ~ZWrapper() override;
  
      int32_t CreateArchive(void) override;
 -    bool AddFile(const std::string& path, std::vector<char> data) override;
@@ -675,6 +967,28 @@ index d1fe867..4f3eee5 100644
      miniz_cpp::zip_file* mZip;
 +#endif
  };
+diff --git a/src/factories/naudio/v1/AudioContext.cpp b/src/factories/naudio/v1/AudioContext.cpp
+index f2b0dd0..e68db41 100644
+--- a/src/factories/naudio/v1/AudioContext.cpp
++++ b/src/factories/naudio/v1/AudioContext.cpp
+@@ -45,7 +45,9 @@ std::optional<std::shared_ptr<IParsedData>> AudioContextFactory::parse(std::vect
+ }
+ 
+ LUS::BinaryReader AudioContext::MakeReader(AudioTableType type, uint32_t offset) {
+-    auto entry = AudioContext::tables[type].buffer;
++    // BinaryReader borrows its input on 3DS. Keep that input in the persistent
++    // table entry instead of returning a reader that points into a local copy.
++    auto& entry = AudioContext::tables[type].buffer;
+ 
+     LUS::BinaryReader reader(entry.data(), entry.size());
+     reader.SetEndianness(Torch::Endianness::Big);
+@@ -146,4 +148,4 @@ const char* AudioContext::GetCodecStr(uint8_t codec) {
+         default:
+             return "ERROR";
+     }
+-}
+\ No newline at end of file
++}
 diff --git a/src/factories/naudio/v1/SampleFactory.cpp b/src/factories/naudio/v1/SampleFactory.cpp
 index 616d883..a797746 100644
 --- a/src/factories/naudio/v1/SampleFactory.cpp

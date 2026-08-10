@@ -18,6 +18,9 @@ namespace {
 
 constexpr uint32_t kTopWidth = 400;
 constexpr uint32_t kTopHeight = 240;
+constexpr uint32_t kNativeWidth = 320;
+constexpr uint32_t kNativeHeight = 240;
+constexpr uint32_t kMaxBackingTextureSize = 512;
 constexpr uint32_t kMaxSourceVertices = 256 * 3;
 constexpr uint32_t kMaxDrawVertices = 256 * 6;
 constexpr uint32_t kVertexBufferCapacity = 32 * 1024;
@@ -28,6 +31,8 @@ constexpr uint32_t kPackedVertexFloats = 12;
 // a 320-pixel source up to 512 internally.
 constexpr uint32_t kMaxTextureSize = 320;
 constexpr float kClipWEpsilon = 1.0e-4f;
+constexpr float kFullscreenBoundsEpsilon = 0.03f;
+constexpr float kFullscreenCoverScale = static_cast<float>(kTopWidth) / kNativeWidth;
 constexpr size_t kMaxVertexStrideFloats = 64;
 
 constexpr uint32_t kDisplayTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
@@ -85,6 +90,17 @@ constexpr uint32_t MortonOffset8x8(uint32_t x, uint32_t y) {
            ((x & 4U) << 2U) | ((y & 4U) << 3U);
 }
 
+constexpr uint32_t SourceRowForBackingRow(uint32_t backingHeight, uint32_t sourceHeight,
+                                           uint32_t destinationRow) {
+    return (backingHeight - 1U - destinationRow) % sourceHeight;
+}
+
+static_assert(SourceRowForBackingRow(256, 240, 255) == 0);
+static_assert(SourceRowForBackingRow(256, 240, 240) == 15);
+static_assert(SourceRowForBackingRow(256, 240, 239) == 16);
+static_assert(SourceRowForBackingRow(16, 12, 15) == 0);
+static_assert(SourceRowForBackingRow(16, 12, 4) == 11);
+
 uint32_t PackColor(const std::array<float, 4>& color) {
     return static_cast<uint32_t>(ToByte(color[0])) | (static_cast<uint32_t>(ToByte(color[1])) << 8U) |
            (static_cast<uint32_t>(ToByte(color[2])) << 16U) |
@@ -121,12 +137,60 @@ size_t ClipTriangleAgainstW(const float* vertices[3], size_t stride, float* outp
     return outputCount;
 }
 
+bool IsNativeFullscreenQuad(const float* vertices, size_t vertexCount, size_t stride) {
+    if (vertices == nullptr || vertexCount != 6 || stride < 4) {
+        return false;
+    }
+
+    float minX = vertices[0];
+    float maxX = vertices[0];
+    float minY = vertices[1];
+    float maxY = vertices[1];
+    for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+        const float* source = vertices + vertex * stride;
+        if (std::fabs(source[3] - 1.0f) > kFullscreenBoundsEpsilon) {
+            return false;
+        }
+        minX = std::min(minX, source[0]);
+        maxX = std::max(maxX, source[0]);
+        minY = std::min(minY, source[1]);
+        maxY = std::max(maxY, source[1]);
+    }
+
+    // Fast3D preserves the original 4:3 frame in the 5:3 top screen, so a
+    // native full-screen rectangle reaches +/-0.8 horizontally and +/-1.0
+    // vertically in clip space.
+    const float nativeHalfWidth = static_cast<float>(kNativeWidth) / kTopWidth;
+    return std::fabs(minX + nativeHalfWidth) <= kFullscreenBoundsEpsilon &&
+           std::fabs(maxX - nativeHalfWidth) <= kFullscreenBoundsEpsilon &&
+           std::fabs(minY + 1.0f) <= kFullscreenBoundsEpsilon &&
+           std::fabs(maxY - 1.0f) <= kFullscreenBoundsEpsilon;
+}
+
 struct ChannelOperation {
     GPU_COMBINEFUNC function = GPU_REPLACE;
     std::array<int, 3> source = { SourceCombined, SourceZero, SourceZero };
 };
 
-using ChannelPlan = std::vector<ChannelOperation>;
+struct ChannelPlan {
+    std::array<ChannelOperation, 2> operations = {};
+    uint8_t count = 0;
+
+    size_t size() const {
+        return count;
+    }
+
+    const ChannelOperation& operator[](size_t index) const {
+        return operations[index];
+    }
+};
+
+ChannelPlan SingleOperationPlan(const ChannelOperation& operation) {
+    ChannelPlan plan;
+    plan.operations[0] = operation;
+    plan.count = 1;
+    return plan;
+}
 
 ChannelPlan BuildChannelPlan(const int formula[4]) {
     const int a = formula[0];
@@ -135,22 +199,23 @@ ChannelPlan BuildChannelPlan(const int formula[4]) {
     const int d = formula[3];
 
     if (c == SourceZero) {
-        return { { GPU_REPLACE, { d, SourceZero, SourceZero } } };
+        return SingleOperationPlan({ GPU_REPLACE, { d, SourceZero, SourceZero } });
     }
     if (b == SourceZero && d == SourceZero) {
-        return { { GPU_MODULATE, { a, c, SourceZero } } };
+        return SingleOperationPlan({ GPU_MODULATE, { a, c, SourceZero } });
     }
     if (b == d) {
-        return { { GPU_INTERPOLATE, { a, b, c } } };
+        return SingleOperationPlan({ GPU_INTERPOLATE, { a, b, c } });
     }
     if (b == SourceZero) {
-        return { { GPU_MULTIPLY_ADD, { a, c, d } } };
+        return SingleOperationPlan({ GPU_MULTIPLY_ADD, { a, c, d } });
     }
 
-    return {
-        { GPU_SUBTRACT, { a, b, SourceZero } },
-        { GPU_MULTIPLY_ADD, { SourceCombined, c, d } },
-    };
+    ChannelPlan plan;
+    plan.operations[0] = { GPU_SUBTRACT, { a, b, SourceZero } };
+    plan.operations[1] = { GPU_MULTIPLY_ADD, { SourceCombined, c, d } };
+    plan.count = 2;
+    return plan;
 }
 
 ChannelOperation PassPrevious() {
@@ -481,13 +546,6 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     slot.sourceHeight = static_cast<uint16_t>(height);
     slot.allocatedBytes = static_cast<size_t>(textureWidth) * textureHeight * 4U;
 
-    for (size_t pixel = 0; pixel < static_cast<size_t>(width) * height; ++pixel) {
-        if (rgba32Buf[pixel * 4 + 3] != 0xFF) {
-            slot.hasTransparency = true;
-            break;
-        }
-    }
-
     // Fast3D supplies RGBA bytes while PICA stores GPU_RGBA8 texels in tiled
     // A-B-G-R byte order. Swap each host word while building the Morton layout;
     // otherwise red is interpreted as alpha. Direct swizzling also avoids an
@@ -498,29 +556,46 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     // flush, transfer, and free for every texture upload.
     auto* texturePixels = static_cast<uint32_t*>(slot.texture.data);
     const uint32_t tilesPerRow = textureWidth / 8U;
+    std::array<uint16_t, kMaxBackingTextureSize> sourceColumns;
+    std::array<uint16_t, kMaxBackingTextureSize> sourceRows;
+    uint32_t sourceColumn = 0;
+    for (uint32_t destinationColumn = 0; destinationColumn < textureWidth; ++destinationColumn) {
+        sourceColumns[destinationColumn] = static_cast<uint16_t>(sourceColumn);
+        if (++sourceColumn == width) {
+            sourceColumn = 0;
+        }
+    }
+    uint32_t sourceRow = SourceRowForBackingRow(textureHeight, height, 0);
+    for (uint32_t destinationRow = 0; destinationRow < textureHeight; ++destinationRow) {
+        sourceRows[destinationRow] = static_cast<uint16_t>(sourceRow);
+        sourceRow = sourceRow == 0 ? height - 1U : sourceRow - 1U;
+    }
+    uint8_t combinedAlpha = 0xFF;
     for (uint32_t tileY = 0; tileY < textureHeight; tileY += 8U) {
         for (uint32_t tileX = 0; tileX < textureWidth; tileX += 8U) {
             uint32_t* tile = texturePixels +
                 (static_cast<size_t>(tileY / 8U) * tilesPerRow + tileX / 8U) * 64U;
             for (uint32_t row = 0; row < 8U; ++row) {
-                // PICA texture memory has a bottom-left sampling origin while
-                // Fast3D supplies rows top-down. Flip within the logical image
-                // before wrapping POT padding; using textureHeight here shifts
-                // every non-power-of-two sprite by the padding amount.
-                const uint32_t wrappedRow = (tileY + row) % height;
-                const uint32_t sourceRow = height - 1U - wrappedRow;
+                // PICA samples V=0 from the final row of the POT backing while
+                // Fast3D supplies rows top-down and scales V by logical/POT
+                // height. Anchor the flip to the backing height: for a 240-row
+                // image in a 256-row texture, backing row 255 must contain
+                // source row 0. Flipping around 240 instead starts at source
+                // row 224 and visibly wraps after the first 16 screen rows.
+                const uint32_t sourceRow = sourceRows[tileY + row];
                 for (uint32_t column = 0; column < 8U; ++column) {
-                    const uint32_t sourceColumn = (tileX + column) % width;
+                    const uint32_t sourceColumn = sourceColumns[tileX + column];
                     uint32_t pixel = 0;
-                    std::memcpy(&pixel,
-                                rgba32Buf +
-                                    (static_cast<size_t>(sourceRow) * width + sourceColumn) * 4,
-                                sizeof(pixel));
+                    const uint8_t* sourcePixel =
+                        rgba32Buf + (static_cast<size_t>(sourceRow) * width + sourceColumn) * 4;
+                    combinedAlpha &= sourcePixel[3];
+                    std::memcpy(&pixel, sourcePixel, sizeof(pixel));
                     tile[MortonOffset8x8(column, row)] = __builtin_bswap32(pixel);
                 }
             }
         }
     }
+    slot.hasTransparency = combinedAlpha != 0xFF;
 
     C3D_TexFlush(&slot.texture);
     C3D_TexSetFilter(&slot.texture, GPU_LINEAR, GPU_LINEAR);
@@ -647,6 +722,25 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
 
     const size_t firstVertex = mImpl->packedVertexCount;
 
+    bool coverNativeFullscreenTexture = false;
+    if (mImpl->activeTarget == mImpl->topTarget &&
+        IsNativeFullscreenQuad(drawVertices, vertexCount, program->strideFloats)) {
+        for (int texture = 0; texture < 2; ++texture) {
+            if (!program->usedTextures[texture] || mImpl->selectedFramebuffers[texture] != 0) {
+                continue;
+            }
+            const uint32_t textureId = mImpl->selectedTextures[texture];
+            if (textureId < mImpl->textures.size()) {
+                const auto& slot = mImpl->textures[textureId];
+                if (slot.initialized && !slot.hasTransparency && slot.sourceWidth == kNativeWidth &&
+                    slot.sourceHeight == kNativeHeight) {
+                    coverNativeFullscreenTexture = true;
+                    break;
+                }
+            }
+        }
+    }
+
     std::array<std::array<float, 4>, 7> constants = {};
     int varyingInput = -1;
     for (uint8_t input = 0; input < program->numInputs; ++input) {
@@ -693,11 +787,16 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         }
     }
 
+    // Scale an opaque 320x240 full-screen backdrop uniformly to 400x300 and
+    // let the top screen crop 30 pixels at the top and bottom. This gives it a
+    // centered "cover" presentation without stretching or moving menus, HUD
+    // elements, portraits, or other sprites.
+    const float coverScale = coverNativeFullscreenTexture ? kFullscreenCoverScale : 1.0f;
     for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
         const float* source = drawVertices + vertex * program->strideFloats;
         float* destination = mImpl->packedVertices + (firstVertex + vertex) * kPackedVertexFloats;
-        *destination++ = source[0];
-        *destination++ = source[1];
+        *destination++ = source[0] * coverScale;
+        *destination++ = source[1] * coverScale;
         *destination++ = source[2];
         *destination++ = source[3];
 
@@ -754,7 +853,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         const ChannelPlan rgbPlan = BuildChannelPlan(program->combiner[cycle][0]);
         const ChannelPlan alphaPlan = program->alpha || useTextureAlpha
                                           ? BuildChannelPlan(program->combiner[cycle][1])
-                                          : ChannelPlan{ PassPrevious() };
+                                          : SingleOperationPlan(PassPrevious());
         const size_t operationCount = std::max(rgbPlan.size(), alphaPlan.size());
         for (size_t operationIndex = 0; operationIndex < operationCount && stage < 6; ++operationIndex, ++stage) {
             const ChannelOperation rgbOperation =
@@ -890,7 +989,6 @@ void GfxRenderingAPICitro3D::StartFrame() {
     mImpl->frameActive = true;
     mImpl->activeTarget = mImpl->topTarget;
     mImpl->packedVertexCount = 0;
-    C3D_RenderTargetClear(mImpl->topTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(mImpl->topTarget);
     C3D_BindProgram(&mImpl->shaderProgram);
     C3D_Mtx depthConversion;

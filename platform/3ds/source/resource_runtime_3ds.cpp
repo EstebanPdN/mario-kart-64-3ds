@@ -258,8 +258,14 @@ struct LoadedResource {
 };
 
 std::unique_ptr<mk64_3ds::O2rArchiveReader> sArchive;
+
+struct CrcEntry {
+    size_t archiveIndex = 0;
+    LoadedResource* loaded = nullptr;
+};
+
 std::unordered_map<std::string, std::unique_ptr<LoadedResource>> sCache;
-std::unordered_map<uint64_t, size_t> sCrcToEntry;
+std::unordered_map<uint64_t, CrcEntry> sCrcToEntry;
 std::unordered_map<uint8_t, std::string> sBanksById;
 std::unordered_map<uint8_t, std::string> sSequencesById;
 
@@ -274,6 +280,13 @@ std::string_view NormalizePath(const char* name) {
         path.remove_prefix(kOtrSignature.size());
     }
     return path;
+}
+
+uint64_t PathCrc(std::string_view path) {
+    // crc64() complements its result while the resource system's historical
+    // CRC64(string) helper does not. Complement the length-aware form so a
+    // string_view can be hashed without allocating a temporary C string.
+    return ~crc64(path.data(), static_cast<uint32_t>(path.size()));
 }
 
 bool CopyBlock(Reader& reader, LoadedResource& resource, size_t bytes) {
@@ -675,14 +688,26 @@ LoadedResource* LoadByPath(std::string_view path) {
     if (sArchive == nullptr || path.empty()) {
         return nullptr;
     }
+    CrcEntry* crcEntry = nullptr;
+    if (const auto found = sCrcToEntry.find(PathCrc(path)); found != sCrcToEntry.end() &&
+        found->second.archiveIndex < sArchive->Entries().size() &&
+        std::string_view(sArchive->Entries()[found->second.archiveIndex]) == path) {
+        crcEntry = &found->second;
+        if (crcEntry->loaded != nullptr) {
+            return crcEntry->loaded;
+        }
+    }
+
     const std::string key(path);
+    if (const auto found = sCache.find(key); found != sCache.end()) {
+        if (crcEntry != nullptr) {
+            crcEntry->loaded = found->second.get();
+        }
+        return found->second.get();
+    }
     if (Mk64Diagnostics3DSSetResource != nullptr) {
         Mk64Diagnostics3DSSetResource(key.c_str(), sCache.size());
     }
-    if (const auto found = sCache.find(key); found != sCache.end()) {
-        return found->second.get();
-    }
-
     std::vector<uint8_t> bytes;
     try {
         if (sArchive->ReadEntry(path, &bytes) != mk64_3ds::O2rReadResult::Ok) {
@@ -703,6 +728,9 @@ LoadedResource* LoadByPath(std::string_view path) {
     }
     LoadedResource* result = resource.get();
     sCache.emplace(key, std::move(resource));
+    if (crcEntry != nullptr) {
+        crcEntry->loaded = result;
+    }
     if (Mk64Diagnostics3DSSetResource != nullptr) {
         Mk64Diagnostics3DSSetResource(key.c_str(), sCache.size());
     }
@@ -714,10 +742,15 @@ LoadedResource* LoadByCrc(uint64_t crc) {
         return nullptr;
     }
     const auto found = sCrcToEntry.find(crc);
-    if (found == sCrcToEntry.end() || found->second >= sArchive->Entries().size()) {
+    if (found == sCrcToEntry.end() || found->second.archiveIndex >= sArchive->Entries().size()) {
         return nullptr;
     }
-    return LoadByPath(sArchive->Entries()[found->second]);
+    if (found->second.loaded != nullptr) {
+        return found->second.loaded;
+    }
+    LoadedResource* resource = LoadByPath(sArchive->Entries()[found->second.archiveIndex]);
+    found->second.loaded = resource;
+    return resource;
 }
 
 } // namespace
@@ -734,7 +767,7 @@ extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
         }
         sCrcToEntry.reserve(archive->Entries().size());
         for (size_t i = 0; i < archive->Entries().size(); ++i) {
-            sCrcToEntry.emplace(CRC64(archive->Entries()[i].c_str()), i);
+            sCrcToEntry.emplace(PathCrc(archive->Entries()[i]), CrcEntry{ i, nullptr });
         }
         sArchive = std::move(archive);
         if (Mk64Diagnostics3DSSetArchiveEntryCount != nullptr) {
@@ -801,7 +834,7 @@ extern "C" size_t Mk64Resource3DSLoadedCount(void) {
 
 extern "C" uint64_t ResourceGetCrcByName(const char* name) {
     const std::string_view path = NormalizePath(name);
-    return path.empty() ? 0 : CRC64(std::string(path).c_str());
+    return path.empty() ? 0 : PathCrc(path);
 }
 
 extern "C" const char* ResourceGetNameByCrc(uint64_t crc) {
@@ -809,7 +842,7 @@ extern "C" const char* ResourceGetNameByCrc(uint64_t crc) {
         return nullptr;
     }
     const auto found = sCrcToEntry.find(crc);
-    return found == sCrcToEntry.end() ? nullptr : sArchive->Entries()[found->second].c_str();
+    return found == sCrcToEntry.end() ? nullptr : sArchive->Entries()[found->second.archiveIndex].c_str();
 }
 
 extern "C" void* ResourceGetDataByName(const char* name) {
@@ -868,12 +901,22 @@ extern "C" uint8_t ResourceGetIsCustomByCrc(uint64_t) {
 }
 
 extern "C" void ResourceDirtyByName(const char* name) {
-    sCache.erase(std::string(NormalizePath(name)));
+    const std::string_view path = NormalizePath(name);
+    if (path.empty()) {
+        return;
+    }
+    if (const auto crcEntry = sCrcToEntry.find(PathCrc(path)); crcEntry != sCrcToEntry.end()) {
+        crcEntry->second.loaded = nullptr;
+    }
+    sCache.erase(std::string(path));
 }
 
 extern "C" void ResourceDirtyByCrc(uint64_t crc) {
-    if (const char* name = ResourceGetNameByCrc(crc)) {
-        ResourceDirtyByName(name);
+    const auto found = sCrcToEntry.find(crc);
+    if (found != sCrcToEntry.end() && sArchive != nullptr &&
+        found->second.archiveIndex < sArchive->Entries().size()) {
+        found->second.loaded = nullptr;
+        sCache.erase(sArchive->Entries()[found->second.archiveIndex]);
     }
 }
 

@@ -743,6 +743,63 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_CACHE_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D texture cache limit insertion point changed")
         endif()
+        set(SPAGHETTIKART_3DS_INTERPRETER_INSTANCE_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[static std::weak_ptr<Interpreter> mInstance;
+// Set a cached pointer to the instance so we don't need to go through the window every time
+void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
+    mInstance = gfx;
+}]=]
+            [=[// 3DS command dispatch is synchronous and the runtime explicitly clears this
+// pointer before releasing its owning shared_ptr. Avoid taking an atomic weak
+// reference for every Fast3D command in large race display lists.
+static Interpreter* mInstance = nullptr;
+void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
+    mInstance = gfx.get();
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            "mInstance.lock().get()"
+            "mInstance"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_INTERPRETER_INSTANCE_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D interpreter instance insertion points changed")
+        endif()
+        set(SPAGHETTIKART_3DS_CURRENT_DIR_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "std::stack<std::string> currentDir;"
+            ""
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            "    currentDir = std::stack<std::string>();\n"
+            ""
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[void gfx_push_current_dir(char* path) {
+    if (gfx_check_image_signature(path) == 1)
+        path = &path[7];
+
+    currentDir.push(GetPathWithoutFileName(path));
+}]=]
+            [=[void gfx_push_current_dir(char* path) {
+    // No renderer path consumes this directory on 3DS. Keep the ABI entry
+    // point while avoiding per-command string and deque allocations.
+    (void)path;
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_CURRENT_DIR_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D current-directory insertion points changed")
+        endif()
         set(SPAGHETTIKART_3DS_DEPTH_READ_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
             [=[void Interpreter::GetPixelDepthPrepare(float x, float y) {

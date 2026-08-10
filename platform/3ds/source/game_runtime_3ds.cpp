@@ -91,6 +91,7 @@ extern "C" void Mk64Graphics3DSShutdown() {
     if (sInterpreter != nullptr) {
         sInterpreter->Destroy();
     }
+    Fast::GfxSetInstance(std::shared_ptr<Fast::Interpreter>{});
     sDebugger.reset();
     sInterpreter.reset();
     sRenderer.reset();

@@ -48,12 +48,18 @@ constexpr int32_t kLogoIntroMenu = 8;
 
 int main() {
     Mk64Diagnostics3DSStart();
-    Mk64Diagnostics3DSCheckpoint("game-arena-init");
+    Mk64Diagnostics3DSCheckpoint("game-data-init");
+    const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
+    if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
+        Mk64Diagnostics3DSCheckpoint("game-data-failed");
+        Mk64Diagnostics3DSStop();
+        ExitWithError(data.message);
+    }
+    Mk64Diagnostics3DSCheckpoint("game-data-ready");
 
-    // Hold the vanilla game's arena before O2R and Citro3D allocate from the
-    // much smaller Old 3DS application heap. setup_game_memory() resets this
-    // same arena later; this early call exists solely to make the reservation
-    // deterministic and to turn allocation failure into a visible error.
+    // First-run extraction needs the regular heap for Torch's ROM buffer and
+    // per-file YAML data. Reserve the vanilla arena only after mk64.o2r is
+    // ready, but still before the resource index and Citro3D allocate memory.
     initialize_memory_pool();
     if (!Mk64MemoryArena3DSIsReady()) {
         Mk64Diagnostics3DSCheckpoint("game-arena-init-failed");
@@ -62,13 +68,6 @@ int main() {
     }
     Mk64Diagnostics3DSCheckpoint("game-arena-ready");
 
-    const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
-    if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
-        Mk64Diagnostics3DSCheckpoint("game-data-failed");
-        Mk64Diagnostics3DSStop();
-        ExitWithError(data.message);
-    }
-    Mk64Diagnostics3DSCheckpoint("game-data-ready");
     Mk64Diagnostics3DSCheckpoint("resource-runtime-init");
     if (!Mk64Resource3DSInit(data.archivePath)) {
         Mk64Diagnostics3DSCheckpoint("resource-runtime-init-failed");

@@ -12,7 +12,9 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <exception>
 #include <limits>
+#include <malloc.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -298,10 +300,16 @@ bool PreserveInvalidArchive(const char* archivePath, const char* archiveLabel, c
 
 bool CopyFile(const char* source, const char* destination, CopyStats* stats) {
     FILE* input = std::fopen(source, "rb");
-    if (input == nullptr) return false;
+    if (input == nullptr) {
+        Mk64InstallLogWritef("Extractor metadata input open failed: %s (errno=%d).", source, errno);
+        return false;
+    }
     FILE* output = std::fopen(destination, "wb");
     if (output == nullptr) {
+        const int openError = errno;
         std::fclose(input);
+        Mk64InstallLogWritef("Extractor metadata output open failed: %s (errno=%d).", destination, openError);
+        errno = openError;
         return false;
     }
 
@@ -311,22 +319,38 @@ bool CopyFile(const char* source, const char* destination, CopyStats* stats) {
         const size_t bytesRead = std::fread(buffer.data(), 1, buffer.size(), input);
         if (bytesRead == 0) break;
         if (std::fwrite(buffer.data(), 1, bytesRead, output) != bytesRead) {
+            Mk64InstallLogWritef("Extractor metadata write failed: %s (errno=%d).", destination, errno);
             ok = false;
             break;
         }
         stats->byteCount += bytesRead;
     }
-    if (std::ferror(input) != 0) ok = false;
-    std::fclose(output);
-    std::fclose(input);
+    if (std::ferror(input) != 0) {
+        Mk64InstallLogWritef("Extractor metadata read failed: %s (errno=%d).", source, errno);
+        ok = false;
+    }
+    if (std::fclose(output) != 0) {
+        Mk64InstallLogWritef("Extractor metadata close failed: %s (errno=%d).", destination, errno);
+        ok = false;
+    }
+    if (std::fclose(input) != 0) {
+        Mk64InstallLogWritef("Extractor metadata input close failed: %s (errno=%d).", source, errno);
+        ok = false;
+    }
     if (ok) ++stats->fileCount;
     return ok;
 }
 
 bool CopyDirectoryTree(const char* source, const char* destination, CopyStats* stats) {
-    if (!MakeDirectory(destination)) return false;
+    if (!MakeDirectory(destination)) {
+        Mk64InstallLogWritef("Extractor metadata directory creation failed: %s (errno=%d).", destination, errno);
+        return false;
+    }
     DIR* directory = opendir(source);
-    if (directory == nullptr) return false;
+    if (directory == nullptr) {
+        Mk64InstallLogWritef("Extractor metadata directory open failed: %s (errno=%d).", source, errno);
+        return false;
+    }
 
     bool ok = true;
     while (ok) {
@@ -338,12 +362,14 @@ bool CopyDirectoryTree(const char* source, const char* destination, CopyStats* s
         char destinationPath[768];
         if (!JoinPath(sourcePath, sizeof(sourcePath), source, entry->d_name) ||
             !JoinPath(destinationPath, sizeof(destinationPath), destination, entry->d_name)) {
+            Mk64InstallLogWritef("Extractor metadata path was too long below: %s.", source);
             ok = false;
             break;
         }
 
         struct stat info {};
         if (stat(sourcePath, &info) != 0) {
+            Mk64InstallLogWritef("Extractor metadata stat failed: %s (errno=%d).", sourcePath, errno);
             ok = false;
         } else if (S_ISDIR(info.st_mode)) {
             ok = CopyDirectoryTree(sourcePath, destinationPath, stats);
@@ -363,12 +389,29 @@ void SetResult(Mk64GameData3DSResult* result, Mk64GameData3DSStatus status, cons
 }
 
 void DrawProgress(const char* status, const char* detail, int percent) {
-    PushInstallConsoleLine("%3d%% %s", percent, status != nullptr ? status : "");
+    gInstallProgressPercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+
+    // Route every dynamic bottom-screen line through the same writer as the
+    // extractor diagnostics. This makes mk64-install.log a complete transcript
+    // of the installation console, including progress and user-facing errors.
+    Mk64InstallLogWritef("%3d%% %s", gInstallProgressPercent, status != nullptr ? status : "");
     if (detail != nullptr && detail[0] != '\0') {
-        PushInstallConsoleLine("     %s", detail);
+        Mk64InstallLogWritef("     %s", detail);
     }
 
-    RedrawInstallScreens(percent);
+    RedrawInstallScreens(gInstallProgressPercent);
+}
+
+void LogInstallerMemory(const char* phase) {
+    const struct mallinfo heap = mallinfo();
+    Mk64InstallLogWritef(
+        "Installer memory at %s: heap arena=%lu allocated=%lu free=%lu releasable=%lu; linear free=%lu; "
+        "application region unused=%lu/%lu.",
+        phase != nullptr ? phase : "unknown stage", static_cast<unsigned long>(heap.arena),
+        static_cast<unsigned long>(heap.uordblks), static_cast<unsigned long>(heap.fordblks),
+        static_cast<unsigned long>(heap.keepcost), static_cast<unsigned long>(linearSpaceFree()),
+        static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
+        static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
 }
 
 uint32_t Rol32(uint32_t value, uint32_t bits) {
@@ -533,8 +576,9 @@ const char* FindRom() {
 
 bool InstallExtractorFiles(CopyStats* stats) {
     if (DirectoryExists(kExtractorSourceDir) && FileExists("sdmc:/3ds/MK64/.mk64-3ds-installer/torch/config.yml")) {
-        Mk64InstallLogWrite("Extractor metadata already present on SD card.");
-        return true;
+        Mk64InstallLogWrite("Refreshing existing extractor metadata from this installed build.");
+    } else {
+        Mk64InstallLogWrite("Installing extractor metadata from this installed build.");
     }
 
     if (!MakeDirectory(kInstallerDir)) return false;
@@ -649,6 +693,8 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
 
     DrawProgress("Generating mk64.o2r...", "Writing the archive directly to the SD card. This can take several minutes.", 55);
     Mk64InstallLogWrite("Starting O2R archive generation.");
+    Mk64InstallLogWrite("Extractor execution mode: in-process Torch library (no child process or shell command).");
+    LogInstallerMemory("before Torch setup");
     char originalDirectory[768] = {};
     if (getcwd(originalDirectory, sizeof(originalDirectory)) == nullptr) {
         Mk64InstallLogWritef("Could not read the current working directory; errno=%d.", errno);
@@ -679,11 +725,19 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     Mk64InstallLogWrite("Torch uses relative paths to avoid 3DS filesystem handling of sdmc: paths.");
     bool ok = false;
     try {
+        Mk64InstallLogWrite("Torch call entered.");
         ok = Mk64Torch3DSBuildO2R(relativeRomPath, ".", "../work", kExtractorAdditionalFile, error, errorSize);
+    } catch (const std::exception& exception) {
+        Mk64InstallLogWritef("Torch call escaped with an unexpected standard exception: %s.", exception.what());
+        std::snprintf(error, errorSize, "The extractor stopped unexpectedly: %s", exception.what());
+        ok = false;
     } catch (...) {
-        std::snprintf(error, errorSize, "The extractor stopped unexpectedly.");
+        Mk64InstallLogWrite("Torch call escaped with an unknown non-standard exception.");
+        std::snprintf(error, errorSize, "The extractor stopped with an unknown error.");
         ok = false;
     }
+    Mk64InstallLogWritef("Torch call returned success=%d.", ok ? 1 : 0);
+    LogInstallerMemory("after Torch return");
     if (chdir(originalDirectory) != 0) {
         Mk64InstallLogWritef("Could not restore the working directory; errno=%d.", errno);
         if (ok) {
@@ -695,6 +749,7 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     if (!ok) {
         Mk64InstallLogWritef("O2R generation did not complete; Torch success=0, error=%s.",
                              error[0] != '\0' ? error : "(no extractor error)");
+        LogInstallerMemory("O2R generation failure");
         if (FileExists(kWorkArchivePath)) {
             const mk64_3ds::Mk64O2rValidationResult partialValidation = ValidateArchive(kWorkArchivePath);
             if (partialValidation.IsValid()) {
@@ -828,6 +883,8 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
     gInstallConsoleLineCount = 0;
     gInstallProgressPercent = 0;
     Mk64InstallLogSetCallback(OnInstallLogLine);
+    Mk64InstallLogWrite("Bottom-screen installer console opened; subsequent screen lines are mirrored here.");
+    LogInstallerMemory("installer console startup");
     DrawProgress("Looking for your ROM...", "Put it in /3ds/MK64/", 5);
 
     const char* romPath = FindRom();

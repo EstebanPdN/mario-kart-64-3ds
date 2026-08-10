@@ -1,5 +1,7 @@
 # Mario Kart 64 for Nintendo 3DS
 
+![Mario Kart 64 for Nintendo 3DS](platform/3ds/assets/banner.png)
+
 An experimental native Nintendo 3DS port of the vanilla Mario Kart 64 game code, based on
 [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart). The port targets the top screen at its native
 400x240 resolution with a 5:3 viewport; the bottom screen is intentionally black.
@@ -17,13 +19,17 @@ the 3DS presentation path now targets the top LCD's 60 Hz refresh.
 The unbounded desktop matrix-recording interpolation path used by v0.11 is disabled because it terminated the
 Old 3DS build during startup. A bounded 3DS-specific 60 Hz path remains future work; sustained 60 FPS is not claimed.
 
-The v0.13 test build adds the DSP module dependency needed by the NDSP audio path on hardware, keeps the native
-26.8 kHz stereo NDSP path built in while audible output remains unconfirmed, enables the 60 Hz presentation target, corrects independent two-texture UVs and
-second-cycle RDP texture selection, accepts valid 3DS heap-backed texture pointers, and preserves texture alpha for
-2D sprites. It also removes the extra per-upload texture staging allocation, bounds the 3DS texture cache, skips
-unused depth-read allocations, adds 3DS safety limits to the recursive course collision-mesh builder, and treats
-cutout texture-edge geometry as alpha-tested opaque pixels instead of translucent blended geometry. The CIA uses the
-supplied custom icon and a compact flat HOME Menu banner.
+The v0.17 pre-release corrects the common non-power-of-two texture upload path that vertically wrapped menu labels,
+course names, HUD graphics, Lakitu, and other sprites. Opaque 320x240 menu backdrops now use a centered aspect-fill
+presentation on the 400x240 top screen. The renderer also avoids per-draw combiner allocations, redundant full-screen
+clears, repeated resource-cache bookkeeping on hot hits, per-command weak-pointer locking, and unused display-list
+directory string allocations.
+
+First-run extraction now leaves the 8 MiB game arena unreserved until game data is ready and avoids duplicating
+read-only Torch input buffers. The SD-card installer log mirrors progress and multi-line extractor diagnostics, adds
+per-YAML stages and real heap/linear-memory checkpoints, and closes an interrupted O2R writer before validating its
+partial output. These changes compile successfully, but their visual result, extraction completion, and performance
+still require physical Nintendo 3DS testing.
 
 Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
 3DS and New Nintendo 3DS performance still require real-hardware profiling.
@@ -46,8 +52,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.13.3dsx
-build-3ds/game/mk64-3ds-v0.13.cia
+build-3ds/game/mk64-3ds-game-v0.17.3dsx
+build-3ds/game/mk64-3ds-v0.17.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -86,14 +92,15 @@ If preparation stops, copy the local diagnostic file from the SD card before ret
 sd:/3ds/MK64/mk64-install.log
 ```
 
-The log records the ROM check, RomFS metadata copy, O2R archive progress, finalization, and SD-card I/O error codes.
+The log records the ROM check, RomFS metadata copy, every bottom-screen progress line, per-YAML O2R stages,
+heap/linear-memory checkpoints, finalization, multi-line errors, and SD-card I/O error codes.
 It is created on the SD card only; do not attach it to a public issue or release because it may contain local device
 details.
 
 During this first-run step the top screen shows the bundled loading image with an overlaid progress bar, while the
-bottom screen mirrors the live installer output. The game memory arena is reserved before game-data preparation,
+bottom screen mirrors the live installer output. The game memory arena is reserved after game-data preparation,
 the ROM is loaded after the Torch configuration is parsed, and the 3DS O2R writer spools the ZIP central directory to
-the SD card instead of keeping it in RAM. The 3DS cartridge-header reader does not duplicate the full ROM, incremental
+the SD card instead of keeping it in RAM. The 3DS cartridge and read-only binary readers borrow their input buffers,
 Torch hash-cache generation is disabled for this one-shot installer, and memory checkpoints are included in the local
 installation log. Runtime memory is based on the 64 MiB Old 3DS application limit; the renderer uses the vanilla
 archive's actual texture-size requirements rather than reserving a 1024x1024 upload surface.
@@ -108,7 +115,7 @@ Install the CIA with your normal homebrew installer, or place the 3DSX in a Home
 | A / B | A / B |
 | R | R (hop/drift) |
 | L | L |
-| Select | Z |
+| Select | Save a diagnostic dump (not passed to the game) |
 | D-Pad | D-Pad |
 | X / Y | C-Up / C-Left |
 | ZL / ZR | C-Down / C-Right |
@@ -124,7 +131,7 @@ sd:/3ds/MK64/dump/runtime.log
 
 After a forced reboot, copy this file before launching the port again because the next launch replaces it.
 
-Hold `L + R + A` together to create a timestamped diagnostic session under:
+Press `Select`, or hold `L + R + A` together, to create a timestamped diagnostic session under:
 
 ```text
 sd:/3ds/MK64/dump/dump-YYYYMMDD-HHMMSS/

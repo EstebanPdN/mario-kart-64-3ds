@@ -69,6 +69,7 @@ int main() {
             break;
         }
         renderer.StartFrame();
+        renderer.ClearFramebuffer(true, true);
         renderer.LoadShader(colorProgram);
         renderer.DrawTriangles(const_cast<float*>(kVertices.data()), kVertices.size(), 2);
         renderer.LoadShader(textureProgram);
