@@ -3,6 +3,10 @@
 #include "audio_ndsp_3ds.h"
 #include "diagnostics_3ds.h"
 
+#include "audio/data.h"
+#include "audio/heap.h"
+#include "audio/load.h"
+
 #include <libultraship/bridge/audiobridge.h>
 
 #include <array>
@@ -22,6 +26,28 @@ constexpr uint32_t kStereoSamplesPerGameFrame = kStereoFramesPerGameFrame * 2;
 bool sReady = false;
 uint32_t sPumpCount = 0;
 bool sLoggedFirstSignal = false;
+
+void LogAudioState() {
+    uint32_t activePlayers = 0;
+    uint32_t activeNotes = 0;
+    for (int i = 0; i < SEQUENCE_PLAYERS; ++i) {
+        if (gSequencePlayers[i].enabled) {
+            ++activePlayers;
+        }
+    }
+    if (gNotes != nullptr && gMaxSimultaneousNotes > 0) {
+        for (int i = 0; i < gMaxSimultaneousNotes; ++i) {
+            if (gNotes[i].noteSubEu.enabled) {
+                ++activeNotes;
+            }
+        }
+    }
+    Mk64Diagnostics3DSAudioState(static_cast<uint32_t>(gAudioResetStatus),
+                                 static_cast<uint32_t>(gAudioResetPresetIdToLoad),
+                                 static_cast<uint32_t>(gSequenceCount), activePlayers, activeNotes,
+                                 static_cast<uint32_t>(gAudioErrorFlags));
+}
+
 }
 
 extern "C" bool Mk64GameAudio3DSInit() {
@@ -39,8 +65,11 @@ extern "C" void Mk64GameAudio3DSPump() {
     create_next_audio_buffer(samples.data() + kSamplesPerSynthesisFrame * 2,
                              kSamplesPerSynthesisFrame);
     ++sPumpCount;
-    const bool inspectSignal =
-        sPumpCount <= 4u || !sLoggedFirstSignal || (sPumpCount % 180u) == 0u;
+    // Inspect frequently enough to diagnose startup, but do not synchronously
+    // flush an SD log every game tick while the intro is intentionally silent.
+    const bool inspectSignal = sPumpCount <= 4u ||
+                               (!sLoggedFirstSignal && (sPumpCount % 30u) == 0u) ||
+                               (sPumpCount % 180u) == 0u;
     uint32_t peak = 0;
     uint32_t nonzero = 0;
     if (inspectSignal) {
@@ -57,6 +86,7 @@ extern "C" void Mk64GameAudio3DSPump() {
     if (inspectSignal || firstSignal) {
         Mk64Diagnostics3DSAudio(sPumpCount, Mk64Audio3DSBufferedFrames(), peak, nonzero,
                                 Mk64Audio3DSQueuedCount(), Mk64Audio3DSDroppedCount());
+        LogAudioState();
     }
 }
 

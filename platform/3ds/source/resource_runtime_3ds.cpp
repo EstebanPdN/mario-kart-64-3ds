@@ -25,6 +25,8 @@
 #else
 #define MK64_OPTIONAL_SYMBOL __attribute__((weak))
 #endif
+extern "C" void* linearAlloc(size_t size);
+extern "C" void linearFree(void* mem);
 extern "C" void Mk64Diagnostics3DSSetResource(const char*, size_t) MK64_OPTIONAL_SYMBOL;
 extern "C" void Mk64Diagnostics3DSSetArchiveEntryCount(size_t) MK64_OPTIONAL_SYMBOL;
 extern "C" void Mk64Diagnostics3DSFailure(const char*, const char*) MK64_OPTIONAL_SYMBOL;
@@ -224,14 +226,24 @@ class Reader final {
 };
 
 struct LoadedResource {
+    ~LoadedResource() {
+        for (void* allocation : allocations) {
+            linearFree(allocation);
+        }
+    }
+
     template <typename T> T* Allocate(size_t count = 1) {
         if (count == 0 || count > SIZE_MAX / sizeof(T)) {
             return nullptr;
         }
-        auto bytes = std::make_unique<uint8_t[]>(sizeof(T) * count);
-        std::memset(bytes.get(), 0, sizeof(T) * count);
-        T* result = reinterpret_cast<T*>(bytes.get());
-        allocations.emplace_back(std::move(bytes));
+        const size_t byteCount = sizeof(T) * count;
+        void* bytes = linearAlloc(byteCount);
+        if (bytes == nullptr) {
+            return nullptr;
+        }
+        std::memset(bytes, 0, byteCount);
+        T* result = reinterpret_cast<T*>(bytes);
+        allocations.emplace_back(bytes);
         return result;
     }
 
@@ -242,7 +254,7 @@ struct LoadedResource {
     uint16_t textureWidth = 0;
     uint16_t textureHeight = 0;
     uint32_t textureType = 0;
-    std::vector<std::unique_ptr<uint8_t[]>> allocations;
+    std::vector<void*> allocations;
 };
 
 std::unique_ptr<mk64_3ds::O2rArchiveReader> sArchive;
@@ -909,10 +921,14 @@ extern "C" uint8_t GameEngine_IsBankLoaded(uint8_t bankId) {
 }
 
 extern "C" void GameEngine_UnloadBank(uint8_t bankId) {
-    const auto found = sBanksById.find(bankId);
-    if (found != sBanksById.end()) {
-        sCache.erase(found->second);
-    }
+    // The vanilla audio loader calls this while reinitializing a player *after*
+    // it has obtained pointers into the bank graph. Desktop SpaghettiKart only
+    // clears its lookup-table slot here; ResourceManager keeps the underlying
+    // object alive. Erasing our owning cache entry made those pointers dangle
+    // immediately and the title sequence subsequently decoded freed memory.
+    // Keep audio resources resident until the 3DS runtime has an ownership-aware
+    // deferred eviction scheme.
+    (void)bankId;
 }
 
 extern "C" AudioSequenceData* GameEngine_LoadSequence(uint8_t sequenceId) {
@@ -933,8 +949,7 @@ extern "C" uint8_t GameEngine_IsSequenceLoaded(uint8_t sequenceId) {
 }
 
 extern "C" void GameEngine_UnloadSequence(uint8_t sequenceId) {
-    const auto found = sSequencesById.find(sequenceId);
-    if (found != sSequencesById.end()) {
-        sCache.erase(found->second);
-    }
+    // See GameEngine_UnloadBank above. load_sequence_internal retains the data
+    // pointer across init_sequence_player(), which invokes this callback.
+    (void)sequenceId;
 }

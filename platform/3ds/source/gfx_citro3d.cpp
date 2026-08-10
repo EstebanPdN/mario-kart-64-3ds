@@ -225,6 +225,7 @@ struct GfxRenderingAPICitro3D::Impl {
         bool hasTransparency = false;
         uint16_t sourceWidth = 0;
         uint16_t sourceHeight = 0;
+        size_t allocatedBytes = 0;
     };
 
     struct FramebufferSlot {
@@ -466,6 +467,7 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     if (slot.initialized) {
         C3D_TexDelete(&slot.texture);
         slot.initialized = false;
+        slot.allocatedBytes = 0;
     }
 
     const uint16_t textureWidth = NextPowerOfTwo(width);
@@ -477,6 +479,7 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     slot.hasTransparency = false;
     slot.sourceWidth = static_cast<uint16_t>(width);
     slot.sourceHeight = static_cast<uint16_t>(height);
+    slot.allocatedBytes = static_cast<size_t>(textureWidth) * textureHeight * 4U;
 
     for (size_t pixel = 0; pixel < static_cast<size_t>(width) * height; ++pixel) {
         if (rgba32Buf[pixel * 4 + 3] != 0xFF) {
@@ -1073,6 +1076,7 @@ void GfxRenderingAPICitro3D::DeleteTexture(uint32_t textureId) {
     if (slot.initialized) {
         C3D_TexDelete(&slot.texture);
         slot.initialized = false;
+        slot.allocatedBytes = 0;
     }
 }
 
@@ -1095,6 +1099,35 @@ ImTextureID GfxRenderingAPICitro3D::GetTextureById(int id) {
 void GfxRenderingAPICitro3D::SetCurrentPrimDepth(float depth) {
     mCurrentPrimDepth = depth;
     mPrimDepthDirty = true;
+}
+
+void GfxRenderingAPICitro3D::GetDebugStats(size_t* textureSlots, size_t* initializedTextures,
+                                           size_t* textureBytes, size_t* shaderPrograms,
+                                           size_t* clipScratchBytes) const {
+    size_t live = 0;
+    size_t bytes = 0;
+    for (const auto& slot : mImpl->textures) {
+        if (!slot.initialized) {
+            continue;
+        }
+        ++live;
+        bytes += slot.allocatedBytes;
+    }
+    if (textureSlots != nullptr) {
+        *textureSlots = mImpl->textures.size();
+    }
+    if (initializedTextures != nullptr) {
+        *initializedTextures = live;
+    }
+    if (textureBytes != nullptr) {
+        *textureBytes = bytes;
+    }
+    if (shaderPrograms != nullptr) {
+        *shaderPrograms = mImpl->shaderPrograms.size();
+    }
+    if (clipScratchBytes != nullptr) {
+        *clipScratchBytes = mImpl->clipScratch.capacity() * sizeof(float);
+    }
 }
 
 } // namespace Fast

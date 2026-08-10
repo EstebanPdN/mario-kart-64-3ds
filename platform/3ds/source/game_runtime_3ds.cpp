@@ -15,6 +15,9 @@ namespace Fast {
 void GfxSetInstance(std::shared_ptr<Interpreter> interpreter);
 }
 
+extern "C" size_t Mk64Resource3DSLoadedCount(void);
+extern "C" Gfx* gDisplayListHead;
+
 namespace {
 std::unique_ptr<Fast::GfxWindowBackend3DS> sWindow;
 std::unique_ptr<Fast::GfxRenderingAPICitro3D> sRenderer;
@@ -41,13 +44,22 @@ void SetRendererStage(const char* stage) {
 void SetRendererFault(const char* stage, const char* reason) {
     ++sRendererFaultCounter;
     sRendererFaulted = true;
+    size_t textureSlots = 0;
+    size_t initializedTextures = 0;
+    size_t textureBytes = 0;
+    size_t shaderPrograms = 0;
+    size_t clipScratchBytes = 0;
+    if (sRenderer != nullptr) {
+        sRenderer->GetDebugStats(&textureSlots, &initializedTextures, &textureBytes,
+                                 &shaderPrograms, &clipScratchBytes);
+    }
+    Mk64Diagnostics3DSMemory(stage, Mk64Resource3DSLoadedCount(), textureSlots, initializedTextures,
+                             textureBytes, shaderPrograms, clipScratchBytes);
     Mk64Diagnostics3DSFailure(stage, reason);
     if (sRendererFaultCounter > kRendererFaultTolerance) {
         Mk64Diagnostics3DSSetStage("renderer-fault-limit-reached");
     }
 }
-
-extern "C" Gfx* gDisplayListHead;
 
 extern "C" bool Mk64Graphics3DSInit() {
     if (sInterpreter != nullptr) {
@@ -95,14 +107,14 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     const size_t listBytes = listEnd >= listBegin ? listEnd - listBegin : 0;
     Mk64Diagnostics3DSSetDisplayList(commands, listBytes);
     Mk64Diagnostics3DSSetStage("renderer-frame-start");
-    if (sRendererFaulted) {
-        // Keep gameplay/input alive if a frame decoding exception occurs.
-        // Repeated failures are surfaced through diagnostics; we avoid ending
-        // the window in-place so the user can still capture L+R+A dump.
-        return;
-    }
     SetRendererStage("renderer-window-events");
     sInterpreter->HandleWindowEvents();
+    if (sRendererFaulted) {
+        // Keep gameplay/input alive if a frame decoding exception occurs.
+        // Events must still be pumped so APT suspend/exit can complete and the
+        // user can capture an L+R+A dump instead of trapping the title forever.
+        return;
+    }
     if (!sWindow->IsRunning() || !sInterpreter->IsFrameReady()) {
         return;
     }

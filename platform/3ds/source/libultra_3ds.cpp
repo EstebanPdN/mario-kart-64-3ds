@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 extern "C" size_t AudioDma_Clamp(uintptr_t address, size_t bytes);
@@ -16,11 +17,15 @@ extern "C" size_t AudioDma_Clamp(uintptr_t address, size_t bytes);
 namespace {
 
 constexpr uint64_t kN64ClockRate = 62500000ULL;
-constexpr size_t kEepromSize = EEP16K_MAXBLOCKS * EEPROM_BLOCK_SIZE;
+constexpr size_t kEepromSize = EEPROM_MAXBLOCKS * EEPROM_BLOCK_SIZE;
 constexpr size_t kVirtualPakCapacity = 512 * 1024;
-constexpr const char* kSaveDirectory = "sdmc:/3ds/spaghettikart";
-constexpr const char* kEepromPath = "sdmc:/3ds/spaghettikart/eeprom.bin";
-constexpr const char* kVirtualPakPath = "sdmc:/3ds/spaghettikart/controller-pak.bin";
+constexpr const char* kSaveDirectory = "sdmc:/3ds/MK64";
+constexpr const char* kEepromPath = "sdmc:/3ds/MK64/eeprom.bin";
+constexpr const char* kEepromTempPath = "sdmc:/3ds/MK64/eeprom.tmp";
+constexpr const char* kVirtualPakPath = "sdmc:/3ds/MK64/controller-pak.bin";
+constexpr const char* kVirtualPakTempPath = "sdmc:/3ds/MK64/controller-pak.tmp";
+constexpr const char* kLegacyEepromPath = "sdmc:/3ds/spaghettikart/eeprom.bin";
+constexpr const char* kLegacyVirtualPakPath = "sdmc:/3ds/spaghettikart/controller-pak.bin";
 
 struct VirtualPakHeader {
     char magic[8];
@@ -46,13 +51,44 @@ uint64_t RawN64Time() {
     return seconds * kN64ClockRate + remainder * kN64ClockRate / tickRate;
 }
 
+bool FinishAtomicWrite(FILE* file, const char* temporaryPath, const char* destinationPath, bool ok) {
+    if (file == nullptr) {
+        return false;
+    }
+    if (ok && std::fflush(file) != 0) {
+        ok = false;
+    }
+    if (ok && fsync(fileno(file)) != 0) {
+        ok = false;
+    }
+    if (std::fclose(file) != 0) {
+        ok = false;
+    }
+    if (!ok || rename(temporaryPath, destinationPath) != 0) {
+        std::remove(temporaryPath);
+        return false;
+    }
+    return true;
+}
+
 void LoadEeprom() {
     if (sEepromLoaded) {
         return;
     }
     sEepromLoaded = true;
-    if (FILE* file = std::fopen(kEepromPath, "rb")) {
-        std::fread(sEeprom, 1, sizeof(sEeprom), file);
+    std::memset(sEeprom, 0xFF, sizeof(sEeprom));
+    FILE* file = std::fopen(kEepromPath, "rb");
+    if (file == nullptr) {
+        // v0.14 and older accidentally used the SpaghettiKart directory and a
+        // 2 KiB EEPROM image. Accept the first 512 bytes so an existing save is
+        // migrated to the correct location on its next write.
+        file = std::fopen(kLegacyEepromPath, "rb");
+    }
+    if (file != nullptr) {
+        uint8_t loaded[kEepromSize] = {};
+        if (std::fread(loaded, 1, sizeof(loaded), file) == sizeof(loaded)) {
+            std::memcpy(sEeprom, loaded, sizeof(sEeprom));
+        }
         std::fclose(file);
     }
 }
@@ -60,13 +96,12 @@ void LoadEeprom() {
 bool StoreEeprom() {
     mkdir("sdmc:/3ds", 0777);
     mkdir(kSaveDirectory, 0777);
-    FILE* file = std::fopen(kEepromPath, "wb");
+    FILE* file = std::fopen(kEepromTempPath, "wb");
     if (file == nullptr) {
         return false;
     }
     const bool ok = std::fwrite(sEeprom, 1, sizeof(sEeprom), file) == sizeof(sEeprom);
-    std::fclose(file);
-    return ok;
+    return FinishAtomicWrite(file, kEepromTempPath, kEepromPath, ok);
 }
 
 void LoadVirtualPak() {
@@ -75,6 +110,9 @@ void LoadVirtualPak() {
     }
     sVirtualPakLoaded = true;
     FILE* file = std::fopen(kVirtualPakPath, "rb");
+    if (file == nullptr) {
+        file = std::fopen(kLegacyVirtualPakPath, "rb");
+    }
     if (file == nullptr) {
         return;
     }
@@ -98,7 +136,7 @@ void LoadVirtualPak() {
 bool StoreVirtualPak() {
     mkdir("sdmc:/3ds", 0777);
     mkdir(kSaveDirectory, 0777);
-    FILE* file = std::fopen(kVirtualPakPath, "wb");
+    FILE* file = std::fopen(kVirtualPakTempPath, "wb");
     if (file == nullptr) {
         return false;
     }
@@ -110,8 +148,7 @@ bool StoreVirtualPak() {
     const bool ok = std::fwrite(&header, 1, sizeof(header), file) == sizeof(header) &&
                     (sVirtualPakData.empty() ||
                      std::fwrite(sVirtualPakData.data(), 1, sVirtualPakData.size(), file) == sVirtualPakData.size());
-    std::fclose(file);
-    return ok;
+    return FinishAtomicWrite(file, kVirtualPakTempPath, kVirtualPakPath, ok);
 }
 
 bool VirtualPakNameMatches(u16 companyCode, u32 gameCode, const u8* gameName, const u8* extName) {
@@ -407,25 +444,31 @@ s32 osPiStartDma(OSIoMesg*, s32, s32, uintptr_t source, void* destination, size_
 
 s32 osEepromProbe(OSMesgQueue*) {
     LoadEeprom();
-    return EEPROM_TYPE_16K;
+    return EEPROM_TYPE_4K;
 }
 
-s32 osEepromLongRead(OSMesgQueue*, u8 address, u8* buffer, int blocks) {
+s32 osEepromLongRead(OSMesgQueue*, u8 address, u8* buffer, int nbytes) {
     LoadEeprom();
     const size_t offset = static_cast<size_t>(address) * EEPROM_BLOCK_SIZE;
-    const size_t bytes = static_cast<size_t>(blocks) * EEPROM_BLOCK_SIZE;
-    if (buffer == nullptr || offset + bytes > sizeof(sEeprom)) {
+    if (buffer == nullptr || nbytes < 0) {
+        return -1;
+    }
+    const size_t bytes = static_cast<size_t>(nbytes);
+    if (offset > sizeof(sEeprom) || bytes > sizeof(sEeprom) - offset) {
         return -1;
     }
     std::memcpy(buffer, sEeprom + offset, bytes);
     return 0;
 }
 
-s32 osEepromLongWrite(OSMesgQueue*, u8 address, u8* buffer, int blocks) {
+s32 osEepromLongWrite(OSMesgQueue*, u8 address, u8* buffer, int nbytes) {
     LoadEeprom();
     const size_t offset = static_cast<size_t>(address) * EEPROM_BLOCK_SIZE;
-    const size_t bytes = static_cast<size_t>(blocks) * EEPROM_BLOCK_SIZE;
-    if (buffer == nullptr || offset + bytes > sizeof(sEeprom)) {
+    if (buffer == nullptr || nbytes < 0) {
+        return -1;
+    }
+    const size_t bytes = static_cast<size_t>(nbytes);
+    if (offset > sizeof(sEeprom) || bytes > sizeof(sEeprom) - offset) {
         return -1;
     }
     std::memcpy(sEeprom + offset, buffer, bytes);

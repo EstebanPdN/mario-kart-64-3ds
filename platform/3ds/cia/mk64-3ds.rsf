@@ -40,6 +40,10 @@ AccessControlInfo:
   RunnableOnSleep: false
   SpecialMemoryArrange: true
   SystemModeExt: Legacy
+  IORegisterMapping:
+    - 1ff00000-1ff7ffff
+  MemoryMapping:
+    - 1f000000-1f5fffff:r
   SystemCallAccess:
     ControlMemory: 1
     QueryMemory: 2
@@ -85,8 +89,10 @@ AccessControlInfo:
     GetResourceLimitCurrentValues: 58
     Break: 60
     OutputDebugString: 61
+    FlushProcessDataCache: 84
   ServiceAccessControl:
     - APT:U
+    - cfg:u
     - dsp::DSP
     - fs:USER
     - gsp::Gpu
@@ -98,6 +104,7 @@ SystemControlInfo:
   RemasterVersion: 3
   StackSize: 0x100000
   Dependency:
+    cfg: 0x0004013000001702
     dsp: 0x0004013000001a02
     gsp: 0x0004013000001c02
     hid: 0x0004013000001d02

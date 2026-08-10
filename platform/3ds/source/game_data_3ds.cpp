@@ -1,4 +1,5 @@
 #include "game_data_3ds.h"
+#include "game_data_archive_3ds.hpp"
 #include "install_log_3ds.h"
 #include "loading_image_3ds.h"
 
@@ -11,8 +12,10 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <limits>
 #include <string>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <vector>
 
@@ -31,9 +34,14 @@ constexpr const char* kInstallerDir = "sdmc:/3ds/MK64/.mk64-3ds-installer";
 constexpr const char* kExtractorSourceDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/torch";
 constexpr const char* kExtractorWorkDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/work";
 constexpr const char* kWorkArchivePath = "sdmc:/3ds/MK64/.mk64-3ds-installer/work/mk64.o2r";
+constexpr const char* kInvalidArchiveDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/invalid";
 constexpr const char* kExtractorAdditionalFile = "meta/mods.toml";
 constexpr const char* kRomfsExtractorSourceDir = "romfs:/torch";
 constexpr const char* kExpectedSha1 = "579c48e211ae952530ffc8738709f078d5dd215e";
+// The on-device ZIP writer stores roughly 54 MiB of payload and temporarily
+// spools its central directory alongside the bundled extractor metadata.
+// Keep enough margin for FAT allocation granularity and installer logs.
+constexpr uint64_t kMinimumExtractionFreeBytes = 96ULL * 1024ULL * 1024ULL;
 constexpr std::array<const char*, 3> kRomPaths = {
     "sdmc:/3ds/MK64/Mario Kart 64.z64",
     "sdmc:/3ds/MK64/mk64.z64",
@@ -206,6 +214,86 @@ bool MakeDirectory(const char* path) {
 bool JoinPath(char* output, size_t outputSize, const char* base, const char* name) {
     const int written = std::snprintf(output, outputSize, "%s/%s", base, name);
     return written > 0 && static_cast<size_t>(written) < outputSize;
+}
+
+bool QuerySdFreeBytes(uint64_t* freeBytes) {
+    if (freeBytes == nullptr) {
+        errno = EINVAL;
+        return false;
+    }
+
+    struct statvfs info {};
+    if (statvfs(kDataDir, &info) != 0) {
+        return false;
+    }
+
+    const uint64_t blockSize = info.f_frsize != 0 ? static_cast<uint64_t>(info.f_frsize)
+                                                  : static_cast<uint64_t>(info.f_bsize);
+    const uint64_t availableBlocks = static_cast<uint64_t>(info.f_bavail);
+    if (blockSize == 0 || availableBlocks > std::numeric_limits<uint64_t>::max() / blockSize) {
+        errno = EOVERFLOW;
+        return false;
+    }
+
+    *freeBytes = availableBlocks * blockSize;
+    return true;
+}
+
+void LogArchiveValidationFailure(const char* archiveLabel,
+                                 const mk64_3ds::Mk64O2rValidationResult& validation) {
+    if (validation.component != nullptr) {
+        Mk64InstallLogWritef("%s validation failed: %s (%s).", archiveLabel,
+                             mk64_3ds::Mk64O2rValidationMessage(validation.error), validation.component);
+    } else {
+        Mk64InstallLogWritef("%s validation failed: %s.", archiveLabel,
+                             mk64_3ds::Mk64O2rValidationMessage(validation.error));
+    }
+}
+
+bool PreserveInvalidArchive(const char* archivePath, const char* archiveLabel, const char* reason,
+                            char* preservedPath, size_t preservedPathSize) {
+    if (archivePath == nullptr || archiveLabel == nullptr || archiveLabel[0] == '\0' || !FileExists(archivePath)) {
+        errno = EINVAL;
+        return false;
+    }
+    if (!MakeDirectory(kInstallerDir) || !MakeDirectory(kInvalidArchiveDir)) {
+        Mk64InstallLogWritef("Could not create the private invalid-archive directory; errno=%d.", errno);
+        return false;
+    }
+
+    struct stat archiveInfo {};
+    const uint64_t archiveBytes = stat(archivePath, &archiveInfo) == 0 && archiveInfo.st_size > 0
+                                      ? static_cast<uint64_t>(archiveInfo.st_size)
+                                      : 0;
+
+    char candidate[768] = {};
+    for (unsigned int index = 1; index <= 99; ++index) {
+        const int written = std::snprintf(candidate, sizeof(candidate), "%s/%s-%02u.o2r", kInvalidArchiveDir,
+                                          archiveLabel, index);
+        if (written <= 0 || static_cast<size_t>(written) >= sizeof(candidate)) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (FileExists(candidate)) {
+            continue;
+        }
+        if (rename(archivePath, candidate) != 0) {
+            Mk64InstallLogWritef("Could not preserve the rejected O2R archive; errno=%d.", errno);
+            return false;
+        }
+
+        if (preservedPath != nullptr && preservedPathSize > 0) {
+            std::snprintf(preservedPath, preservedPathSize, "%s", candidate);
+        }
+        Mk64InstallLogWritef("Preserved rejected O2R archive privately (%llu bytes, reason: %s).",
+                             static_cast<unsigned long long>(archiveBytes),
+                             reason != nullptr && reason[0] != '\0' ? reason : "validation failed");
+        return true;
+    }
+
+    errno = ENOSPC;
+    Mk64InstallLogWrite("No free diagnostic quarantine slot is available for the rejected O2R archive.");
+    return false;
 }
 
 bool CopyFile(const char* source, const char* destination, CopyStats* stats) {
@@ -456,20 +544,19 @@ bool InstallExtractorFiles(CopyStats* stats) {
 }
 
 namespace {
-bool IsValidArchive(const char* path) {
+mk64_3ds::Mk64O2rValidationResult ValidateArchive(const char* path) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
     if (path == nullptr || path[0] == '\0') {
-        return false;
+        mk64_3ds::Mk64O2rValidationResult validation{};
+        validation.error = mk64_3ds::Mk64O2rValidationError::InvalidPath;
+        return validation;
     }
-    std::vector<std::string> entries;
-    if (mk64_3ds::O2rArchiveReader::ListEntries(path, &entries) != mk64_3ds::O2rReadResult::Ok ||
-        entries.empty()) {
-        return false;
-    }
-    return true;
+    return mk64_3ds::ValidateMk64O2rArchive(path);
 #else
     (void)path;
-    return true;
+    mk64_3ds::Mk64O2rValidationResult validation{};
+    validation.error = mk64_3ds::Mk64O2rValidationError::Ok;
+    return validation;
 #endif
 }
 } // namespace
@@ -477,6 +564,64 @@ bool IsValidArchive(const char* path) {
 bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
     DrawProgress("ROM verified.", "Preparing the local extractor on the SD card.", 50);
+
+    if (!MakeDirectory(kInstallerDir) || !MakeDirectory(kExtractorWorkDir)) {
+        Mk64InstallLogWritef("Could not create temporary extraction directory; errno=%d.", errno);
+        std::snprintf(error, errorSize, "Could not create the temporary extraction folder.");
+        return false;
+    }
+
+    if (FileExists(kWorkArchivePath)) {
+        Mk64InstallLogWrite("Found an archive left by an earlier interrupted installation; validating it.");
+        const mk64_3ds::Mk64O2rValidationResult staleValidation = ValidateArchive(kWorkArchivePath);
+        if (staleValidation.IsValid()) {
+            if (FileExists(kPrimaryArchivePath)) {
+                Mk64InstallLogWrite(
+                    "The final O2R destination appeared while recovering a validated temporary archive.");
+                std::snprintf(error, errorSize,
+                              "The destination mk64.o2r appeared while recovering the temporary archive.");
+                return false;
+            }
+            if (rename(kWorkArchivePath, kPrimaryArchivePath) == 0) {
+                Mk64InstallLogWrite("Recovered and finalized the previously generated O2R archive.");
+                DrawProgress("Game data recovered.", "mk64.o2r was restored in /3ds/MK64/.", 100);
+                svcSleepThread(900LL * 1000LL * 1000LL);
+                return true;
+            }
+            Mk64InstallLogWritef("A valid temporary O2R archive could not be finalized; errno=%d.", errno);
+            std::snprintf(error, errorSize,
+                          "A complete temporary archive could not be moved into /3ds/MK64/mk64.o2r.");
+            return false;
+        }
+
+        LogArchiveValidationFailure("Interrupted temporary O2R archive", staleValidation);
+        if (!PreserveInvalidArchive(kWorkArchivePath, "mk64-interrupted",
+                                    mk64_3ds::Mk64O2rValidationMessage(staleValidation.error), nullptr, 0)) {
+            std::snprintf(error, errorSize,
+                          "The interrupted archive is invalid and could not be preserved for diagnostics.");
+            return false;
+        }
+    }
+
+    uint64_t sdFreeBytes = 0;
+    if (!QuerySdFreeBytes(&sdFreeBytes)) {
+        Mk64InstallLogWritef("SD free-space preflight failed; errno=%d.", errno);
+        std::snprintf(error, errorSize, "Could not check the free space on the SD card.");
+        DrawProgress("SD card check failed.", error, 50);
+        svcSleepThread(1800LL * 1000LL * 1000LL);
+        return false;
+    }
+    Mk64InstallLogWritef("SD free-space preflight: %llu bytes available; %llu bytes required.",
+                         static_cast<unsigned long long>(sdFreeBytes),
+                         static_cast<unsigned long long>(kMinimumExtractionFreeBytes));
+    if (sdFreeBytes < kMinimumExtractionFreeBytes) {
+        std::snprintf(error, errorSize,
+                      "At least 96 MiB of free SD space is required to generate mk64.o2r safely.");
+        DrawProgress("Not enough SD space.", "Free at least 96 MiB and try again.", 50);
+        svcSleepThread(1800LL * 1000LL * 1000LL);
+        return false;
+    }
+
     Result romfsResult = romfsInit();
     Mk64InstallLogWritef("RomFS initialization returned 0x%08lX.", static_cast<unsigned long>(romfsResult));
     if (R_FAILED(romfsResult)) {
@@ -501,18 +646,6 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     Mk64InstallLogWritef("Extractor metadata ready: %lu files, %llu bytes.",
                          static_cast<unsigned long>(copyStats.fileCount),
                          static_cast<unsigned long long>(copyStats.byteCount));
-
-    if (!MakeDirectory(kExtractorWorkDir)) {
-        Mk64InstallLogWritef("Could not create temporary extraction directory; errno=%d.", errno);
-        std::snprintf(error, errorSize, "Could not create the temporary extraction folder.");
-        return false;
-    }
-    const int removeResult = unlink(kWorkArchivePath);
-    if (removeResult == 0) {
-        Mk64InstallLogWrite("Removed a previous temporary O2R archive.");
-    } else if (errno != ENOENT) {
-        Mk64InstallLogWritef("Could not remove previous temporary O2R archive; errno=%d.", errno);
-    }
 
     DrawProgress("Generating mk64.o2r...", "Writing the archive directly to the SD card. This can take several minutes.", 55);
     Mk64InstallLogWrite("Starting O2R archive generation.");
@@ -559,19 +692,59 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
         }
     }
 
-    if (ok && FileExists(kWorkArchivePath) && rename(kWorkArchivePath, kPrimaryArchivePath) == 0) {
-        Mk64InstallLogWrite("Temporary O2R archive finalized and moved into /3ds/MK64/mk64.o2r.");
-        DrawProgress("Game data generated.", "mk64.o2r was created in /3ds/MK64/.", 100);
-        svcSleepThread(900LL * 1000LL * 1000LL);
-        return true;
+    if (!ok) {
+        Mk64InstallLogWritef("O2R generation did not complete; Torch success=0, error=%s.",
+                             error[0] != '\0' ? error : "(no extractor error)");
+        if (FileExists(kWorkArchivePath)) {
+            const mk64_3ds::Mk64O2rValidationResult partialValidation = ValidateArchive(kWorkArchivePath);
+            if (partialValidation.IsValid()) {
+                Mk64InstallLogWrite(
+                    "The generated archive is complete but remains in the temporary folder for recovery on next launch.");
+            } else {
+                LogArchiveValidationFailure("Incomplete generated O2R archive", partialValidation);
+                PreserveInvalidArchive(kWorkArchivePath, "mk64-incomplete",
+                                       mk64_3ds::Mk64O2rValidationMessage(partialValidation.error), nullptr, 0);
+            }
+        }
+    } else if (!FileExists(kWorkArchivePath)) {
+        Mk64InstallLogWrite("Torch reported success but did not create the temporary O2R archive.");
+        std::snprintf(error, errorSize, "The extractor did not create a temporary mk64.o2r archive.");
+    } else {
+        Mk64InstallLogWrite("Validating the generated temporary O2R archive before finalizing it.");
+        const mk64_3ds::Mk64O2rValidationResult generatedValidation = ValidateArchive(kWorkArchivePath);
+        if (!generatedValidation.IsValid()) {
+            LogArchiveValidationFailure("Generated temporary O2R archive", generatedValidation);
+            const bool preserved = PreserveInvalidArchive(
+                kWorkArchivePath, "mk64-generated", mk64_3ds::Mk64O2rValidationMessage(generatedValidation.error),
+                nullptr, 0);
+            if (generatedValidation.component != nullptr) {
+                std::snprintf(error, errorSize, "Generated game data failed validation: %s (%s).%s",
+                              mk64_3ds::Mk64O2rValidationMessage(generatedValidation.error),
+                              generatedValidation.component,
+                              preserved ? " The rejected archive was preserved privately for diagnostics." : "");
+            } else {
+                std::snprintf(error, errorSize, "Generated game data failed validation: %s.%s",
+                              mk64_3ds::Mk64O2rValidationMessage(generatedValidation.error),
+                              preserved ? " The rejected archive was preserved privately for diagnostics." : "");
+            }
+        } else if (FileExists(kPrimaryArchivePath)) {
+            Mk64InstallLogWrite("The final O2R destination unexpectedly appeared; the validated temporary archive was retained.");
+            std::snprintf(error, errorSize,
+                          "The destination mk64.o2r appeared during extraction; the validated temporary archive was kept.");
+        } else if (rename(kWorkArchivePath, kPrimaryArchivePath) == 0) {
+            Mk64InstallLogWritef("Generated O2R validation passed with %lu entries.",
+                                 static_cast<unsigned long>(generatedValidation.entryCount));
+            Mk64InstallLogWrite("Temporary O2R archive atomically moved into /3ds/MK64/mk64.o2r.");
+            DrawProgress("Game data generated.", "mk64.o2r was created in /3ds/MK64/.", 100);
+            svcSleepThread(900LL * 1000LL * 1000LL);
+            return true;
+        } else {
+            Mk64InstallLogWritef("Validated O2R archive could not be atomically moved into place; errno=%d.", errno);
+            std::snprintf(error, errorSize,
+                          "The validated temporary O2R archive could not be moved into /3ds/MK64/.");
+        }
     }
 
-    Mk64InstallLogWritef("O2R generation did not complete; Torch success=%d, error=%s.", ok ? 1 : 0,
-                         error[0] != '\0' ? error : "(no extractor error)");
-    if (ok) {
-        Mk64InstallLogWritef("Could not move finalized O2R archive into place; errno=%d.", errno);
-    }
-    unlink(kWorkArchivePath);
     if (error[0] == '\0') {
         std::snprintf(error, errorSize, "The temporary O2R archive could not be finalized on the SD card.");
     }
@@ -605,12 +778,20 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
 
     if (FileExists(kPrimaryArchivePath)) {
         Mk64InstallLogWrite("Validating existing mk64.o2r archive.");
-        if (!IsValidArchive(kPrimaryArchivePath)) {
-            Mk64InstallLogWrite("Found O2R archive appears invalid; regenerating from ROM.");
-            unlink(kPrimaryArchivePath);
-            Mk64InstallLogWrite("Removed invalid archive before re-extraction.");
+        const mk64_3ds::Mk64O2rValidationResult validation = ValidateArchive(kPrimaryArchivePath);
+        if (!validation.IsValid()) {
+            LogArchiveValidationFailure("Existing O2R archive", validation);
+            if (!PreserveInvalidArchive(kPrimaryArchivePath, "mk64-primary",
+                                        mk64_3ds::Mk64O2rValidationMessage(validation.error), nullptr, 0)) {
+                Mk64InstallLogClose();
+                SetResult(&result, MK64_GAME_DATA_ERROR, nullptr,
+                          "Existing mk64.o2r is invalid and could not be preserved for diagnostics.");
+                return result;
+            }
+            Mk64InstallLogWrite("Rejected O2R archive was quarantined privately; regeneration will use the legal ROM.");
         } else {
-            Mk64InstallLogWrite("Existing O2R archive is valid.");
+            Mk64InstallLogWritef("Existing O2R archive is valid (%lu entries).",
+                                 static_cast<unsigned long>(validation.entryCount));
             Mk64InstallLogWrite("Existing O2R archive found; no installation work is needed.");
             Mk64InstallLogClose();
             SetResult(&result, MK64_GAME_DATA_READY, kPrimaryArchivePath, "Game data is ready.");
@@ -619,12 +800,20 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
     }
     if (FileExists(kLegacyArchivePath)) {
         Mk64InstallLogWrite("Validating legacy mk64.o2r archive.");
-        if (!IsValidArchive(kLegacyArchivePath)) {
-            Mk64InstallLogWrite("Found legacy O2R archive appears invalid; removing and regenerating.");
-            unlink(kLegacyArchivePath);
-            Mk64InstallLogWrite("Removed invalid legacy archive before extraction.");
+        const mk64_3ds::Mk64O2rValidationResult validation = ValidateArchive(kLegacyArchivePath);
+        if (!validation.IsValid()) {
+            LogArchiveValidationFailure("Legacy O2R archive", validation);
+            if (!PreserveInvalidArchive(kLegacyArchivePath, "mk64-legacy",
+                                        mk64_3ds::Mk64O2rValidationMessage(validation.error), nullptr, 0)) {
+                Mk64InstallLogClose();
+                SetResult(&result, MK64_GAME_DATA_ERROR, nullptr,
+                          "Legacy mk64.o2r is invalid and could not be preserved for diagnostics.");
+                return result;
+            }
+            Mk64InstallLogWrite("Rejected legacy O2R archive was quarantined privately before regeneration.");
         } else {
-            Mk64InstallLogWrite("Existing legacy O2R archive is valid.");
+            Mk64InstallLogWritef("Existing legacy O2R archive is valid (%lu entries).",
+                                 static_cast<unsigned long>(validation.entryCount));
             Mk64InstallLogWrite("Existing legacy O2R archive found; no installation work is needed.");
             Mk64InstallLogClose();
             SetResult(&result, MK64_GAME_DATA_READY, kLegacyArchivePath, "Game data is ready.");

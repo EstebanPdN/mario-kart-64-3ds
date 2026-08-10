@@ -44,6 +44,9 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
     if (R_FAILED(ndspInit())) {
         return false;
     }
+    // From this point on Shutdown must balance ndspInit even when a later
+    // linear allocation fails.
+    sInitialized = true;
 
     for (auto& buffer : sBuffers) {
         buffer.samples = static_cast<int16_t*>(
@@ -67,7 +70,6 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
     mix[1] = 1.0f;
     ndspChnSetMix(kChannel, mix);
     ndspChnSetPaused(kChannel, false);
-    sInitialized = true;
     return true;
 }
 
@@ -75,6 +77,10 @@ extern "C" void Mk64Audio3DSShutdown(void) {
     if (sInitialized) {
         ndspChnSetPaused(kChannel, true);
         ndspChnWaveBufClear(kChannel);
+        // Stop libctru's NDSP worker and unregister its APT/DSP hooks before
+        // releasing any wave memory or letting the process tear services down.
+        ndspExit();
+        sInitialized = false;
     }
     for (auto& buffer : sBuffers) {
         if (buffer.samples != nullptr) {
@@ -83,12 +89,6 @@ extern "C" void Mk64Audio3DSShutdown(void) {
         }
         std::memset(&buffer.wave, 0, sizeof(buffer.wave));
     }
-    // Do not call ndspExit from the Mario Kart shutdown path. The supplied
-    // hardware dump for v0.13 faults inside libctru's ndspFinalize/aptDspSleep
-    // finalizer path; the CIA process is exiting immediately afterwards, so the
-    // kernel can reclaim the DSP session more safely than unwinding through the
-    // global NDSP/APT cleanup hooks on real hardware.
-    sInitialized = false;
     sQueuedBuffers.store(0, std::memory_order_relaxed);
     sDroppedBuffers.store(0, std::memory_order_relaxed);
 }
