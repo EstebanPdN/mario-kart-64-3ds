@@ -10,7 +10,9 @@
 extern "C" void create_next_audio_buffer(int16_t* samples, uint32_t sampleCount);
 
 namespace {
-constexpr uint32_t kSampleRate = 32000;
+// MK64's audio session preset is 0x68b0 (26,800 Hz). Matching NDSP to the
+// synthesis rate avoids both pitch error and a steady underrun at 30 Hz.
+constexpr uint32_t kSampleRate = 26800;
 constexpr uint32_t kSamplesPerSynthesisFrame = 448;
 constexpr uint32_t kSynthesisFramesPerGameFrame = 2;
 constexpr uint32_t kStereoFramesPerGameFrame =
@@ -20,11 +22,7 @@ bool sReady = false;
 }
 
 extern "C" bool Mk64GameAudio3DSInit() {
-#if defined(MK64_3DS_ENABLE_NDSP_AUDIO)
     sReady = Mk64Audio3DSInit(kSampleRate);
-#else
-    sReady = false;
-#endif
     return sReady;
 }
 

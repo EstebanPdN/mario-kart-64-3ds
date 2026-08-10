@@ -58,6 +58,10 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
     ndspChnSetInterp(kChannel, NDSP_INTERP_POLYPHASE);
     ndspChnSetRate(kChannel, static_cast<float>(sampleRate));
     ndspChnSetFormat(kChannel, NDSP_FORMAT_STEREO_PCM16);
+    float mix[12] = {};
+    mix[0] = 1.0f;
+    mix[1] = 1.0f;
+    ndspChnSetMix(kChannel, mix);
     sInitialized = true;
     return true;
 }
@@ -106,7 +110,11 @@ extern "C" bool Mk64Audio3DSQueueStereoS16(const int16_t* samples, size_t frameC
 
     const size_t byteCount = frameCount * kChannels * sizeof(int16_t);
     std::memcpy(buffer->samples, samples, byteCount);
-    DSP_FlushDataCache(buffer->samples, byteCount);
+    // DSP_FlushDataCache is disproportionately expensive when the application
+    // CPU limit is high. The kernel cache operation provides the coherency
+    // NDSP needs without burning a material part of an Old 3DS frame.
+    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, reinterpret_cast<u32>(buffer->samples),
+                             static_cast<u32>(byteCount));
     ResetWave(*buffer, frameCount);
     ndspChnWaveBufAdd(kChannel, &buffer->wave);
     return true;

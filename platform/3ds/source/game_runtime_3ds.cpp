@@ -11,6 +11,8 @@
 #include <memory>
 #include <unordered_map>
 
+std::unordered_map<Mtx*, MtxF> FrameInterpolation_Interpolate(float step);
+
 namespace Fast {
 void GfxSetInstance(std::shared_ptr<Interpreter> interpreter);
 }
@@ -20,11 +22,23 @@ std::unique_ptr<Fast::GfxWindowBackend3DS> sWindow;
 std::unique_ptr<Fast::GfxRenderingAPICitro3D> sRenderer;
 std::shared_ptr<Fast::Interpreter> sInterpreter;
 std::shared_ptr<Fast::GfxDebugger> sDebugger;
-const std::unordered_map<Mtx*, MtxF> sNoMatrixReplacements;
 uint64_t sFrameCounter = 0;
 uint64_t sRendererFaultCounter = 0;
 bool sRendererFaulted = false;
 constexpr uint64_t kRendererFaultTolerance = 16;
+
+void SetRendererStage(const char* stage);
+
+void RenderPresentation(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& replacements,
+                        uint32_t presentation) {
+    Mk64Diagnostics3DSSetFrame(sFrameCounter, presentation);
+    SetRendererStage(presentation == 1 ? "renderer-interpolated-prepare" : "renderer-keyframe-prepare");
+    sInterpreter->StartFrame();
+    SetRendererStage(presentation == 1 ? "renderer-interpolated-run" : "renderer-keyframe-run");
+    sInterpreter->Run(commands, replacements);
+    SetRendererStage(presentation == 1 ? "renderer-interpolated-end" : "renderer-keyframe-end");
+    sInterpreter->EndFrame();
+}
 
 void SetRendererStage(const char* stage) {
     // Persist every boundary of the first few submissions. If real hardware
@@ -107,18 +121,14 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         return;
     }
 
-    // Vanilla MK64 simulates at 30 Hz. Replaying an identical display list a
-    // second time is not motion interpolation; it doubles CPU/GPU work and
-    // made startup needlessly hostile to Old 3DS memory and GPU budgets.
+    // Vanilla MK64 simulates at 30 Hz. Recordings made by the game core let us
+    // render a true halfway presentation followed by the current keyframe.
     ++sFrameCounter;
-    Mk64Diagnostics3DSSetFrame(sFrameCounter, 1);
-    SetRendererStage("renderer-prepare");
     try {
-        sInterpreter->StartFrame();
-        SetRendererStage("renderer-run-display-list");
-        sInterpreter->Run(commands, sNoMatrixReplacements);
-        SetRendererStage("renderer-end-frame");
-        sInterpreter->EndFrame();
+        const auto interpolated = FrameInterpolation_Interpolate(0.5f);
+        RenderPresentation(commands, interpolated, 1);
+        static const std::unordered_map<Mtx*, MtxF> noReplacements;
+        RenderPresentation(commands, noReplacements, 2);
     } catch (const std::exception& exception) {
         // Leave Citro3D in a closed state even if Fast3D rejects a malformed
         // command or runs out of memory. The diagnostic thread and runtime log

@@ -11,7 +11,7 @@ void GfxWindowBackend3DS::Init(const char*, const char*, bool, uint32_t, uint32_
     mHeight = 240;
     mFullScreen = true;
     mIsRunning = true;
-    mTargetFps = 30;
+    mTargetFps = 60;
 }
 
 void GfxWindowBackend3DS::Close() {
@@ -140,7 +140,7 @@ int GfxWindowBackend3DS::GetTargetFps() {
 }
 
 void GfxWindowBackend3DS::SetTargetFps(int fps) {
-    mTargetFps = fps > 0 ? static_cast<uint32_t>(fps) : 30;
+    mTargetFps = fps > 0 ? static_cast<uint32_t>(fps) : 60;
 }
 
 void GfxWindowBackend3DS::SetMaxFrameLatency(int) {

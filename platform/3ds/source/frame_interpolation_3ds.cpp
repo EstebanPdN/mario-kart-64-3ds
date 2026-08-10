@@ -1,91 +1,20 @@
-#include "port/interpolation/FrameInterpolation.h"
+#include <common_structs.h>
 
-#include <unordered_map>
+#include "port/Engine.h"
 
-std::unordered_map<Mtx*, MtxF> FrameInterpolation_Interpolate(float) {
-    return {};
+#include <cstdint>
+
+// MK64's simulation remains at its native 30 Hz. The 3DS renderer presents
+// one matrix-interpolated frame between each pair of simulation frames so the
+// top LCD receives a genuine 60 Hz presentation without speeding up gameplay.
+uint32_t GameEngine::GetInterpolationFPS() {
+    return 60;
 }
 
-void FrameInterpolation_ApplyMatrixTransformations(Mat4*, FVector, IRotator, FVector) {
+uint32_t GameEngine::GetInterpolationFrameCount() {
+    return 2;
 }
 
-extern "C" {
-
-void FrameInterpolation_ShouldInterpolateFrame(bool) {
-}
-
-bool check_if_recording() {
-    return false;
-}
-
-void FrameInterpolation_StartRecord() {
-}
-
-void FrameInterpolation_StopRecord() {
-}
-
-void FrameInterpolation_RecordMarker(const char*, int) {
-}
-
-void FrameInterpolation_RecordOpenChild(const void*, uintptr_t) {
-}
-
-void FrameInterpolation_RecordCloseChild() {
-}
-
-void FrameInterpolation_DontInterpolateCamera() {
-}
-
-int FrameInterpolation_GetCameraEpoch() {
-    return 0;
-}
-
-void FrameInterpolation_RecordActorPosRotMatrix() {
-}
-
-void FrameInterpolation_RecordMatrixPosRotXYZ(Mat4*, Vec3f, Vec3s) {
-}
-
-void FrameInterpolation_RecordMatrixPosRotScaleXY(Mat4*, s32, s32, u16, f32) {
-}
-
-void FrameInterpolation_Record_SetTextMatrix(Mat4*, f32, f32, f32, f32) {
-}
-
-void FrameInterpolation_RecordMatrixMult(Mat4*, MtxF*, u8) {
-}
-
-void FrameInterpolation_RecordMatrixTranslate(Mat4*, Vec3f) {
-}
-
-void FrameInterpolation_RecordMatrixScale(Mat4*, f32) {
-}
-
-void FrameInterpolation_RecordMatrixRotate1Coord(Mat4*, u32, s16) {
-}
-
-void FrameInterpolation_RecordMatrixMtxFToMtx(MtxF*, Mtx*) {
-}
-
-void FrameInterpolation_RecordMatrixToMtx(Mtx*, char*, s32) {
-}
-
-void FrameInterpolation_RecordMatrixReplaceRotation(MtxF*) {
-}
-
-void FrameInterpolation_RecordSkinMatrixMtxFToMtx(MtxF*, Mtx*) {
-}
-
-void FrameInterpolation_RecordSetTransformMatrix(Mat4*, Vec3f, Vec3f, u16, f32) {
-}
-
-void FrameInterpolation_RecordSetMatrixTransformation(Mat4*, Vec3f, Vec3su, f32) {
-}
-
-void FrameInterpolation_RecordCalculateOrientationMatrix(Mat3*, f32, f32, f32, s16) {
-}
-
-void FrameInterpolation_RecordTranslateRotate(Mat4*, Vec3f, Vec3s) {
-}
-
+extern "C" uint32_t GameEngine_GetInterpolationFrameCount() {
+    return GameEngine::GetInterpolationFrameCount();
 }

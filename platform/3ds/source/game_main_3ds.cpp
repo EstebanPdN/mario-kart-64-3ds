@@ -14,6 +14,8 @@
 
 extern "C" {
 extern int32_t gMenuSelection;
+void initialize_memory_pool(void);
+int Mk64MemoryArena3DSIsReady(void);
 void audio_init(void);
 void osInitialize(void);
 void sound_init(void);
@@ -45,6 +47,15 @@ int ShowError(const char* message) {
 }
 
 int main() {
+    // Hold the vanilla game's arena before O2R and Citro3D allocate from the
+    // much smaller Old 3DS application heap. setup_game_memory() resets this
+    // same arena later; this early call exists solely to make the reservation
+    // deterministic and to turn allocation failure into a visible error.
+    initialize_memory_pool();
+    if (!Mk64MemoryArena3DSIsReady()) {
+        return ShowError("Not enough application memory for the 16 MiB game arena.");
+    }
+
     const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
     if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
         return ShowError(data.message);
