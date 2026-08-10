@@ -604,6 +604,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     }
 
     const size_t sourceVertexCount = std::min(bufVboNumTris * 3, static_cast<size_t>(kMaxSourceVertices));
+    const size_t sourceTriangleCount = sourceVertexCount / 3;
     if (program->strideFloats > kMaxVertexStrideFloats ||
         bufVboLen < sourceVertexCount * program->strideFloats) {
         return;
@@ -619,9 +620,9 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         }
     }
     if (needsClipping) {
-        mImpl->clipScratch.resize(bufVboNumTris * 6 * program->strideFloats);
+        mImpl->clipScratch.resize(sourceTriangleCount * 6 * program->strideFloats);
         size_t clippedVertexCount = 0;
-        for (size_t triangle = 0; triangle < sourceVertexCount / 3; ++triangle) {
+        for (size_t triangle = 0; triangle < sourceTriangleCount; ++triangle) {
             const float* triangleVertices[3] = {
                 bufVbo + (triangle * 3 + 0) * program->strideFloats,
                 bufVbo + (triangle * 3 + 1) * program->strideFloats,
@@ -788,12 +789,16 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     }
 
     C3D_AlphaTest(program->textureEdge || program->alphaThreshold, GPU_GREATER,
-                  program->textureEdge ? 0x7F : 0x08);
+                  0x08);
     C3D_DepthTest(mImpl->depthTest, mImpl->depthTest ? GPU_GREATER : GPU_ALWAYS,
                   static_cast<GPU_WRITEMASK>(GPU_WRITE_COLOR | (mImpl->depthWrite ? GPU_WRITE_DEPTH : 0)));
     if (useTextureAlpha) {
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
-                       GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+        if (program->textureEdge) {
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        } else {
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
+                           GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+        }
     }
     GSPGPU_FlushDataCache(mImpl->packedVertices + firstVertex * kPackedVertexFloats,
                           vertexCount * kPackedVertexFloats * sizeof(float));
@@ -863,7 +868,7 @@ void GfxRenderingAPICitro3D::Init() {
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 4, 0x3210);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
-    C3D_FrameRate(30.0f);
+    C3D_FrameRate(60.0f);
     SetUseAlpha(false);
     SetDepthTestAndMask(false, false);
     mImpl->ready = true;

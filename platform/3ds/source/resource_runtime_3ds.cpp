@@ -13,6 +13,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -665,11 +666,21 @@ LoadedResource* LoadByPath(std::string_view path) {
     }
 
     std::vector<uint8_t> bytes;
-    if (sArchive->ReadEntry(path, &bytes) != mk64_3ds::O2rReadResult::Ok) {
+    try {
+        if (sArchive->ReadEntry(path, &bytes) != mk64_3ds::O2rReadResult::Ok) {
+            return nullptr;
+        }
+    } catch (const std::bad_alloc&) {
         return nullptr;
     }
-    auto resource = std::make_unique<LoadedResource>();
-    if (!ParseResource(bytes, *resource)) {
+
+    std::unique_ptr<LoadedResource> resource;
+    try {
+        resource = std::make_unique<LoadedResource>();
+        if (!ParseResource(bytes, *resource)) {
+            return nullptr;
+        }
+    } catch (const std::bad_alloc&) {
         return nullptr;
     }
     LoadedResource* result = resource.get();
