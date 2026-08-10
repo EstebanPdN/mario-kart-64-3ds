@@ -4,12 +4,37 @@
 #include <3ds.h>
 
 #include <array>
+#include <cerrno>
 #include <exception>
 #include <filesystem>
 #include <cstdio>
 #include <cstdint>
+#include <malloc.h>
 #include <string>
 #include <vector>
+
+namespace {
+void LogTorchMemory(const char* phase) {
+    const struct mallinfo heap = mallinfo();
+    Mk64InstallLogWritef(
+        "Torch adapter memory at %s: heap arena=%lu allocated=%lu free=%lu releasable=%lu; linear free=%lu; "
+        "application region unused=%lu/%lu.",
+        phase, static_cast<unsigned long>(heap.arena), static_cast<unsigned long>(heap.uordblks),
+        static_cast<unsigned long>(heap.fordblks), static_cast<unsigned long>(heap.keepcost),
+        static_cast<unsigned long>(linearSpaceFree()),
+        static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
+        static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
+}
+
+void DestroyTorchInstance(Companion** instance) {
+    if (instance != nullptr) {
+        delete *instance;
+        *instance = nullptr;
+    }
+    Companion::Instance = nullptr;
+    malloc_trim(0);
+}
+}
 
 bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* destinationDir,
                           const char* additionalFile, char* error, size_t errorSize) {
@@ -39,31 +64,29 @@ bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* de
             throw std::runtime_error("Torch completed without creating its O2R archive.");
         }
         std::fclose(generatedArchive);
-        delete instance;
-        Companion::Instance = nullptr;
+        DestroyTorchInstance(&instance);
+        LogTorchMemory("successful cleanup");
         Mk64InstallLogWrite("Torch: extraction and archive finalization completed.");
         return true;
     } catch (const std::exception& exception) {
-        Mk64InstallLogWritef("Torch: exception: %s", exception.what());
-        Mk64InstallLogWritef("Torch: memory after exception: %lu free / %lu application bytes.",
-                             static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
-                             static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
+        const int failureErrno = errno;
+        Mk64InstallLogWritef("Torch: exception: %s (errno=%d).", exception.what(), failureErrno);
+        LogTorchMemory("exception before cleanup");
         if (error != nullptr && errorSize != 0) {
             std::snprintf(error, errorSize, "%s", exception.what());
         }
-        delete instance;
-        Companion::Instance = nullptr;
+        DestroyTorchInstance(&instance);
+        LogTorchMemory("exception cleanup");
         return false;
     } catch (...) {
-        Mk64InstallLogWrite("Torch: unknown exception.");
-        Mk64InstallLogWritef("Torch: memory after exception: %lu free / %lu application bytes.",
-                             static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
-                             static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
+        const int failureErrno = errno;
+        Mk64InstallLogWritef("Torch: unknown non-standard exception (errno=%d).", failureErrno);
+        LogTorchMemory("unknown exception before cleanup");
         if (error != nullptr && errorSize != 0) {
             std::snprintf(error, errorSize, "The Torch extractor raised an unknown error.");
         }
-        delete instance;
-        Companion::Instance = nullptr;
+        DestroyTorchInstance(&instance);
+        LogTorchMemory("unknown exception cleanup");
         return false;
     }
 }
