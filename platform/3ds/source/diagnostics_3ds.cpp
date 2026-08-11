@@ -78,14 +78,12 @@ extern "C" void Mk64GameAudio3DSSetPaused(bool paused) __attribute__((weak));
 enum DumpRequest : unsigned {
     kDumpRequestNone = 0,
     kDumpRequestSelect = 1,
-    kDumpRequestCombo = 2,
-    kDumpRequestBottomUi = 3,
+    kDumpRequestBottomUi = 2,
 };
 
 const char* DumpTriggerName(unsigned request) {
     switch (request) {
         case kDumpRequestSelect: return "SELECT";
-        case kDumpRequestCombo: return "L + R + A";
         case kDumpRequestBottomUi: return "BOTTOM UI";
         default: return "unknown";
     }
@@ -577,7 +575,6 @@ void WriteQuickDump(const char* trigger) {
 }
 
 void DiagnosticThread(void*) {
-    bool comboWasHeld = false;
     bool selectWasHeld = false;
     while (sRunning.load(std::memory_order_acquire)) {
         hidScanInput();
@@ -612,18 +609,14 @@ void DiagnosticThread(void*) {
         sInputReady.store(true, std::memory_order_release);
 
         const bool select = (keys & KEY_SELECT) != 0;
-        const bool combo = (keys & (KEY_L | KEY_R | KEY_A)) == (KEY_L | KEY_R | KEY_A);
         const bool selectPressed = select && !selectWasHeld;
-        const bool comboPressed = combo && !comboWasHeld;
-        if (selectPressed || comboPressed) {
+        if (selectPressed) {
             unsigned expected = kDumpRequestNone;
-            const unsigned request = selectPressed ? kDumpRequestSelect : kDumpRequestCombo;
-            if (sDumpRequest.compare_exchange_strong(expected, request, std::memory_order_acq_rel)) {
-                LogLine("dump requested: ", DumpTriggerName(request));
+            if (sDumpRequest.compare_exchange_strong(expected, kDumpRequestSelect, std::memory_order_acq_rel)) {
+                LogLine("dump requested: ", DumpTriggerName(kDumpRequestSelect));
             }
         }
         selectWasHeld = select;
-        comboWasHeld = combo;
         svcSleepThread(16000000LL);
     }
 }

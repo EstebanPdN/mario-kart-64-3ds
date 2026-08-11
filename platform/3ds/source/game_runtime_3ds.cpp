@@ -268,7 +268,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     if (sRendererFaulted) {
         // Keep gameplay/input alive if a frame decoding exception occurs.
         // Events must still be pumped so APT suspend/exit can complete and the
-        // user can capture an L+R+A dump instead of trapping the title forever.
+        // user can capture a SELECT dump instead of trapping the title forever.
         return;
     }
     if (!sWindow->IsRunning() || !sInterpreter->IsFrameReady()) {

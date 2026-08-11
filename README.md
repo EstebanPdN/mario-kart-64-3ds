@@ -110,12 +110,6 @@ If you find a crash, graphical bug, performance issue, or other problem, press:
 SELECT
 ```
 
-You can also use:
-
-```text
-L + R + A
-```
-
 The port will create a diagnostic folder under:
 
 ```text
