@@ -35,7 +35,7 @@ Install the CIA normally, then create:
 sd:/3ds/MK64/
 ```
 
-Place your legally obtained USA Mario Kart 64 ROM inside that folder.
+Place your USA Mario Kart 64 ROM inside that folder.
 
 Recommended filenames:
 
@@ -122,9 +122,6 @@ sd:/3ds/MK64/dump/
 
 These dumps can help diagnose problems on real Nintendo 3DS hardware.
 
-Please avoid publicly uploading raw memory dumps, as they may contain local
-device or game data.
-
 ## Releases
 
 GitHub releases include:
@@ -167,7 +164,7 @@ This project is based on
 [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart) and the work of
 the N64 reverse-engineering, decompilation, and Nintendo 3DS homebrew communities.
 
-Additional optimization ideas and 3DS implementation techniques were studied
+Additional optimization and 3DS implementation techniques were studied
 from other open-source Nintendo 64 ports, including
 [Super Mario 64 3DS Port Ultimate](https://github.com/Epic0522/Super-Mario-64-3ds-port---Ultimate).
 
