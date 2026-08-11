@@ -29,7 +29,8 @@ int main() {
     assert((decision.pressureMask & mk64_3ds::AdaptivePressureNoPriorFrame) != 0);
 
     inputs = HealthyInputs();
-    for (int tick = 0; tick < 3; ++tick) {
+    for (std::uint8_t tick = 1;
+         tick < mk64_3ds::kAdaptivePresentationHealthyTicksToEnable; ++tick) {
         decision = mk64_3ds::UpdateAdaptivePresentation(&state, inputs);
         assert(!decision.renderMidpoint);
         assert(decision.pressureMask == mk64_3ds::AdaptivePressureRecovery);
@@ -53,7 +54,8 @@ int main() {
     assert(decision.pressureMask == mk64_3ds::AdaptivePressureRecovery);
 
     inputs.audioBufferedFrames = inputs.audioRecoveryFrames;
-    for (int tick = 0; tick < 4; ++tick) {
+    for (std::uint8_t tick = 0;
+         tick < mk64_3ds::kAdaptivePresentationHealthyTicksToEnable; ++tick) {
         decision = mk64_3ds::UpdateAdaptivePresentation(&state, inputs);
     }
     assert(decision.renderMidpoint);
@@ -76,7 +78,8 @@ int main() {
     assert((decision.pressureMask & mk64_3ds::AdaptivePressureSlowTick) != 0);
 
     inputs = HealthyInputs();
-    for (int tick = 0; tick < 4; ++tick) {
+    for (std::uint8_t tick = 0;
+         tick < mk64_3ds::kAdaptivePresentationHealthyTicksToEnable; ++tick) {
         decision = mk64_3ds::UpdateAdaptivePresentation(&state, inputs);
     }
     assert(decision.renderMidpoint);

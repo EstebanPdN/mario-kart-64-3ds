@@ -53,12 +53,16 @@ uint64_t sLastObservedTextureUploadBytes = 0;
 
 constexpr uint32_t kAudioFramesPerGameTick = 896;
 // The audio worker schedules at two ticks or less and adds one tick. Treat one
-// tick as immediate pressure, while allowing recovery at the worker's normal
-// two-tick target instead of waiting for a nondeterministic third buffer.
+// tick as immediate pressure. Recovery at 1.5 ticks (~50 ms) leaves a real
+// safety margin while avoiding an impossible exact-two-tick observation when
+// the in-flight worker has not yet published its next block.
 constexpr uint32_t kAudioLowWaterFrames = kAudioFramesPerGameTick;
-constexpr uint32_t kAudioRecoveryFrames = kAudioFramesPerGameTick * 2;
+constexpr uint32_t kAudioRecoveryFrames = kAudioFramesPerGameTick * 3 / 2;
 // libctru documents osGetTime() in milliseconds.
-constexpr uint64_t kSlowTickMilliseconds = 40;
+// A midpoint is expendable as soon as a 30 Hz tick misses by more than a
+// small scheduling margin. Recover only after the policy observes eight
+// healthy ticks, keeping race-start upload bursts from repeatedly flapping it.
+constexpr uint64_t kSlowTickMilliseconds = 36;
 constexpr uint64_t kHeavyTextureUploadBytes = 64u * 1024u;
 constexpr uint64_t kHeavyTextureUploadCount = 2;
 constexpr float kBusyProcessingMilliseconds = 13.0f;
@@ -281,47 +285,38 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     SetRendererStage("renderer-prepare");
     try {
         UpdateGameViewport();
-        if (sUseIntermediatePresentation) {
-            // Preserve the first 60 Hz interval even when pressure makes a
-            // second display-list decode unsafe. A retained-image repeat is
-            // cheap, while the following keyframe remains mandatory.
-            const bool interpolated = renderIntermediate &&
-                                      Mk64FrameInterpolation3DSPrepare(0.5f);
-            Mk64Diagnostics3DSSetFrame(sFrameCounter, 1);
-            sInterpreter->mInterpolationIndex = 0;
-            sInterpreter->mInterpolationIndexTarget = 0;
-            sInterpreter->mInterpolationT = 0.5f;
+        bool didPresentIntermediate = false;
+        if (renderIntermediate) {
+            // A midpoint is optional. Under CPU/GPU, resource-upload or audio
+            // pressure, skip the entire extra presentation instead of paying
+            // for a retained-image Citro3D frame and an additional VBlank.
+            // The mandatory key frame below then gets the full 30 Hz budget.
+            const bool interpolated = Mk64FrameInterpolation3DSPrepare(0.5f);
             if (interpolated) {
+                Mk64Diagnostics3DSSetFrame(sFrameCounter, 1);
+                sInterpreter->mInterpolationIndex = 0;
+                sInterpreter->mInterpolationIndexTarget = 0;
+                sInterpreter->mInterpolationT = 0.5f;
                 sInterpreter->StartFrame();
                 SetRendererStage("renderer-run-intermediate");
                 sInterpreter->Run(commands, sNoMatrixReplacements);
-            } else {
-                // Every New-3DS 400 px simulation tick must still consume two
-                // 60 Hz presentation intervals. When topology/camera safety
-                // rejects interpolation, repeat the already displayed top
-                // image with a cheap Citro3D frame instead of decoding the
-                // complete display list a second time or advancing at 2x.
-                SetRendererStage("renderer-repeat-intermediate");
-                sRenderer->StartFrame();
-                if (!sHasPresentedTopFrame) {
-                    // The top target has no defined retained contents before
-                    // its first completed presentation. Clear that one repeat
-                    // to black so boot can never flash uninitialized VRAM.
-                    sRenderer->ClearFramebuffer(true, true);
+                // Count every image actually sent to the display. The lower
+                // HUD remains key-frame-only, but the optional top FPS glyph
+                // must be redrawn here or it flickers at 30 Hz and reports
+                // simulation ticks instead of presentation rate.
+                Mk64BottomUI3DSRecordPresentation();
+                if (Mk64Settings3DSGetShowFpsEnabled()) {
+                    Mk64BottomUI3DSDrawTopFps(sRenderer->PrepareForExternalDraw());
                 }
+                SetRendererStage("renderer-end-intermediate");
+                sInterpreter->EndFrame();
+                didPresentIntermediate = true;
+                sHasPresentedTopFrame = true;
             }
             Mk64FrameInterpolation3DSClearPrepared();
-            Mk64BottomUI3DSDraw(sRenderer->PrepareForExternalDraw());
-            SetRendererStage("renderer-end-intermediate");
-            if (interpolated) {
-                sInterpreter->EndFrame();
-            } else {
-                sRenderer->EndFrame();
-            }
-            sHasPresentedTopFrame = true;
         }
 
-        Mk64Diagnostics3DSSetFrame(sFrameCounter, sUseIntermediatePresentation ? 2 : 1);
+        Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 2 : 1);
         sInterpreter->mInterpolationIndex = 1;
         sInterpreter->mInterpolationIndexTarget = 1;
         sInterpreter->mInterpolationT = 1.0f;

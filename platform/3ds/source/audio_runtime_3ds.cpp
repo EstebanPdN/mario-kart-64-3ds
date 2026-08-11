@@ -50,18 +50,29 @@ constexpr uint32_t kSynthesisFramesPerGameFrame = 2;
 constexpr uint32_t kStereoFramesPerGameFrame =
     kSamplesPerSynthesisFrame * kSynthesisFramesPerGameFrame;
 constexpr uint32_t kStereoSamplesPerGameFrame = kStereoFramesPerGameFrame * 2;
+// Refill begins below a roughly 67 ms target. A final 896-frame block may
+// transiently overshoot that threshold; the six-wave pool provides capacity
+// without making a third synthesis block part of the normal policy.
 constexpr uint32_t kTargetBufferedFrames = kStereoFramesPerGameFrame * 2;
+constexpr uint32_t kMaxSynthesisBlocksPerPump = 2;
 constexpr size_t kAudioWorkerStackSize = 64u * 1024u;
 constexpr int32_t kAudioWorkerPriority = 0x18;
 
 bool sReady = false;
-uint32_t sPumpCount = 0;
+uint32_t sSynthesisBlockCount = 0;
+uint32_t sPumpCallCount = 0;
+uint32_t sMultiBlockPumpCount = 0;
+uint32_t sQueueFailureCount = 0;
+uint32_t sObservedEmptyTransitionCount = 0;
 bool sLoggedFirstSignal = false;
+bool sAudioPrimed = false;
+bool sEmptyObservedActive = false;
 Thread sWorkerThread = nullptr;
 LightEvent sWorkerStart;
 LightEvent sWorkerDone;
 std::atomic<bool> sWorkerRunning{ false };
 std::atomic<bool> sJobOutstanding{ false };
+std::atomic<bool> sLastJobQueued{ false };
 std::atomic<bool> sPaused{ false };
 std::atomic<uint16_t> sVolumePercent{ 100 };
 int sWorkerCore = -1;
@@ -129,22 +140,26 @@ void LogAudioState() {
 }
 
 bool NeedsSynthesis() {
-    return Mk64Audio3DSBufferedFrames() <= kTargetBufferedFrames;
+    return Mk64Audio3DSBufferedFrames() < kTargetBufferedFrames;
 }
 
-void SynthesizeAndQueue(uint16_t volumePercent) {
+bool SynthesizeAndQueue(uint16_t volumePercent) {
+    // create_next_audio_buffer advances the music and SFX timeline. Check the
+    // sole-producer wave pool first so an already-full queue cannot consume
+    // audio state that NDSP will never play.
+    if (!Mk64Audio3DSHasReusableBuffer()) return false;
     std::array<int16_t, kStereoSamplesPerGameFrame> samples = {};
     create_next_audio_buffer(samples.data(), kSamplesPerSynthesisFrame);
     create_next_audio_buffer(samples.data() + kSamplesPerSynthesisFrame * 2,
                              kSamplesPerSynthesisFrame);
     ApplyMasterVolume(samples, volumePercent);
-    ++sPumpCount;
+    const uint32_t nextBlock = sSynthesisBlockCount + 1u;
 
     // Inspect frequently enough to diagnose startup, but keep signal scans
     // out of the normal hot path.
-    const bool inspectSignal = sPumpCount <= 4u ||
-                               (!sLoggedFirstSignal && (sPumpCount % 30u) == 0u) ||
-                               (sPumpCount % 180u) == 0u;
+    const bool inspectSignal = nextBlock <= 4u ||
+                               (!sLoggedFirstSignal && (nextBlock % 30u) == 0u) ||
+                               (nextBlock % 180u) == 0u;
     uint32_t peak = 0;
     uint32_t nonzero = 0;
     if (inspectSignal) {
@@ -155,13 +170,39 @@ void SynthesizeAndQueue(uint16_t volumePercent) {
             if (static_cast<uint32_t>(value) > peak) peak = static_cast<uint32_t>(value);
         }
     }
-    Mk64Audio3DSQueueStereoS16(samples.data(), kStereoFramesPerGameFrame);
+    const bool queued =
+        Mk64Audio3DSQueueStereoS16(samples.data(), kStereoFramesPerGameFrame);
+    if (!queued) return false;
+    sSynthesisBlockCount = nextBlock;
     const bool firstSignal = inspectSignal && peak != 0u && !sLoggedFirstSignal;
     if (firstSignal) sLoggedFirstSignal = true;
     if (inspectSignal || firstSignal) {
-        Mk64Diagnostics3DSAudio(sPumpCount, Mk64Audio3DSBufferedFrames(), peak, nonzero,
+        Mk64Diagnostics3DSAudio(sSynthesisBlockCount, Mk64Audio3DSBufferedFrames(), peak, nonzero,
                                 Mk64Audio3DSQueuedCount(), Mk64Audio3DSDroppedCount());
         LogAudioState();
+    }
+    return true;
+}
+
+void FinishPumpTelemetry(uint32_t bufferedBefore, uint32_t blocksThisPump,
+                         bool queueFailedThisPump) {
+    const uint32_t bufferedAfter = Mk64Audio3DSBufferedFrames();
+    if (bufferedAfter >= kStereoFramesPerGameFrame) sAudioPrimed = true;
+    if (bufferedAfter != 0) sEmptyObservedActive = false;
+    if (blocksThisPump > 1) ++sMultiBlockPumpCount;
+    const bool sampledCatchup = blocksThisPump > 1u &&
+                                (sMultiBlockPumpCount <= 4u ||
+                                 (sMultiBlockPumpCount % 60u) == 0u);
+    const bool sampledFailure = queueFailedThisPump &&
+                                (sQueueFailureCount <= 4u ||
+                                 (sQueueFailureCount % 30u) == 0u);
+    const bool shouldLog = sPumpCallCount <= 4u || (sPumpCallCount % 180u) == 0u ||
+                           sampledCatchup || sampledFailure;
+    if (shouldLog) {
+        Mk64Diagnostics3DSAudioPump(sPumpCallCount, sSynthesisBlockCount,
+                                    bufferedBefore, bufferedAfter, blocksThisPump,
+                                    sMultiBlockPumpCount, sQueueFailureCount,
+                                    sObservedEmptyTransitionCount);
     }
 }
 
@@ -174,7 +215,9 @@ void AudioWorkerMain(void*) {
         // worker consumes them, and the main thread waits for completion
         // before beginning the next logic tick, so libultraship's emulated
         // N64 message queues are never accessed concurrently across ticks.
-        SynthesizeAndQueue(sVolumePercent.load(std::memory_order_relaxed));
+        sLastJobQueued.store(
+            SynthesizeAndQueue(sVolumePercent.load(std::memory_order_relaxed)),
+            std::memory_order_release);
         LightEvent_Signal(&sWorkerDone);
     }
 }
@@ -245,14 +288,16 @@ bool ScheduleWorkerJob() {
         return false;
     }
     sVolumePercent.store(Mk64Settings3DSGetMasterVolumePercent(), std::memory_order_relaxed);
+    sLastJobQueued.store(false, std::memory_order_relaxed);
     LightEvent_Signal(&sWorkerStart);
     return true;
 }
 
-void WaitForWorkerJob() {
-    if (!sJobOutstanding.load(std::memory_order_acquire)) return;
+bool WaitForWorkerJob() {
+    if (!sJobOutstanding.load(std::memory_order_acquire)) return true;
     LightEvent_Wait(&sWorkerDone);
     sJobOutstanding.store(false, std::memory_order_release);
+    return sLastJobQueued.load(std::memory_order_acquire);
 }
 
 }
@@ -260,8 +305,17 @@ void WaitForWorkerJob() {
 extern "C" bool Mk64GameAudio3DSInit() {
     sReady = Mk64Audio3DSInit(kSampleRate);
     if (sReady) {
+        sSynthesisBlockCount = 0;
+        sPumpCallCount = 0;
+        sMultiBlockPumpCount = 0;
+        sQueueFailureCount = 0;
+        sObservedEmptyTransitionCount = 0;
+        sLoggedFirstSignal = false;
+        sAudioPrimed = false;
+        sEmptyObservedActive = false;
         sPaused.store(false, std::memory_order_relaxed);
         sJobOutstanding.store(false, std::memory_order_relaxed);
+        sLastJobQueued.store(false, std::memory_order_relaxed);
         StartAudioWorker();
     }
     return sReady;
@@ -286,20 +340,56 @@ extern "C" void Mk64GameAudio3DSBeginFrame() {
 extern "C" void Mk64GameAudio3DSPump() {
     if (!sReady) return;
 
+    ++sPumpCallCount;
+    const uint32_t bufferedBefore = Mk64Audio3DSBufferedFrames();
+    if (sAudioPrimed && bufferedBefore == 0 && !sEmptyObservedActive) {
+        // This is a Pump-time observation, not proof that NDSP remained
+        // empty long enough to produce an audible hardware underrun.
+        ++sObservedEmptyTransitionCount;
+        sEmptyObservedActive = true;
+    } else if (bufferedBefore != 0) {
+        sEmptyObservedActive = false;
+    }
+
     const bool jobWasStartedDuringRender = sJobOutstanding.load(std::memory_order_acquire);
-    if (jobWasStartedDuringRender) WaitForWorkerJob();
-    if (sPaused.load(std::memory_order_acquire) || jobWasStartedDuringRender ||
-        !NeedsSynthesis()) {
+    const bool renderJobQueued = !jobWasStartedDuringRender || WaitForWorkerJob();
+    uint32_t synthesizedThisPump = jobWasStartedDuringRender && renderJobQueued ? 1u : 0u;
+    if (sPaused.load(std::memory_order_acquire)) {
+        FinishPumpTelemetry(bufferedBefore, synthesizedThisPump, false);
+        return;
+    }
+    if (!renderJobQueued) {
+        ++sQueueFailureCount;
+        FinishPumpTelemetry(bufferedBefore, synthesizedThisPump, true);
         return;
     }
 
-    if (ScheduleWorkerJob()) {
-        WaitForWorkerJob();
-    } else {
-        // Old 3DS systems that cannot reserve core 1 still retain the safe
-        // single-threaded path rather than losing audio entirely.
-        SynthesizeAndQueue(Mk64Settings3DSGetMasterVolumePercent());
+    // Refill to a bounded high-water mark, not just one block per visual
+    // iteration. A long course-start frame can consume more than 33 ms of
+    // queued sound; producing the missing blocks here keeps NDSP real-time
+    // while all audio-global access remains complete before the next game
+    // logic tick. At steady 30 Hz this loop still produces exactly one block.
+    bool queueFailedThisPump = false;
+    while (NeedsSynthesis() && synthesizedThisPump < kMaxSynthesisBlocksPerPump) {
+        bool queued = false;
+        if (ScheduleWorkerJob()) {
+            queued = WaitForWorkerJob();
+        } else {
+            // Old 3DS systems that cannot reserve core 1 retain the safe
+            // single-threaded path rather than losing audio entirely.
+            queued = SynthesizeAndQueue(Mk64Settings3DSGetMasterVolumePercent());
+        }
+        // Synthesis advances the game's audio timeline. If NDSP has no
+        // reusable wave, stop immediately so one pressured frame can never
+        // advance and discard several consecutive music/SFX blocks.
+        if (!queued) {
+            ++sQueueFailureCount;
+            queueFailedThisPump = true;
+            break;
+        }
+        ++synthesizedThisPump;
     }
+    FinishPumpTelemetry(bufferedBefore, synthesizedThisPump, queueFailedThisPump);
 }
 
 extern "C" void Mk64GameAudio3DSShutdown() {
@@ -315,10 +405,37 @@ extern "C" void Mk64GameAudio3DSShutdown() {
     RestoreCpuLimit();
     Mk64Audio3DSShutdown();
     sReady = false;
-    sPumpCount = 0;
+    sSynthesisBlockCount = 0;
+    sPumpCallCount = 0;
+    sMultiBlockPumpCount = 0;
+    sQueueFailureCount = 0;
+    sObservedEmptyTransitionCount = 0;
     sLoggedFirstSignal = false;
+    sAudioPrimed = false;
+    sEmptyObservedActive = false;
     sPaused.store(false, std::memory_order_relaxed);
     sJobOutstanding.store(false, std::memory_order_relaxed);
+    sLastJobQueued.store(false, std::memory_order_relaxed);
+}
+
+extern "C" void Mk64GameAudio3DSAbortForProcessExit() {
+    // aptMainLoop() becoming false means the OS is terminating this process.
+    // During that transition NDSP/service IPC and an outstanding worker can
+    // stop replying, so the normal unbounded teardown is unsafe. Stop issuing
+    // new work and wake the worker, then let _Exit release process-owned
+    // services and memory without waiting on either endpoint.
+    sPaused.store(true, std::memory_order_release);
+    sWorkerRunning.store(false, std::memory_order_release);
+    if (sWorkerThread != nullptr) {
+        LightEvent_Signal(&sWorkerStart);
+        if (R_SUCCEEDED(threadJoin(sWorkerThread, 250ULL * 1000ULL * 1000ULL))) {
+            threadFree(sWorkerThread);
+        } else {
+            threadDetach(sWorkerThread);
+        }
+        sWorkerThread = nullptr;
+    }
+    sReady = false;
 }
 
 extern "C" uint32_t GameEngine_GetSampleRate() {

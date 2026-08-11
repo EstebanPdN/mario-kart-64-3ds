@@ -1,11 +1,13 @@
 #include "game_data_3ds.h"
 #include "game_data_archive_3ds.hpp"
+#include "install_progress_3ds.hpp"
 #include "install_log_3ds.h"
 #include "loading_image_3ds.h"
 
 #include <3ds.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdint>
@@ -64,8 +66,24 @@ struct CopyStats {
 PrintConsole gBottomConsole{};
 std::array<std::array<char, 76>, 22> gInstallConsoleLines{};
 uint32_t gInstallConsoleLineCount = 0;
-int gInstallProgressPercent = 0;
+std::atomic<int> gInstallProgressPercent{0};
 bool gInstallShellStateAvailable = false;
+LightLock gInstallDisplayLock;
+bool gInstallDisplayLockReady = false;
+Thread gInstallLidWatcherThread = nullptr;
+std::atomic<bool> gInstallLidWatcherRunning{false};
+std::atomic<bool> gInstallLidClosed{false};
+bool gInstallLidPollingFallback = false;
+
+class InstallDisplayLockGuard {
+public:
+    InstallDisplayLockGuard() {
+        if (gInstallDisplayLockReady) LightLock_Lock(&gInstallDisplayLock);
+    }
+    ~InstallDisplayLockGuard() {
+        if (gInstallDisplayLockReady) LightLock_Unlock(&gInstallDisplayLock);
+    }
+};
 
 void PushInstallConsoleLine(const char* format, ...) {
     char line[76] = {};
@@ -73,6 +91,8 @@ void PushInstallConsoleLine(const char* format, ...) {
     va_start(args, format);
     std::vsnprintf(line, sizeof(line), format, args);
     va_end(args);
+
+    InstallDisplayLockGuard lock;
 
     if (gInstallConsoleLineCount < gInstallConsoleLines.size()) {
         std::snprintf(gInstallConsoleLines[gInstallConsoleLineCount++].data(), gInstallConsoleLines[0].size(), "%s", line);
@@ -167,18 +187,8 @@ void DrawLoadingTopScreen(int percent) {
     DrawTopBlendedRect(frameBuffer, barX, barY, barW, 2, 150, 255, 185, 150);
 }
 
-void RedrawInstallScreens(int percent) {
-    gInstallProgressPercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
-    if (gInstallShellStateAvailable) {
-        u8 shellState = 1;
-        if (R_SUCCEEDED(PTMU_GetShellState(&shellState)) && shellState == 0) {
-            // Every installer redraw, including log-callback redraws, passes
-            // through this function. Avoid GPU work and VBlank waits while
-            // unattended extraction continues with the lid closed.
-            return;
-        }
-    }
-    DrawLoadingTopScreen(gInstallProgressPercent);
+void PrepareInstallScreensLocked() {
+    DrawLoadingTopScreen(gInstallProgressPercent.load(std::memory_order_relaxed));
     consoleSelect(&gBottomConsole);
     consoleClear();
     std::printf("Mario Kart 64 3DS\n\n");
@@ -189,8 +199,80 @@ void RedrawInstallScreens(int percent) {
     }
     std::printf("\nLog: /3ds/MK64/mk64-install.log\n");
     gfxFlushBuffers();
+}
+
+void ApplyInstallLidState(bool closed) {
+    InstallDisplayLockGuard lock;
+    if (closed) {
+        // Publish closed first so a new redraw cannot begin while the panels
+        // are being blanked.
+        gInstallLidClosed.store(true, std::memory_order_release);
+        GSPGPU_SetLcdForceBlack(1);
+    } else {
+        // Unblank before allowing redraws to resume.
+        GSPGPU_SetLcdForceBlack(0);
+        gInstallLidClosed.store(false, std::memory_order_release);
+    }
+}
+
+bool PollInstallLidState() {
+    bool closed = gInstallLidClosed.load(std::memory_order_acquire);
+    if (!gInstallShellStateAvailable) return closed;
+
+    u8 shellState = closed ? 0 : 1;
+    if (R_SUCCEEDED(PTMU_GetShellState(&shellState))) {
+        const bool observedClosed = shellState == 0;
+        if (observedClosed != closed) ApplyInstallLidState(observedClosed);
+        closed = observedClosed;
+    }
+    return closed;
+}
+
+int AdvanceInstallProgress(int requestedPercent) {
+    const int desired = mk64_3ds::install_progress::ClampPercent(requestedPercent);
+    int observed = gInstallProgressPercent.load(std::memory_order_relaxed);
+    while (observed < desired) {
+        if (gInstallProgressPercent.compare_exchange_weak(
+                observed, desired, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            return desired;
+        }
+    }
+    return observed;
+}
+
+void RedrawInstallScreens(int percent) {
+    AdvanceInstallProgress(percent);
+    if (gInstallLidPollingFallback) PollInstallLidState();
+    if (gInstallLidClosed.load(std::memory_order_acquire)) return;
+    {
+        InstallDisplayLockGuard lock;
+        if (gInstallLidClosed.load(std::memory_order_acquire)) return;
+        PrepareInstallScreensLocked();
+    }
+
+    // The watcher must be able to publish a closed lid and blank the LCD even
+    // if swap or VBlank blocks. Never hold its state lock across either call.
+    if (gInstallLidClosed.load(std::memory_order_acquire)) return;
     gfxSwapBuffers();
-    gspWaitForVBlank();
+    if (!gInstallLidClosed.load(std::memory_order_acquire)) gspWaitForVBlank();
+}
+
+void ExtractionLidWatcherMain(void*) {
+    bool lastClosed = gInstallLidClosed.load(std::memory_order_acquire);
+    while (gInstallLidWatcherRunning.load(std::memory_order_acquire)) {
+        u8 shellState = lastClosed ? 0 : 1;
+        if (R_SUCCEEDED(PTMU_GetShellState(&shellState))) {
+            const bool closed = shellState == 0;
+            if (closed != lastClosed) {
+                ApplyInstallLidState(closed);
+                // Unblanking exposes the most recently completed framebuffer
+                // immediately. The extraction thread owns all drawing and
+                // refreshes it again on its next progress callback.
+                lastClosed = closed;
+            }
+        }
+        svcSleepThread(50LL * 1000LL * 1000LL);
+    }
 }
 
 void OnInstallLogLine(const char* message) {
@@ -198,11 +280,33 @@ void OnInstallLogLine(const char* message) {
 
     int entries = 0;
     if (message != nullptr && std::sscanf(message, "O2R progress: %d entries", &entries) == 1) {
-        const int estimatedPercent = 55 + entries / 325;
-        RedrawInstallScreens(estimatedPercent > 99 ? 99 : estimatedPercent);
+        const std::uint32_t completedEntries =
+            entries > 0 ? static_cast<std::uint32_t>(entries) : 0;
+        RedrawInstallScreens(mk64_3ds::install_progress::MapGeneratedEntries(completedEntries));
         return;
     }
-    RedrawInstallScreens(gInstallProgressPercent);
+    RedrawInstallScreens(gInstallProgressPercent.load(std::memory_order_relaxed));
+}
+
+struct ValidationProgressRange {
+    int startPercent;
+    int endPercent;
+};
+
+void OnArchiveValidationProgress(std::size_t completedEntries, std::size_t totalEntries,
+                                 void* userData) {
+    const auto* range = static_cast<const ValidationProgressRange*>(userData);
+    if (range == nullptr) return;
+    const std::size_t maxWork = std::numeric_limits<std::uint32_t>::max();
+    const std::uint32_t completed = static_cast<std::uint32_t>(
+        completedEntries < maxWork ? completedEntries : maxWork);
+    const std::uint32_t total = static_cast<std::uint32_t>(
+        totalEntries < maxWork ? totalEntries : maxWork);
+    const int percent = mk64_3ds::install_progress::MapValidatedEntries(
+        completed, total, range->startPercent, range->endPercent);
+    if (percent > gInstallProgressPercent.load(std::memory_order_relaxed)) {
+        RedrawInstallScreens(percent);
+    }
 }
 
 bool FileExists(const char* path) {
@@ -347,7 +451,7 @@ bool DiscardIncompleteArchive(const char* archivePath, const char* reason) {
 void CleanupLegacyIncompleteQuarantine() {
     // v0.18 could retain a new 50+ MiB partial after every failed retry. None
     // of those files has a usable ZIP directory or can be resumed, so reclaim
-    // them before the v0.19 free-space preflight. Preserve other rejected
+    // them before the current free-space preflight. Preserve other rejected
     // archives, which may still be useful for corruption diagnostics.
     constexpr std::array<const char*, 2> kLegacyPartialLabels = {
         "mk64-incomplete",
@@ -475,17 +579,18 @@ void SetResult(Mk64GameData3DSResult* result, Mk64GameData3DSStatus status, cons
 }
 
 void DrawProgress(const char* status, const char* detail, int percent) {
-    gInstallProgressPercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+    const int displayedPercent = AdvanceInstallProgress(percent);
 
     // Route every dynamic bottom-screen line through the same writer as the
     // extractor diagnostics. This makes mk64-install.log a complete transcript
     // of the installation console, including progress and user-facing errors.
-    Mk64InstallLogWritef("%3d%% %s", gInstallProgressPercent, status != nullptr ? status : "");
+    Mk64InstallLogWritef("%3d%% %s", displayedPercent,
+                         status != nullptr ? status : "");
     if (detail != nullptr && detail[0] != '\0') {
         Mk64InstallLogWritef("     %s", detail);
     }
 
-    RedrawInstallScreens(gInstallProgressPercent);
+    RedrawInstallScreens(displayedPercent);
 }
 
 void LogInstallerMemory(const char* phase) {
@@ -508,17 +613,53 @@ public:
         aptSetSleepAllowed(false);
         aptSetHomeAllowed(false);
         gInstallShellStateAvailable = shellServiceReady_;
+        gInstallLidPollingFallback = false;
+        gInstallLidClosed.store(false, std::memory_order_release);
+
+        // Arm the shell state and watcher before any installer log call. The
+        // log callback redraws immediately, so a console already closed when
+        // extraction begins must be known before that first callback.
+        if (shellServiceReady_) {
+            // Fail closed until the first successful PTMU sample. A transient
+            // query failure may briefly keep the panels black, but can never
+            // send a redraw into a closed-lid VBlank wait.
+            ApplyInstallLidState(true);
+            u8 shellState = 1;
+            if (R_SUCCEEDED(PTMU_GetShellState(&shellState))) {
+                ApplyInstallLidState(shellState == 0);
+            }
+            gInstallLidWatcherRunning.store(true, std::memory_order_release);
+            gInstallLidWatcherThread = threadCreate(ExtractionLidWatcherMain, nullptr,
+                                                     16 * 1024, 0x30, -1, false);
+            if (gInstallLidWatcherThread == nullptr) {
+                gInstallLidWatcherRunning.store(false, std::memory_order_release);
+                gInstallLidPollingFallback = true;
+            }
+        }
+
         Mk64InstallLogWrite(
             "Unattended extraction enabled: lid-close sleep and HOME suspension are disabled until completion.");
-        if(!shellServiceReady_) {
+        if (!shellServiceReady_) {
             Mk64InstallLogWrite("Shell-state service unavailable; extraction remains awake but screen refresh cannot be suppressed.");
+        } else if (gInstallLidPollingFallback) {
+            Mk64InstallLogWrite("Lid watcher unavailable; each installer redraw will poll the shell state instead.");
         }
     }
 
     ~ExtractionAwakeGuard() {
         Mk64InstallLogWrite("Unattended extraction ended; restoring the prior sleep and HOME policies.");
+        gInstallLidWatcherRunning.store(false, std::memory_order_release);
+        if (gInstallLidWatcherThread != nullptr) {
+            threadJoin(gInstallLidWatcherThread, U64_MAX);
+            threadFree(gInstallLidWatcherThread);
+            gInstallLidWatcherThread = nullptr;
+        }
+        // Force-black is an extraction-only override. Clear it before PTMU and
+        // normal APT sleep handling are restored, even if the lid remains shut.
+        ApplyInstallLidState(false);
+        gInstallLidPollingFallback = false;
         gInstallShellStateAvailable = false;
-        if(shellServiceReady_) {
+        if (shellServiceReady_) {
             ptmuExit();
         }
         aptSetHomeAllowed(previousHomeAllowed_);
@@ -678,6 +819,10 @@ bool Sha1File(const char* path, char outHex[41]) {
     std::fseek(file, 0, SEEK_END);
     const long size = std::ftell(file);
     std::fseek(file, 0, SEEK_SET);
+    const std::uint32_t totalBytes =
+        size > 0 && static_cast<unsigned long>(size) <= std::numeric_limits<std::uint32_t>::max()
+            ? static_cast<std::uint32_t>(size)
+            : 0;
 
     Sha1Context ctx;
     Sha1Init(&ctx);
@@ -692,7 +837,11 @@ bool Sha1File(const char* path, char outHex[41]) {
         }
         Sha1Update(&ctx, buffer.data(), read);
         processed += static_cast<long>(read);
-        const int percent = size > 0 ? static_cast<int>((processed * 45L) / size) + 5 : 50;
+        const std::uint32_t processedBytes =
+            processed > 0 && static_cast<unsigned long>(processed) <= std::numeric_limits<std::uint32_t>::max()
+                ? static_cast<std::uint32_t>(processed)
+                : totalBytes;
+        const int percent = mk64_3ds::install_progress::MapRomHashBytes(processedBytes, totalBytes);
         if (percent != lastPercent) {
             DrawProgress("Checking ROM...", path, percent);
             lastPercent = percent;
@@ -728,24 +877,31 @@ bool InstallExtractorFiles(CopyStats* stats) {
     }
 
     if (!MakeDirectory(kInstallerDir)) return false;
-    DrawProgress("Installing local extractor...", "Copying the bundled extractor files to the SD card.", 52);
+    DrawProgress("Installing local extractor...", "Copying the bundled extractor files to the SD card.",
+                 mk64_3ds::install_progress::kMetadataCopyStart);
     Mk64InstallLogWrite("Copying bundled Torch metadata from RomFS to SD card.");
     return CopyDirectoryTree(kRomfsExtractorSourceDir, kExtractorSourceDir, stats);
 }
 
 namespace {
 mk64_3ds::Mk64O2rValidationResult ValidateArchive(const char* path,
-                                                   bool verifyAllEntries = false) {
+                                                   bool verifyAllEntries = false,
+                                                   mk64_3ds::Mk64O2rValidationProgressCallback
+                                                       progressCallback = nullptr,
+                                                   void* progressUserData = nullptr) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
     if (path == nullptr || path[0] == '\0') {
         mk64_3ds::Mk64O2rValidationResult validation{};
         validation.error = mk64_3ds::Mk64O2rValidationError::InvalidPath;
         return validation;
     }
-    return mk64_3ds::ValidateMk64O2rArchive(path, verifyAllEntries);
+    return mk64_3ds::ValidateMk64O2rArchive(path, verifyAllEntries, progressCallback,
+                                            progressUserData);
 #else
     (void)path;
     (void)verifyAllEntries;
+    (void)progressCallback;
+    (void)progressUserData;
     mk64_3ds::Mk64O2rValidationResult validation{};
     validation.error = mk64_3ds::Mk64O2rValidationError::Ok;
     return validation;
@@ -755,7 +911,8 @@ mk64_3ds::Mk64O2rValidationResult ValidateArchive(const char* path,
 
 bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
-    DrawProgress("ROM verified.", "Preparing the local extractor on the SD card.", 50);
+    DrawProgress("ROM verified.", "Preparing the local extractor on the SD card.",
+                 mk64_3ds::install_progress::kPreparationStart);
 
     if (!MakeDirectory(kInstallerDir) || !MakeDirectory(kExtractorWorkDir)) {
         Mk64InstallLogWritef("Could not create temporary extraction directory; errno=%d.", errno);
@@ -772,8 +929,16 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
 
     if (FileExists(kWorkArchivePath)) {
         Mk64InstallLogWrite("Found an archive left by an earlier interrupted installation; validating it.");
+        DrawProgress("Checking interrupted extraction...",
+                     "Reading the temporary archive before deciding whether to resume.",
+                     mk64_3ds::install_progress::kPreparationStart);
+        ValidationProgressRange recoveryProgress = {
+            mk64_3ds::install_progress::kPreparationStart,
+            mk64_3ds::install_progress::kRecoveryValidationEnd,
+        };
         const mk64_3ds::Mk64O2rValidationResult staleValidation =
-            ValidateArchive(kWorkArchivePath, true);
+            ValidateArchive(kWorkArchivePath, true, OnArchiveValidationProgress,
+                            &recoveryProgress);
         if (staleValidation.IsValid()) {
             if (FileExists(kPrimaryArchivePath)) {
                 Mk64InstallLogWrite(
@@ -784,7 +949,8 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
             }
             if (rename(kWorkArchivePath, kPrimaryArchivePath) == 0) {
                 Mk64InstallLogWrite("Recovered and finalized the previously generated O2R archive.");
-                DrawProgress("Game data recovered.", "mk64.o2r was restored in /3ds/MK64/.", 100);
+                DrawProgress("Game data recovered.", "mk64.o2r was restored in /3ds/MK64/.",
+                             mk64_3ds::install_progress::kComplete);
                 svcSleepThread(900LL * 1000LL * 1000LL);
                 return true;
             }
@@ -805,10 +971,13 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     }
 
     uint64_t sdFreeBytes = 0;
+    DrawProgress("Checking SD card...", "Verifying free space for a complete extraction.",
+                 mk64_3ds::install_progress::kRecoveryValidationEnd);
     if (!QuerySdFreeBytes(&sdFreeBytes)) {
         Mk64InstallLogWritef("SD free-space preflight failed; errno=%d.", errno);
         std::snprintf(error, errorSize, "Could not check the free space on the SD card.");
-        DrawProgress("SD card check failed.", error, 50);
+        DrawProgress("SD card check failed.", error,
+                     mk64_3ds::install_progress::kRecoveryValidationEnd);
         svcSleepThread(1800LL * 1000LL * 1000LL);
         return false;
     }
@@ -818,7 +987,8 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     if (sdFreeBytes < kMinimumExtractionFreeBytes) {
         std::snprintf(error, errorSize,
                       "At least 96 MiB of free SD space is required to generate mk64.o2r safely.");
-        DrawProgress("Not enough SD space.", "Free at least 96 MiB and try again.", 50);
+        DrawProgress("Not enough SD space.", "Free at least 96 MiB and try again.",
+                     mk64_3ds::install_progress::kRecoveryValidationEnd);
         svcSleepThread(1800LL * 1000LL * 1000LL);
         return false;
     }
@@ -827,7 +997,8 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     Mk64InstallLogWritef("RomFS initialization returned 0x%08lX.", static_cast<unsigned long>(romfsResult));
     if (R_FAILED(romfsResult)) {
         std::snprintf(error, errorSize, "RomFS could not be opened from this install.");
-        DrawProgress("Extractor metadata unavailable.", error, 50);
+        DrawProgress("Extractor metadata unavailable.", error,
+                     mk64_3ds::install_progress::kRecoveryValidationEnd);
         svcSleepThread(1800LL * 1000LL * 1000LL);
         return false;
     }
@@ -840,7 +1011,8 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
                              static_cast<unsigned long>(copyStats.fileCount),
                              static_cast<unsigned long long>(copyStats.byteCount), errno);
         std::snprintf(error, errorSize, "Could not copy the extractor files to /3ds/MK64/.");
-        DrawProgress("Extractor install failed.", error, 52);
+        DrawProgress("Extractor install failed.", error,
+                     mk64_3ds::install_progress::kMetadataCopyStart);
         svcSleepThread(1800LL * 1000LL * 1000LL);
         return false;
     }
@@ -848,8 +1020,12 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
                          static_cast<unsigned long>(copyStats.fileCount),
                          static_cast<unsigned long long>(copyStats.byteCount));
 
+    DrawProgress("Extractor ready.", "Starting the bounded-memory O2R writer.",
+                 mk64_3ds::install_progress::kMetadataCopyEnd);
+
     DrawProgress("Generating mk64.o2r...",
-                 "Writing directly to SD. You may close the lid; extraction will continue.", 55);
+                 "Writing directly to SD. You may close the lid; extraction will continue.",
+                 mk64_3ds::install_progress::kGenerationStart);
     Mk64InstallLogWrite("Starting O2R archive generation.");
     Mk64InstallLogWrite("Extractor execution mode: in-process Torch library (no child process or shell command).");
     LogInstallerMemory("before Torch setup");
@@ -927,8 +1103,16 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     } else {
         Mk64InstallLogWrite(
             "Validating every generated O2R payload and CRC before finalizing it; this intentionally takes time.");
+        DrawProgress("Validating generated data...",
+                     "Reading every O2R payload and CRC back from the SD card.",
+                     mk64_3ds::install_progress::kValidationStart);
+        ValidationProgressRange generatedValidationProgress = {
+            mk64_3ds::install_progress::kValidationStart,
+            mk64_3ds::install_progress::kValidationEnd,
+        };
         const mk64_3ds::Mk64O2rValidationResult generatedValidation =
-            ValidateArchive(kWorkArchivePath, true);
+            ValidateArchive(kWorkArchivePath, true, OnArchiveValidationProgress,
+                            &generatedValidationProgress);
         if (!generatedValidation.IsValid()) {
             LogArchiveValidationFailure("Generated temporary O2R archive", generatedValidation);
             const bool preserved = PreserveInvalidArchive(
@@ -952,7 +1136,8 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
             Mk64InstallLogWritef("Generated O2R validation passed with %lu entries.",
                                  static_cast<unsigned long>(generatedValidation.entryCount));
             Mk64InstallLogWrite("Temporary O2R archive atomically moved into /3ds/MK64/mk64.o2r.");
-            DrawProgress("Game data generated.", "mk64.o2r was created in /3ds/MK64/.", 100);
+            DrawProgress("Game data generated.", "mk64.o2r was created in /3ds/MK64/.",
+                         mk64_3ds::install_progress::kComplete);
             svcSleepThread(900LL * 1000LL * 1000LL);
             return true;
         } else {
@@ -965,13 +1150,18 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
     if (error[0] == '\0') {
         std::snprintf(error, errorSize, "The temporary O2R archive could not be finalized on the SD card.");
     }
-    DrawProgress("O2R generation failed.", error, gInstallProgressPercent < 55 ? 55 : gInstallProgressPercent);
+    const int failedPercent = gInstallProgressPercent.load(std::memory_order_relaxed);
+    DrawProgress("O2R generation failed.", error,
+                 failedPercent < mk64_3ds::install_progress::kGenerationStart
+                     ? mk64_3ds::install_progress::kGenerationStart
+                     : failedPercent);
     svcSleepThread(2500LL * 1000LL * 1000LL);
     return false;
 #else
     (void)romPath;
     std::snprintf(error, errorSize, "This build was made without the on-device extractor.");
-    DrawProgress("Extractor unavailable.", "This build was made without the on-device Torch pipeline.", 55);
+    DrawProgress("Extractor unavailable.", "This build was made without the on-device Torch pipeline.",
+                 mk64_3ds::install_progress::kGenerationStart);
     svcSleepThread(1800LL * 1000LL * 1000LL);
     return false;
 #endif
@@ -1042,12 +1232,15 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
     gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
     consoleInit(GFX_BOTTOM, &gBottomConsole);
+    LightLock_Init(&gInstallDisplayLock);
+    gInstallDisplayLockReady = true;
     gInstallConsoleLineCount = 0;
-    gInstallProgressPercent = 0;
+    gInstallProgressPercent.store(0, std::memory_order_relaxed);
     Mk64InstallLogSetCallback(OnInstallLogLine);
     Mk64InstallLogWrite("Bottom-screen installer console opened; subsequent screen lines are mirrored here.");
     LogInstallerMemory("installer console startup");
-    DrawProgress("Looking for your ROM...", "Put it in /3ds/MK64/", 5);
+    DrawProgress("Looking for your ROM...", "Put it in /3ds/MK64/",
+                 mk64_3ds::install_progress::kRomSearch);
 
     const char* romPath = FindRom();
     if (romPath == nullptr) {

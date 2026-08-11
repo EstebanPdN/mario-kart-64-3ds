@@ -15,6 +15,8 @@ extern "C" {
 bool Mk64BottomUI3DSInit(void);
 void Mk64BottomUI3DSShutdown(void);
 void Mk64BottomUI3DSPrepareFrame(void);
+void Mk64BottomUI3DSRecordPresentation(void);
+void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget);
 void Mk64BottomUI3DSDraw(void* existingTopTarget);
 
 /* Input-layer boundary used by input_3ds.cpp. */

@@ -23,6 +23,7 @@ typedef struct Mk64DiagnosticsInput3DS {
 
 bool Mk64Diagnostics3DSStart(void);
 void Mk64Diagnostics3DSStop(void);
+void Mk64Diagnostics3DSAbortForProcessExit(void);
 bool Mk64Diagnostics3DSOwnsHid(void);
 bool Mk64Diagnostics3DSIsPaused(void);
 bool Mk64Diagnostics3DSServiceDumpIfRequested(void);
@@ -47,9 +48,13 @@ void Mk64Diagnostics3DSKartPrefetch(size_t attemptedEntries, size_t loadedEntrie
 void Mk64Diagnostics3DSSetGameArena(const void* base, size_t capacity);
 void Mk64Diagnostics3DSSetDisplayList(const void* base, size_t size);
 void Mk64Diagnostics3DSSetFrame(uint64_t frame, unsigned presentation);
-void Mk64Diagnostics3DSAudio(uint32_t pump, uint32_t bufferedFrames, uint32_t peak,
+void Mk64Diagnostics3DSAudio(uint32_t synthesisBlock, uint32_t bufferedFrames, uint32_t peak,
                              uint32_t nonzeroSamples, uint32_t queuedBuffers,
                              uint32_t droppedBuffers);
+void Mk64Diagnostics3DSAudioPump(uint32_t pumpCalls, uint32_t synthesisBlocks,
+                                 uint32_t bufferedBefore, uint32_t bufferedAfter,
+                                 uint32_t blocksThisPump, uint32_t multiBlockPumps,
+                                 uint32_t queueFailures, uint32_t observedEmptyTransitions);
 void Mk64Diagnostics3DSAudioState(uint32_t resetStatus, uint32_t resetPreset,
                                   uint32_t sequenceCount, uint32_t activePlayers,
                                   uint32_t activeNotes, uint32_t audioErrors);
