@@ -145,6 +145,58 @@ void DrawTopRect(uint16_t* frameBuffer, int x, int y, int width, int height, uin
     }
 }
 
+std::array<uint8_t, 7> LoadingGlyphRows(char glyph) {
+    switch (glyph) {
+        case 'A': return { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
+        case 'E': return { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F };
+        case 'F': return { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 };
+        case 'H': return { 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
+        case 'I': return { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F };
+        case 'K': return { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 };
+        case 'L': return { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F };
+        case 'M': return { 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 };
+        case 'O': return { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E };
+        case 'R': return { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 };
+        case 'S': return { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E };
+        case 'T': return { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 };
+        case 'V': return { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 };
+        case 'W': return { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A };
+        case '.': return { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C };
+        default: return { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    }
+}
+
+int LoadingTextWidth(const char* text, int scale) {
+    int width = 0;
+    for (const char* cursor = text; cursor != nullptr && *cursor != '\0'; ++cursor) {
+        width += (*cursor == ' ') ? 4 * scale : 6 * scale;
+    }
+    return width == 0 ? 0 : width - scale;
+}
+
+void DrawLoadingGlyph(uint16_t* frameBuffer, char glyph, int x, int y, int scale, uint16_t color) {
+    const std::array<uint8_t, 7> rows = LoadingGlyphRows(glyph);
+    for (int row = 0; row < 7; ++row) {
+        for (int column = 0; column < 5; ++column) {
+            if ((rows[static_cast<size_t>(row)] & (1U << (4 - column))) == 0) continue;
+            DrawTopRect(frameBuffer, x + column * scale, y + row * scale, scale, scale, color);
+        }
+    }
+}
+
+void DrawLoadingText(uint16_t* frameBuffer, const char* text, int centerX, int y,
+                     int scale, uint16_t color) {
+    const int width = LoadingTextWidth(text, scale);
+    int x = centerX - width / 2;
+    for (const char* cursor = text; cursor != nullptr && *cursor != '\0'; ++cursor) {
+        if (*cursor != ' ') {
+            DrawLoadingGlyph(frameBuffer, *cursor, x + scale, y + scale, scale, PackRgb565(0, 0, 0));
+            DrawLoadingGlyph(frameBuffer, *cursor, x, y, scale, color);
+        }
+        x += (*cursor == ' ') ? 4 * scale : 6 * scale;
+    }
+}
+
 void DrawTopBlendedRect(uint16_t* frameBuffer, int x, int y, int width, int height, uint8_t r, uint8_t g, uint8_t b,
                         uint8_t alpha) {
     for (int py = y; py < y + height; ++py) {
@@ -185,6 +237,8 @@ void DrawLoadingTopScreen(int percent) {
     DrawTopBlendedRect(frameBuffer, barX, barY, barW, barH, 20, 27, 42, 155);
     DrawTopBlendedRect(frameBuffer, barX, barY, (barW * clampedPercent) / 100, barH, 38, 235, 95, 205);
     DrawTopBlendedRect(frameBuffer, barX, barY, barW, 2, 150, 255, 185, 150);
+    DrawLoadingText(frameBuffer, clampedPercent >= 90 ? "ALMOST THERE" : "THIS WILL TAKE FOREVER...",
+                    200, 181, 2, PackRgb565(255, 240, 48));
 }
 
 void PrepareInstallScreensLocked() {
