@@ -441,7 +441,8 @@ uint32_t DecodeRgba16(const uint8_t* pixel) {
 }
 
 uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixelIndex,
-                            const Mk64TextureResource3DS* palette = nullptr) {
+                            const Mk64TextureResource3DS* palette = nullptr,
+                            bool forceOpaque = false) {
     uint8_t red = 0;
     uint8_t green = 0;
     uint8_t blue = 0;
@@ -464,7 +465,9 @@ uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixel
             const uint8_t paletteIndex = resource.type == TexturePalette4
                 ? Palette4Index(resource.data[pixelIndex / 2U], pixelIndex)
                 : resource.data[pixelIndex];
-            return DecodeRgba16(palette->data + static_cast<size_t>(paletteIndex) * 2U);
+            uint32_t color = DecodeRgba16(palette->data + static_cast<size_t>(paletteIndex) * 2U);
+            if (forceOpaque) color |= 0xFF000000U;
+            return color;
         }
         case TextureI4: {
             const uint8_t packed = resource.data[pixelIndex / 2U];
@@ -496,7 +499,8 @@ uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixel
             break;
     }
     return static_cast<uint32_t>(red) | (static_cast<uint32_t>(green) << 8U) |
-           (static_cast<uint32_t>(blue) << 16U) | (static_cast<uint32_t>(alpha) << 24U);
+           (static_cast<uint32_t>(blue) << 16U) |
+           (static_cast<uint32_t>(forceOpaque ? 255U : alpha) << 24U);
 }
 
 void RememberMissingTexture(const char* resourceName, const char* paletteName,
@@ -509,7 +513,8 @@ void RememberMissingTexture(const char* resourceName, const char* paletteName,
     ReplaceTexture(destination, missing);
 }
 
-bool LoadTexture(const char* resourceName, UiTexture& destination, const char* paletteName = nullptr) {
+bool LoadTexture(const char* resourceName, UiTexture& destination, const char* paletteName = nullptr,
+                 bool forceOpaque = false) {
     if (resourceName == nullptr || resourceName[0] == '\0') return false;
     const char* normalizedPaletteName = paletteName == nullptr ? "" : paletteName;
     if (std::strcmp(destination.resourceName, resourceName) == 0 &&
@@ -574,7 +579,8 @@ bool LoadTexture(const char* resourceName, UiTexture& destination, const char* p
                     const size_t sourceIndex = static_cast<size_t>(sourceY) * resource.width + sourceX;
                     tile[MortonOffset8x8(column, row)] =
                         __builtin_bswap32(DecodeTexturePixel(
-                            resource, sourceIndex, paletteRequired ? &palette : nullptr));
+                            resource, sourceIndex, paletteRequired ? &palette : nullptr,
+                            forceOpaque));
                 }
             }
         }
@@ -831,13 +837,13 @@ void LoadRaceHudTextures() {
     for (size_t index = 0; index < hud.places.size(); ++index) {
         LoadTexture(kPlaceResources[index], hud.places[index]);
         LoadTexture(kPortraitResources[index], hud.portraits[index],
-                    kPortraitPaletteResources[index]);
+                    kPortraitPaletteResources[index], true);
         LoadTexture(kStandingRankResources[index], hud.standingRanks[index],
                     kStandingRankPaletteResource);
         LoadTexture(kMinimapKartResources[index], hud.minimapKarts[index]);
     }
     LoadTexture(kQuestionPortraitResource, hud.questionPortrait,
-                kQuestionPortraitPaletteResource);
+                kQuestionPortraitPaletteResource, true);
     LoadTexture(kPortraitBorderResource, hud.portraitBorder);
     for (size_t index = 0; index < hud.items.size(); ++index) {
         LoadTexture(kItemResources[index], hud.items[index], kItemPaletteResources[index]);
@@ -1277,10 +1283,10 @@ void DrawRaceHud() {
     // Preserve the original 320x240 HUD scale: lap at upper left, the live
     // item-window/roulette state in the center, and time at upper right.
     if (sUi.game.gameMode != 3) {
-        DrawTexture(sUi.raceHud.lapLabel, 8.0f, 17.0f, 32.0f, 8.0f, 0.7f);
+        DrawTexture(sUi.raceHud.lapLabel, 13.0f, 15.0f, 40.0f, 10.0f, 0.7f);
         const int lap = std::clamp<int>(sUi.game.currentLap, 1, 3) - 1;
         DrawTexture(sUi.raceHud.lapCounts[static_cast<size_t>(lap)],
-                    36.0f, 13.0f, 32.0f, 16.0f, 0.7f);
+                    56.0f, 12.0f, 34.0f, 17.0f, 0.7f);
     }
     if (sUi.game.itemWindowVisible) {
         const int item = std::clamp<int>(sUi.game.itemTextureIndex, 0,
@@ -1288,8 +1294,8 @@ void DrawRaceHud() {
         DrawTexture(sUi.raceHud.items[static_cast<size_t>(item)],
                     140.0f, 5.0f, 40.0f, 32.0f, 0.7f);
     }
-    DrawTexture(sUi.raceHud.timeLabel, 202.0f, 13.0f, 32.0f, 16.0f, 0.7f);
-    DrawTimerDigits(236.0f, 13.0f, 1.0f);
+    DrawTexture(sUi.raceHud.timeLabel, 197.0f, 13.0f, 32.0f, 16.0f, 0.7f);
+    DrawTimerDigits(231.0f, 13.0f, 1.0f);
 
     for (size_t rank = 0; rank < sUi.game.standingCount; ++rank) {
         const int character = sUi.game.standingCharacterIds[rank];

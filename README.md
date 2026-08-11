@@ -18,22 +18,23 @@ The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O
 interface, 3DS input, NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game
 remains a work in progress and is not yet a stable release.
 
-The v0.20 pre-release rebuilds the native bottom-screen interface with the game's own font and HUD textures. Game
+The v1.0 release rebuilds the native bottom-screen interface with the game's own font and HUD textures. Game
 Select shows only the smaller stock `L Option` and `R Data` entries over a correctly oriented, aspect-filled menu
 background at roughly 20% visibility. Options captures controller and touch input without changing the top-screen
 selection and provides Game, Screen, Gameplay, and Developer tabs without the earlier blue frames. During a race, the
 bottom screen uses the selected course preview as a correctly oriented crop at roughly 20% visibility. Its upper row
-contains lap, the live item roulette, and time; the animated leading-four ranking, current place, and minimap use the
-same live state and assets as the original HUD. With Top HUD off, `Y` cycles only no top overlay, lap progress, and the
-speedometer. Pausing now opens one lower-screen interface with Continue Game and Quit while the top screen retains only
-the centered cup/class/course title. Settings are stored locally in `sd:/3ds/MK64/mk64-3ds.cfg`.
+contains lap, the live item roulette, and time; the animated leading-four ranking now draws the original racer
+portraits, current place, and minimap from the same live state and assets as the original HUD. With Top HUD off, `Y`
+cycles only no top overlay, lap progress, and the speedometer. Pausing now opens one lower-screen interface with
+Continue Game and Quit while the top screen retains only the centered cup/class/course title. Settings are stored
+locally in `sd:/3ds/MK64/mk64-3ds.cfg`.
 
 The renderer preserves the red, green, and blue-purple filters used by Game Select, Player Select, and Course
 Select even when an N64 combiner leaves too few PICA200 stages for the exact grayscale pass. A clean 3DS build also
 uses fixed-width stock shading behind unselected character portraits without covering adjacent cells. The FPS counter uses the same native font,
 has no black backing box, and keeps fixed storage so race frames cannot corrupt its text.
 
-Mario Kart 64's simulation remains 30 Hz. At the default 400-pixel setting on New Nintendo 3DS, v0.20 can present a
+Mario Kart 64's simulation remains 30 Hz. At the default 400-pixel setting on New Nintendo 3DS, v1.0 can present a
 bounded matrix-interpolated midpoint between simulation key frames. The adaptive presenter skips that extra decode and
 presentation when frame time, texture uploads, resource loading, Citro3D, or the audio safety margin indicates pressure;
 the mandatory key frame is never skipped, and a monotonic 30 Hz deadline prevents an omitted midpoint from speeding up
@@ -69,7 +70,8 @@ quarantine now keeps only the newest rejected archive of each class instead of g
 
 During extraction, lid-close sleep and HOME suspension are disabled so the console can continue unattended; display
 refreshes stop while the lid is closed, and a lightweight shell-state watcher restores the latest framebuffer when the
-lid opens. The progress bar assigns ROM search and SHA-1 verification only 1–8%, preparation 9–15%, O2R generation
+lid opens. The top loading screen shows a small status line above the progress bar and changes it near the final 10%.
+The progress bar assigns ROM search and SHA-1 verification only 1–8%, preparation 9–15%, O2R generation
 16–88%, complete payload/CRC readback 89–99%, and 100% only after the validated temporary archive is atomically moved
 into place. The app then requests a persistent blue notification LED and restores the previous sleep policy. The LED is
 best-effort on 3DSX environments that do not grant the MCU service. Keep the console charged for a long first-run
@@ -96,8 +98,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.20.3dsx
-build-3ds/game/mk64-3ds-v0.20.cia
+build-3ds/game/mk64-3ds-game-v1.0.3dsx
+build-3ds/game/mk64-3ds-v1.0.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
