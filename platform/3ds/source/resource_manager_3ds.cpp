@@ -8,7 +8,6 @@
 #include <cstring>
 #include <vector>
 
-extern "C" int32_t GameEngine_ResourceGetTexTypeByName(const char* name);
 extern "C" bool GameEngine_OTRSigCheck(const char* data);
 
 namespace {
@@ -19,6 +18,11 @@ const char* NormalizeResourceName(const char* name) {
         return name + 7;
     }
     return name;
+}
+
+const std::shared_ptr<std::vector<char>>& BorrowedImageMarker() {
+    static const auto marker = std::make_shared<std::vector<char>>();
+    return marker;
 }
 }
 
@@ -36,29 +40,24 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const char* name
 
     const std::string key(normalized);
     if (const auto found = mResources.find(key); found != mResources.end()) {
-        if (auto resource = found->second.lock()) {
-            return resource;
-        }
+        return found->second;
     }
 
-    auto* imageData = static_cast<uint8_t*>(ResourceGetDataByName(normalized));
-    const size_t imageSize = ResourceGetSizeByName(normalized);
-    const uint16_t width = ResourceGetTexWidthByName(normalized);
-    const uint16_t height = ResourceGetTexHeightByName(normalized);
-    if (imageData == nullptr || imageSize == 0 || width == 0 || height == 0) {
+    Mk64TextureResource3DS textureData = {};
+    if (!Mk64Resource3DSGetTexture(normalized, &textureData)) {
         return nullptr;
     }
 
     auto initData = std::make_shared<ResourceInitData>();
     initData->Path = key;
     auto texture = std::make_shared<Fast::Texture>(initData);
-    texture->Type = static_cast<Fast::TextureType>(GameEngine_ResourceGetTexTypeByName(normalized));
-    texture->Width = width;
-    texture->Height = height;
-    texture->ImageDataSize = static_cast<uint32_t>(imageSize);
-    texture->ImageData = imageData;
+    texture->Type = static_cast<Fast::TextureType>(textureData.type);
+    texture->Width = textureData.width;
+    texture->Height = textureData.height;
+    texture->ImageDataSize = static_cast<uint32_t>(textureData.size);
+    texture->ImageData = const_cast<uint8_t*>(textureData.data);
     // The compact resource runtime owns the backing allocation.
-    texture->mImageBuffer = std::make_shared<std::vector<char>>();
+    texture->mImageBuffer = BorrowedImageMarker();
     mResources[key] = texture;
     return texture;
 }

@@ -55,7 +55,10 @@ class ResourceManager {
   private:
     ArchiveManager3DSProbe mArchiveManager;
 #ifdef MK64_3DS_RESOURCE_MANAGER
-    std::unordered_map<std::string, std::weak_ptr<IResource>> mResources;
+    // Texture wrappers reference immutable storage owned by the compact 3DS
+    // resource runtime. Keep them strongly cached so repeated Fast3D texture
+    // commands do not allocate and destroy the same wrapper every frame.
+    std::unordered_map<std::string, std::shared_ptr<IResource>> mResources;
 #endif
 };
 

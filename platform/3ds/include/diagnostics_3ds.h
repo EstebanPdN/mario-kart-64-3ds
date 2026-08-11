@@ -10,10 +10,15 @@ extern "C" {
 
 typedef struct Mk64DiagnosticsInput3DS {
     uint32_t heldMask;
+    uint32_t downMask;
+    uint32_t upMask;
     int16_t circleX;
     int16_t circleY;
     int16_t cstickX;
     int16_t cstickY;
+    uint16_t touchX;
+    uint16_t touchY;
+    bool touchHeld;
 } Mk64DiagnosticsInput3DS;
 
 bool Mk64Diagnostics3DSStart(void);
@@ -22,6 +27,11 @@ bool Mk64Diagnostics3DSOwnsHid(void);
 bool Mk64Diagnostics3DSIsPaused(void);
 bool Mk64Diagnostics3DSServiceDumpIfRequested(void);
 bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input);
+bool Mk64Diagnostics3DSConsumeInput(Mk64DiagnosticsInput3DS* input);
+bool Mk64Diagnostics3DSRequestDump(void);
+bool Mk64Diagnostics3DSIsNewModel(void);
+bool Mk64Diagnostics3DSSupportsWideMode(void);
+const char* Mk64Diagnostics3DSGetSystemModelName(void);
 
 void Mk64Diagnostics3DSCheckpoint(const char* stage);
 void Mk64Diagnostics3DSSetStage(const char* stage);

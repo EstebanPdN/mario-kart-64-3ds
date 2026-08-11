@@ -19,10 +19,12 @@ struct ShaderProgram {
     uint8_t textureOffsets[2] = {};
     uint8_t inputOffsets[7] = {};
     uint8_t fogOffset = 0;
+    uint8_t grayscaleOffset = 0;
     bool usedTextures[6] = {};
     bool clamp[2][2] = {};
     bool alpha = false;
     bool fog = false;
+    bool grayscale = false;
     bool textureEdge = false;
     bool alphaThreshold = false;
     bool invisible = false;
@@ -83,8 +85,21 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void SetCurrentPrimDepth(float depth) override;
     void GetDebugStats(size_t* textureSlots, size_t* initializedTextures, size_t* textureBytes,
                        size_t* shaderPrograms, size_t* clipScratchBytes) const;
+    float GetPresentedFps2Seconds() const;
+    float GetPresentedFps10Seconds() const;
+    uint64_t GetDrawCallCount() const;
+    uint64_t GetTriangleCount() const;
+    uint64_t GetTextureCacheUploadCount() const;
+    uint64_t GetTextureCacheUploadBytes() const;
+    uint64_t GetVertexUploadCount() const;
+    uint64_t GetVertexUploadBytes() const;
+    void* PrepareForExternalDraw();
 
   private:
+    void FlushPackedVertices();
+    void RestoreFast3DState();
+    float GetPresentedFps(uint64_t windowMilliseconds) const;
+
     struct Impl;
     std::unique_ptr<Impl> mImpl;
 };
