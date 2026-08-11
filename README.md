@@ -21,12 +21,14 @@ https://discord.gg/SMW49UMkw
 ## Features
 
 - Native 400x240 gameplay, with optional 800-pixel rendering on supported models.
+- Press `SELECT` at any time to create a diagnostic dump for bug reports.
 - Wide 5:3 and Original 4:3 display modes.
 - Dual-screen interface
 - Bottom-screen race HUD
 - Touch menu
-- Press `SELECT` at any time to create a diagnostic dump for bug reports.
-
+  
+- MULTIPLAYER IS A PLANNED FEATURE
+  
 ## Installation
 
 Install the CIA normally, then create:
