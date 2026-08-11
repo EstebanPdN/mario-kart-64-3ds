@@ -33,6 +33,19 @@ struct LegacyCInputPolicy3DS {
     bool raceControls = false;
 };
 
+enum class ModalDismissAction3DS : std::uint8_t {
+    None,
+    Close,
+    Continue,
+};
+
+constexpr ModalDismissAction3DS ResolveModalDismissAction(bool dismissPressed,
+                                                           bool openedFromPause) noexcept {
+    if (!dismissPressed) return ModalDismissAction3DS::None;
+    return openedFromPause ? ModalDismissAction3DS::Continue
+                           : ModalDismissAction3DS::Close;
+}
+
 constexpr bool ShouldCycleHiddenTopHud(bool raceControls, bool yHeld,
                                        bool yPressed) noexcept {
     return raceControls && yHeld && yPressed;
