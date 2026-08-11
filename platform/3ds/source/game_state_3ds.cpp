@@ -278,6 +278,8 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
     snapshot->minimapPlayerX = properties->Minimap.PlayerX;
     snapshot->minimapPlayerY = properties->Minimap.PlayerY;
     snapshot->minimapPlayerScale = properties->Minimap.PlayerScaleFactor;
+    snapshot->minimapFinishlineX = properties->Minimap.FinishlineX;
+    snapshot->minimapFinishlineY = properties->Minimap.FinishlineY;
     snapshot->minimapRed = properties->Minimap.Colour.r;
     snapshot->minimapGreen = properties->Minimap.Colour.g;
     snapshot->minimapBlue = properties->Minimap.Colour.b;

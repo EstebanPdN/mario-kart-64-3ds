@@ -929,8 +929,10 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     const float grayscaleMix = std::clamp(grayscaleColor[3], 0.0f, 1.0f);
     const bool needsGrayscaleMix = grayscaleMix < 1.0f - (0.5f / 255.0f);
     const int grayscaleStages = needsGrayscaleMix ? 4 : 3;
+    bool grayscaleApplied = false;
     if (program->grayscale && grayscaleMix > 0.5f / 255.0f && stage > 0 &&
         stage + grayscaleStages <= 6 && stage - 1 < 4) {
+        grayscaleApplied = true;
         C3D_TexEnvBufUpdate(C3D_RGB, 1 << (stage - 1));
 
         const std::array<float, 4> scaledTint = {
@@ -969,6 +971,27 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
             ConfigureAlphaPass(environment);
             C3D_TexEnvColor(environment, PackColor({ 0.0f, 0.0f, 0.0f, grayscaleMix }));
         }
+    }
+
+    // Some stock menu-background combiners consume four or five TEV stages,
+    // leaving too little room for the exact three-stage luminance pass above.
+    // Those draws use a fully opaque grayscale color and previously lost the
+    // red/green/blue menu filter completely. Preserve the visible stock tint
+    // with a one-stage modulation fallback; simpler shaders still take the
+    // exact luminance path.
+    if (program->grayscale && !grayscaleApplied &&
+        grayscaleMix >= 1.0f - (0.5f / 255.0f) && stage > 0 && stage < 6) {
+        C3D_TexEnv* environment = C3D_GetTexEnv(stage++);
+        C3D_TexEnvInit(environment);
+        C3D_TexEnvSrc(environment, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_PREVIOUS);
+        C3D_TexEnvOpRgb(environment, GPU_TEVOP_RGB_SRC_COLOR,
+                       GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+        C3D_TexEnvFunc(environment, C3D_RGB, GPU_MODULATE);
+        ConfigureAlphaPass(environment);
+        C3D_TexEnvColor(environment,
+                       PackColor({ std::clamp(grayscaleColor[0], 0.0f, 1.0f),
+                                   std::clamp(grayscaleColor[1], 0.0f, 1.0f),
+                                   std::clamp(grayscaleColor[2], 0.0f, 1.0f), 1.0f }));
     }
     for (; stage < 6; ++stage) {
         C3D_TexEnv* environment = C3D_GetTexEnv(stage);

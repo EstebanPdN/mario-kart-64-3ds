@@ -40,6 +40,8 @@ AccessControlInfo:
   RunnableOnSleep: false
   SpecialMemoryArrange: true
   SystemModeExt: Legacy
+  CpuSpeed: 804MHz
+  EnableL2Cache: true
   IORegisterMapping:
     - 1ff00000-1ff7ffff
   MemoryMapping:
@@ -97,6 +99,7 @@ AccessControlInfo:
     - fs:USER
     - gsp::Gpu
     - hid:USER
+    - mcu::HWC
     - ptm:u
 
 SystemControlInfo:

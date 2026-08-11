@@ -22,7 +22,17 @@ struct AudioBuffer {
 std::array<AudioBuffer, kBufferCount> sBuffers;
 std::atomic<uint32_t> sQueuedBuffers{ 0 };
 std::atomic<uint32_t> sDroppedBuffers{ 0 };
+LightLock sBufferLock;
 bool sInitialized = false;
+
+class BufferLockGuard {
+  public:
+    BufferLockGuard() { LightLock_Lock(&sBufferLock); }
+    ~BufferLockGuard() { LightLock_Unlock(&sBufferLock); }
+
+    BufferLockGuard(const BufferLockGuard&) = delete;
+    BufferLockGuard& operator=(const BufferLockGuard&) = delete;
+};
 
 bool IsReusable(const ndspWaveBuf& wave) {
     return wave.status == NDSP_WBUF_FREE || wave.status == NDSP_WBUF_DONE;
@@ -46,6 +56,7 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
     }
     // From this point on Shutdown must balance ndspInit even when a later
     // linear allocation fails.
+    LightLock_Init(&sBufferLock);
     sInitialized = true;
 
     for (auto& buffer : sBuffers) {
@@ -104,10 +115,32 @@ extern "C" uint32_t Mk64Audio3DSBufferedFrames(void) {
         return 0;
     }
 
+    // Audio synthesis can queue a wave from core 1/2 while frame pacing and
+    // the developer overlay inspect the margin on core 0. Keep our wave
+    // resets/additions and those snapshots serialized; libctru remains the
+    // sole writer of the asynchronous status/sequence fields between calls.
+    BufferLockGuard lock;
+
+    // A PLAYING wave has already been consumed up to the channel's current
+    // sample position. Counting its full size made the producer believe it
+    // had almost one extra game tick buffered and delayed refills precisely
+    // when a heavy race frame needed the safety margin most.
+    const u16 playingSequence = ndspChnGetWaveBufSeq(kChannel);
+    const u32 playingPosition = ndspChnGetSamplePos(kChannel);
     uint32_t frames = 0;
     for (const auto& buffer : sBuffers) {
-        if (buffer.wave.status == NDSP_WBUF_QUEUED || buffer.wave.status == NDSP_WBUF_PLAYING) {
+        if (buffer.wave.status == NDSP_WBUF_QUEUED) {
             frames += buffer.wave.nsamples;
+        } else if (buffer.wave.status == NDSP_WBUF_PLAYING) {
+            if (buffer.wave.sequence_id == playingSequence &&
+                playingPosition < buffer.wave.nsamples) {
+                frames += buffer.wave.nsamples - playingPosition;
+            } else {
+                // Status and sequence are updated by NDSP. If they crossed
+                // between the two snapshots, conservatively retain the wave
+                // instead of reporting a false underrun.
+                frames += buffer.wave.nsamples;
+            }
         }
     }
     return frames;
@@ -127,6 +160,7 @@ extern "C" bool Mk64Audio3DSQueueStereoS16(const int16_t* samples, size_t frameC
         return false;
     }
 
+    BufferLockGuard lock;
     auto buffer = std::find_if(sBuffers.begin(), sBuffers.end(),
                                [](const AudioBuffer& candidate) { return IsReusable(candidate.wave); });
     if (buffer == sBuffers.end()) {

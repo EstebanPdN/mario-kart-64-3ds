@@ -29,6 +29,14 @@ extern "C" {
 // Match the CIA exheader. Four MiB was unnecessarily reserved by 3DSX builds
 // and reduced the heap available to the first-run installer on Old 3DS.
 uint32_t __stacksize__ = 1 * 1024 * 1024;
+
+// libctru otherwise reserves 32 MiB for the linear heap and only 24 MiB for
+// ordinary allocations in the 64 MiB application region. Hardware dumps have
+// reached roughly 17.3 MiB of linear use as resource caches fill, while both
+// Torch and the game approach the ordinary-heap ceiling. A conservative 28 MiB
+// linear reservation keeps more than 10 MiB of observed headroom and returns
+// 4 MiB to the fragmentation-prone C/C++ heap.
+uint32_t __ctru_linear_heap_size = 28 * 1024 * 1024;
 }
 
 namespace {

@@ -18,6 +18,7 @@ constexpr const char* kDumpDirectory = "sdmc:/3ds/MK64/dump";
 constexpr const char* kRuntimeLog = "sdmc:/3ds/MK64/dump/runtime.log";
 constexpr size_t kMaxArenaDump = 32u * 1024u * 1024u;
 constexpr size_t kMaxDisplayListDump = 4u * 1024u * 1024u;
+constexpr size_t kRuntimeLogBufferSize = 64u * 1024u;
 
 std::atomic<bool> sRunning{ false };
 std::atomic<bool> sInputReady{ false };
@@ -45,12 +46,28 @@ std::atomic<uintptr_t> sWatchdogCommand{ 0 };
 std::atomic<uint32_t> sWatchdogWord0{ 0 };
 std::atomic<uint32_t> sWatchdogWord1{ 0 };
 std::atomic<size_t> sWatchdogCount{ 0 };
+std::atomic<uint32_t> sLogLineCount{ 0 };
+std::atomic<uint32_t> sLogFlushCount{ 0 };
+std::atomic<uint32_t> sResourceUpdateCount{ 0 };
+std::atomic<uint32_t> sCoursePrefetchDependencies{ 0 };
+std::atomic<uint32_t> sCoursePrefetchLoaded{ 0 };
+std::atomic<uint32_t> sCoursePrefetchBytes{ 0 };
+std::atomic<uint32_t> sCoursePrefetchBudgetSkips{ 0 };
+std::atomic<uint32_t> sCoursePrefetchUnavailable{ 0 };
+std::atomic<uint32_t> sKartPrefetchAttempted{ 0 };
+std::atomic<uint32_t> sKartPrefetchLoaded{ 0 };
+std::atomic<uint32_t> sKartPrefetchBytes{ 0 };
+std::atomic<uint32_t> sKartPrefetchDuplicates{ 0 };
+std::atomic<uint32_t> sKartPrefetchUnavailable{ 0 };
+std::atomic<uint32_t> sPrefetchUpdateSerial{ 0 };
+std::atomic<uint32_t> sPrefetchLoggedSerial{ 0 };
 
 LightLock sTextLock;
 char sStage[96] = "not-started";
 char sLastResource[256] = "none";
 Thread sThread = nullptr;
 FILE* sLog = nullptr;
+char sLogBuffer[kRuntimeLogBufferSize] = {};
 bool sIsNew3DS = false;
 bool sSystemModelKnown = false;
 u8 sSystemModel = 0xff;
@@ -93,15 +110,50 @@ void ReadTextSnapshot(char* stage, size_t stageSize, char* resource, size_t reso
     LightLock_Unlock(&sTextLock);
 }
 
-void LogLine(const char* prefix, const char* value) {
+void FlushLogLocked() {
+    if (sLog != nullptr) {
+        sLogFlushCount.fetch_add(1, std::memory_order_relaxed);
+        std::fflush(sLog);
+    }
+}
+
+void LogLine(const char* prefix, const char* value, bool flush = false) {
+    sLogLineCount.fetch_add(1, std::memory_order_relaxed);
     LightLock_Lock(&sTextLock);
     if (sLog != nullptr) {
         std::fprintf(sLog, "%llu %s%s\n",
                      static_cast<unsigned long long>(osGetTime() - sStartTime),
                      prefix == nullptr ? "" : prefix, value == nullptr ? "unknown" : value);
-        std::fflush(sLog);
+        if (flush) {
+            FlushLogLocked();
+        }
     }
     LightLock_Unlock(&sTextLock);
+}
+
+void LogPrefetchSnapshotIfChanged() {
+    const uint32_t serial = sPrefetchUpdateSerial.load(std::memory_order_acquire);
+    if (serial == sPrefetchLoggedSerial.load(std::memory_order_relaxed)) {
+        return;
+    }
+    char value[256] = {};
+    std::snprintf(
+        value, sizeof(value),
+        "courseDependencies=%lu courseLoaded=%lu courseBytes=%lu courseCapped=%lu "
+        "courseUnavailable=%lu kartAttempted=%lu kartLoaded=%lu kartBytes=%lu "
+        "kartDuplicates=%lu kartUnavailable=%lu",
+        static_cast<unsigned long>(sCoursePrefetchDependencies.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sCoursePrefetchLoaded.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sCoursePrefetchBytes.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sCoursePrefetchBudgetSkips.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sCoursePrefetchUnavailable.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sKartPrefetchAttempted.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sKartPrefetchLoaded.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sKartPrefetchBytes.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sKartPrefetchDuplicates.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(sKartPrefetchUnavailable.load(std::memory_order_relaxed)));
+    LogLine("prefetch: ", value);
+    sPrefetchLoggedSerial.store(serial, std::memory_order_release);
 }
 
 bool IsReadableRange(uintptr_t address, size_t size) {
@@ -396,7 +448,7 @@ void WriteMemoryMap(FILE* file) {
 
 void CopyRuntimeLog(const char* directory) {
     LightLock_Lock(&sTextLock);
-    if (sLog != nullptr) std::fflush(sLog);
+    FlushLogLocked();
     LightLock_Unlock(&sTextLock);
 
     FILE* source = std::fopen(kRuntimeLog, "rb");
@@ -420,7 +472,7 @@ void CopyRuntimeLog(const char* directory) {
 void WriteQuickDump(const char* trigger) {
     char directory[192] = {};
     if (!CreateSessionDirectory(directory, sizeof(directory))) {
-        LogLine("dump failed: ", "could not create session directory");
+        LogLine("dump failed: ", "could not create session directory", true);
         return;
     }
 
@@ -447,6 +499,26 @@ void WriteQuickDump(const char* trigger) {
         std::fprintf(info, "Archive entries / loaded resources: %lu / %lu\n",
                      static_cast<unsigned long>(sArchiveEntries.load(std::memory_order_relaxed)),
                      static_cast<unsigned long>(sLoadedResources.load(std::memory_order_relaxed)));
+        std::fprintf(info, "Buffered log lines / explicit flushes / resource updates: %lu / %lu / %lu\n",
+                     static_cast<unsigned long>(sLogLineCount.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long>(sLogFlushCount.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long>(sResourceUpdateCount.load(std::memory_order_relaxed)));
+        std::fprintf(
+            info,
+            "Course prefetch dependencies / loaded / bytes / capped / unavailable: %lu / %lu / %lu / %lu / %lu\n",
+            static_cast<unsigned long>(sCoursePrefetchDependencies.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sCoursePrefetchLoaded.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sCoursePrefetchBytes.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sCoursePrefetchBudgetSkips.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sCoursePrefetchUnavailable.load(std::memory_order_relaxed)));
+        std::fprintf(
+            info,
+            "Kart prefetch attempted / loaded / bytes / duplicates / unavailable: %lu / %lu / %lu / %lu / %lu\n",
+            static_cast<unsigned long>(sKartPrefetchAttempted.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sKartPrefetchLoaded.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sKartPrefetchBytes.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sKartPrefetchDuplicates.load(std::memory_order_relaxed)),
+            static_cast<unsigned long>(sKartPrefetchUnavailable.load(std::memory_order_relaxed)));
         std::fprintf(info, "Frame / presentation: %lu / %u\n",
                      static_cast<unsigned long>(sFrame.load(std::memory_order_relaxed)),
                      sPresentation.load(std::memory_order_relaxed));
@@ -500,7 +572,7 @@ void WriteQuickDump(const char* trigger) {
     }
 
     CopyRuntimeLog(directory);
-    LogLine("dump written: ", directory);
+    LogLine("dump written: ", directory, true);
     ShowDumpSavedOverlay();
 }
 
@@ -587,6 +659,21 @@ extern "C" bool Mk64Diagnostics3DSStart() {
     sTouchX.store(0, std::memory_order_relaxed);
     sTouchY.store(0, std::memory_order_relaxed);
     sTouchHeld.store(false, std::memory_order_relaxed);
+    sLogLineCount.store(0, std::memory_order_relaxed);
+    sLogFlushCount.store(0, std::memory_order_relaxed);
+    sResourceUpdateCount.store(0, std::memory_order_relaxed);
+    sCoursePrefetchDependencies.store(0, std::memory_order_relaxed);
+    sCoursePrefetchLoaded.store(0, std::memory_order_relaxed);
+    sCoursePrefetchBytes.store(0, std::memory_order_relaxed);
+    sCoursePrefetchBudgetSkips.store(0, std::memory_order_relaxed);
+    sCoursePrefetchUnavailable.store(0, std::memory_order_relaxed);
+    sKartPrefetchAttempted.store(0, std::memory_order_relaxed);
+    sKartPrefetchLoaded.store(0, std::memory_order_relaxed);
+    sKartPrefetchBytes.store(0, std::memory_order_relaxed);
+    sKartPrefetchDuplicates.store(0, std::memory_order_relaxed);
+    sKartPrefetchUnavailable.store(0, std::memory_order_relaxed);
+    sPrefetchUpdateSerial.store(0, std::memory_order_relaxed);
+    sPrefetchLoggedSerial.store(0, std::memory_order_relaxed);
     EnsureDirectory(kGameDirectory);
     EnsureDirectory(kDumpDirectory);
     sStartTime = osGetTime();
@@ -608,7 +695,9 @@ extern "C" bool Mk64Diagnostics3DSStart() {
                      sSystemModel == CFG_MODEL_N2DSXL);
     }
     sLog = std::fopen(kRuntimeLog, "wb");
-    if (sLog != nullptr) setvbuf(sLog, nullptr, _IOLBF, 0);
+    if (sLog != nullptr) {
+        setvbuf(sLog, sLogBuffer, _IOFBF, sizeof(sLogBuffer));
+    }
     sRunning.store(true, std::memory_order_release);
     s32 priority = 0x30;
     svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
@@ -616,7 +705,7 @@ extern "C" bool Mk64Diagnostics3DSStart() {
     sThread = threadCreate(DiagnosticThread, nullptr, 96u * 1024u, priority, -2, false);
     if (sThread == nullptr) {
         sRunning.store(false, std::memory_order_release);
-        LogLine("diagnostic thread: ", "creation failed");
+        LogLine("diagnostic thread: ", "creation failed", true);
         if (sLog != nullptr) {
             std::fclose(sLog);
             sLog = nullptr;
@@ -636,7 +725,7 @@ extern "C" void Mk64Diagnostics3DSStop() {
     }
     LightLock_Lock(&sTextLock);
     if (sLog != nullptr) {
-        std::fflush(sLog);
+        FlushLogLocked();
         std::fclose(sLog);
         sLog = nullptr;
     }
@@ -709,7 +798,8 @@ extern "C" const char* Mk64Diagnostics3DSGetSystemModelName() {
 
 extern "C" void Mk64Diagnostics3DSCheckpoint(const char* stage) {
     Mk64Diagnostics3DSSetStage(stage);
-    LogLine("stage: ", stage);
+    LogPrefetchSnapshotIfChanged();
+    LogLine("stage: ", stage, true);
 }
 
 extern "C" void Mk64Diagnostics3DSSetStage(const char* stage) {
@@ -720,7 +810,7 @@ extern "C" void Mk64Diagnostics3DSSetStage(const char* stage) {
 
 extern "C" void Mk64Diagnostics3DSFailure(const char* stage, const char* reason) {
     Mk64Diagnostics3DSSetStage(stage);
-    LogLine("failure: ", reason);
+    LogLine("failure: ", reason, true);
 }
 
 extern "C" void Mk64Diagnostics3DSSetResource(const char* path, size_t loadedCount) {
@@ -728,8 +818,8 @@ extern "C" void Mk64Diagnostics3DSSetResource(const char* path, size_t loadedCou
     LightLock_Lock(&sTextLock);
     CopyText(sLastResource, sizeof(sLastResource), path);
     LightLock_Unlock(&sTextLock);
-    if (loadedCount != previousCount && loadedCount <= 256) {
-        LogLine("resource: ", path);
+    if (loadedCount != previousCount) {
+        sResourceUpdateCount.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -738,6 +828,30 @@ extern "C" void Mk64Diagnostics3DSSetArchiveEntryCount(size_t entryCount) {
     char value[32] = {};
     std::snprintf(value, sizeof(value), "%lu", static_cast<unsigned long>(entryCount));
     LogLine("archive entries: ", value);
+}
+
+extern "C" void Mk64Diagnostics3DSCoursePrefetch(size_t dependencies, size_t loadedEntries,
+                                                  size_t chargedBytes, size_t budgetSkips,
+                                                  size_t unavailableEntries) {
+    sCoursePrefetchDependencies.store(static_cast<uint32_t>(dependencies), std::memory_order_relaxed);
+    sCoursePrefetchLoaded.store(static_cast<uint32_t>(loadedEntries), std::memory_order_relaxed);
+    sCoursePrefetchBytes.store(static_cast<uint32_t>(chargedBytes), std::memory_order_relaxed);
+    sCoursePrefetchBudgetSkips.store(static_cast<uint32_t>(budgetSkips), std::memory_order_relaxed);
+    sCoursePrefetchUnavailable.store(static_cast<uint32_t>(unavailableEntries),
+                                     std::memory_order_relaxed);
+    sPrefetchUpdateSerial.fetch_add(1, std::memory_order_release);
+}
+
+extern "C" void Mk64Diagnostics3DSKartPrefetch(size_t attemptedEntries, size_t loadedEntries,
+                                                size_t loadedBytes, size_t duplicateEntries,
+                                                size_t unavailableEntries) {
+    sKartPrefetchAttempted.store(static_cast<uint32_t>(attemptedEntries), std::memory_order_relaxed);
+    sKartPrefetchLoaded.store(static_cast<uint32_t>(loadedEntries), std::memory_order_relaxed);
+    sKartPrefetchBytes.store(static_cast<uint32_t>(loadedBytes), std::memory_order_relaxed);
+    sKartPrefetchDuplicates.store(static_cast<uint32_t>(duplicateEntries), std::memory_order_relaxed);
+    sKartPrefetchUnavailable.store(static_cast<uint32_t>(unavailableEntries),
+                                   std::memory_order_relaxed);
+    sPrefetchUpdateSerial.fetch_add(1, std::memory_order_release);
 }
 
 extern "C" void Mk64Diagnostics3DSSetGameArena(const void* base, size_t capacity) {
@@ -807,5 +921,5 @@ extern "C" void Mk64Diagnostics3DSGfxWatchdog(const void* command, uint32_t word
     sWatchdogWord1.store(word1, std::memory_order_relaxed);
     sWatchdogCount.store(commandCount, std::memory_order_relaxed);
     Mk64Diagnostics3DSSetStage("renderer-command-budget-exceeded");
-    LogLine("renderer watchdog: ", "display list command budget exceeded");
+    LogLine("renderer watchdog: ", "display list command budget exceeded", true);
 }

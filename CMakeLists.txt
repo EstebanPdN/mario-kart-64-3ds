@@ -85,12 +85,22 @@ if(MK64_3DS_BUILD_GAME_CORE)
     set(SPAGHETTIKART_COLLISION_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/collision.c")
     set(SPAGHETTIKART_3DS_COLLISION_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/collision_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_COLLISION_SOURCE}")
+    set(SPAGHETTIKART_SPAWN_PLAYERS_SOURCE "${SPAGHETTIKART_ROOT}/src/spawn_players.c")
+    set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/spawn_players_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_ROOT "${SPAGHETTIKART_SPAWN_PLAYERS_SOURCE}")
     set(SPAGHETTIKART_AUDIO_PORT_SOURCE "${SPAGHETTIKART_ROOT}/src/audio/port_eu.c")
     set(SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/port_eu_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_AUDIO_PORT_SOURCE}")
     set(SPAGHETTIKART_SEQPLAYER_SOURCE "${SPAGHETTIKART_ROOT}/src/audio/seqplayer.c")
     set(SPAGHETTIKART_3DS_SEQPLAYER_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/seqplayer_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_SEQPLAYER_SOURCE}")
+    set(SPAGHETTIKART_MENU_ITEMS_SOURCE "${SPAGHETTIKART_ROOT}/src/menu_items.c")
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/menu_items_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_ROOT "${SPAGHETTIKART_MENU_ITEMS_SOURCE}")
+    set(SPAGHETTIKART_ENDING_SOURCE "${SPAGHETTIKART_ROOT}/src/ending/code_80280000.c")
+    set(SPAGHETTIKART_3DS_ENDING_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/code_80280000_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_ENDING_SOURCE}")
     file(READ "${SPAGHETTIKART_MEMORY_SOURCE}" SPAGHETTIKART_MEMORY_TEXT)
     string(REPLACE
         "static u8 sMemoryPool[0x10000000] ALIGNED4096;"
@@ -153,7 +163,20 @@ if(MK64_3DS_BUILD_GAME_CORE)
     file(READ "${SPAGHETTIKART_COLLISION_SOURCE}" SPAGHETTIKART_COLLISION_TEXT)
     string(REPLACE
         "#include <stdio.h>"
-        "#include <stdio.h>\n#include <stddef.h>\n#if defined(PLATFORM_3DS)\n#define MK64_3DS_MAX_COLLISION_DLS 2048\n#define MK64_3DS_MAX_COLLISION_COMMANDS 8192\n#define MK64_3DS_MAX_COLLISION_TRIANGLES 8192\n#define MK64_3DS_MAX_COLLISION_INDICES 32768\n#endif"
+        [=[#include <stdio.h>
+#include <stddef.h>
+#include <string.h>
+#if defined(PLATFORM_3DS)
+#include "resource_prefetch_3ds.h"
+#include "resource_runtime_3ds.h"
+#define MK64_3DS_MAX_COLLISION_DLS 2048
+#define MK64_3DS_COLLISION_VISIT_SLOTS 4096
+#define MK64_3DS_MAX_COLLISION_COMMANDS 8192
+#define MK64_3DS_MAX_COLLISION_TRIANGLES 8192
+#define MK64_3DS_MAX_COLLISION_INDICES 32768
+extern void Mk64Diagnostics3DSCoursePrefetch(size_t, size_t, size_t, size_t, size_t)
+    __attribute__((weak));
+#endif]=]
         SPAGHETTIKART_3DS_COLLISION_TEXT
         "${SPAGHETTIKART_COLLISION_TEXT}"
     )
@@ -169,28 +192,111 @@ typedef struct {
 } Mk64CollisionVisit3DS;
 
 static Mk64CollisionVisit3DS sCollisionVisits3DS[MK64_3DS_MAX_COLLISION_DLS];
+static u16 sCollisionVisitSlots3DS[MK64_3DS_COLLISION_VISIT_SLOTS];
 static u32 sCollisionVisitCount3DS = 0;
+static Mk64PrefetchBudget3DS sCourseTexturePrefetch3DS;
+static size_t sCourseTexturePrefetchLoaded3DS = 0;
+static size_t sCourseTexturePrefetchLoadFailures3DS = 0;
+
+static void mk64_3ds_report_course_prefetch(void) {
+    if (Mk64Diagnostics3DSCoursePrefetch != NULL) {
+        Mk64Diagnostics3DSCoursePrefetch(
+            sCourseTexturePrefetch3DS.seenEntries,
+            sCourseTexturePrefetchLoaded3DS,
+            sCourseTexturePrefetch3DS.chargedBytes,
+            sCourseTexturePrefetch3DS.byteLimitSkips +
+                sCourseTexturePrefetch3DS.entryLimitSkips,
+            sCourseTexturePrefetch3DS.unavailableEntries +
+                sCourseTexturePrefetchLoadFailures3DS);
+    }
+}
 
 void mk64_3ds_collision_reset_visits(void) {
     sCollisionVisitCount3DS = 0;
+    memset(sCollisionVisitSlots3DS, 0, sizeof(sCollisionVisitSlots3DS));
+    Mk64PrefetchBudget3DSReset(&sCourseTexturePrefetch3DS,
+                               MK64_3DS_TRACK_PREFETCH_MAX_BYTES,
+                               MK64_3DS_TRACK_PREFETCH_MAX_ENTRIES);
+    sCourseTexturePrefetchLoaded3DS = 0;
+    sCourseTexturePrefetchLoadFailures3DS = 0;
+    mk64_3ds_report_course_prefetch();
+}
+
+static void mk64_3ds_prefetch_course_texture_crc(uint64_t crc) {
+    if (Mk64PrefetchBudget3DSContains(&sCourseTexturePrefetch3DS, crc)) {
+        sCourseTexturePrefetch3DS.duplicateEntries++;
+        return;
+    }
+    size_t archiveBytes = 0;
+    const bool sizeAvailable =
+        Mk64Resource3DSGetArchiveEntrySizeByCrc(crc, &archiveBytes);
+    const Mk64PrefetchDecision3DS decision = Mk64PrefetchBudget3DSTryReserve(
+        &sCourseTexturePrefetch3DS, crc, sizeAvailable ? archiveBytes : 0);
+    if (decision == MK64_PREFETCH_RESERVE) {
+        if (ResourceGetDataByCrc(crc) != NULL) {
+            sCourseTexturePrefetchLoaded3DS++;
+        } else {
+            sCourseTexturePrefetchLoadFailures3DS++;
+        }
+    }
+    mk64_3ds_report_course_prefetch();
+}
+
+static void mk64_3ds_prefetch_course_texture_name(const char* name) {
+    if (name == NULL || name[0] == '\0') {
+        return;
+    }
+    const uint64_t crc = ResourceGetCrcByName(name);
+    if (Mk64PrefetchBudget3DSContains(&sCourseTexturePrefetch3DS, crc)) {
+        sCourseTexturePrefetch3DS.duplicateEntries++;
+        return;
+    }
+    size_t archiveBytes = 0;
+    const bool sizeAvailable =
+        Mk64Resource3DSGetArchiveEntrySizeByName(name, &archiveBytes);
+    const Mk64PrefetchDecision3DS decision = Mk64PrefetchBudget3DSTryReserve(
+        &sCourseTexturePrefetch3DS, crc, sizeAvailable ? archiveBytes : 0);
+    if (decision == MK64_PREFETCH_RESERVE) {
+        if (ResourceGetDataByName(name) != NULL) {
+            sCourseTexturePrefetchLoaded3DS++;
+        } else {
+            sCourseTexturePrefetchLoadFailures3DS++;
+        }
+    }
+    mk64_3ds_report_course_prefetch();
 }
 
 static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 sectionId) {
-    for (u32 i = 0; i < sCollisionVisitCount3DS; i++) {
-        if ((sCollisionVisits3DS[i].addr == addr) &&
-            (sCollisionVisits3DS[i].surfaceType == surfaceType) &&
-            (sCollisionVisits3DS[i].sectionId == sectionId)) {
+    u32 hash = (u32)addr;
+    hash ^= (u32)(u8)surfaceType * 0x9E3779B9u;
+    hash ^= (u32)sectionId * 0x85EBCA6Bu;
+    hash ^= hash >> 16;
+    hash *= 0x7FEB352Du;
+    hash ^= hash >> 15;
+    u32 slot = hash & (MK64_3DS_COLLISION_VISIT_SLOTS - 1u);
+    for (u32 probe = 0; probe < MK64_3DS_COLLISION_VISIT_SLOTS; ++probe) {
+        const u16 stored = sCollisionVisitSlots3DS[slot];
+        if (stored == 0) {
+            if (sCollisionVisitCount3DS >= MK64_3DS_MAX_COLLISION_DLS) {
+                return false;
+            }
+            const u32 index = sCollisionVisitCount3DS++;
+            sCollisionVisits3DS[index].addr = addr;
+            sCollisionVisits3DS[index].surfaceType = surfaceType;
+            sCollisionVisits3DS[index].sectionId = sectionId;
+            sCollisionVisitSlots3DS[slot] = (u16)(index + 1u);
+            return true;
+        }
+        const u32 index = (u32)stored - 1u;
+        if ((index < sCollisionVisitCount3DS) &&
+            (sCollisionVisits3DS[index].addr == addr) &&
+            (sCollisionVisits3DS[index].surfaceType == surfaceType) &&
+            (sCollisionVisits3DS[index].sectionId == sectionId)) {
             return false;
         }
+        slot = (slot + 1u) & (MK64_3DS_COLLISION_VISIT_SLOTS - 1u);
     }
-    if (sCollisionVisitCount3DS >= MK64_3DS_MAX_COLLISION_DLS) {
-        return false;
-    }
-    sCollisionVisits3DS[sCollisionVisitCount3DS].addr = addr;
-    sCollisionVisits3DS[sCollisionVisitCount3DS].surfaceType = surfaceType;
-    sCollisionVisits3DS[sCollisionVisitCount3DS].sectionId = sectionId;
-    sCollisionVisitCount3DS++;
-    return true;
+    return false;
 }
 #endif]=]
         SPAGHETTIKART_3DS_COLLISION_TEXT
@@ -226,6 +332,38 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         SPAGHETTIKART_3DS_COLLISION_TEXT
         "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
     )
+    set(SPAGHETTIKART_3DS_COLLISION_PREFETCH_ORIGINAL
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
+    string(REPLACE
+        [=[            case G_MARKER:
+            case G_MTX_OTR:
+            case G_SETTIMG_OTR_HASH:
+                gfx++;
+                break;]=]
+        [=[            case G_MARKER:
+            case G_MTX_OTR:
+                gfx++;
+                break;
+            case G_SETTIMG_OTR_HASH: {
+                gfx++;
+                const uint64_t textureHash = ((uint64_t)gfx->words.w0 << 32) | gfx->words.w1;
+#if defined(PLATFORM_3DS)
+                mk64_3ds_prefetch_course_texture_crc(textureHash);
+#endif
+                break;
+            }
+            case G_SETTIMG_OTR_FILEPATH:
+#if defined(PLATFORM_3DS)
+                mk64_3ds_prefetch_course_texture_name((const char*)hi);
+#endif
+                break;]=]
+        SPAGHETTIKART_3DS_COLLISION_TEXT
+        "${SPAGHETTIKART_3DS_COLLISION_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_COLLISION_TEXT STREQUAL
+       SPAGHETTIKART_3DS_COLLISION_PREFETCH_ORIGINAL)
+        message(FATAL_ERROR "The upstream course texture prefetch insertion point changed")
+    endif()
     string(REPLACE
         "#include \"collision.h\""
         "#include \"racing/collision.h\""
@@ -247,6 +385,140 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
     endif()
     if(NOT SPAGHETTIKART_3DS_COLLISION_EXISTING STREQUAL SPAGHETTIKART_3DS_COLLISION_TEXT)
         file(WRITE "${SPAGHETTIKART_3DS_COLLISION_SOURCE}" "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
+    endif()
+
+    # The initial player setup selects one exact 64x64 kart frame for each
+    # racer, but upstream leaves those paths lazy until Fast3D decodes the first
+    # visible race frame. Generate a 3DS copy that warms at most eight unique
+    # current frames; animated successors remain demand-loaded.
+    file(READ "${SPAGHETTIKART_SPAWN_PLAYERS_SOURCE}" SPAGHETTIKART_SPAWN_PLAYERS_TEXT)
+    set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_ORIGINAL
+        "${SPAGHETTIKART_SPAWN_PLAYERS_TEXT}")
+    string(REPLACE
+        "#include \"port/Game.h\""
+        [=[#include "port/Game.h"
+#if defined(PLATFORM_3DS)
+#include "libultraship/bridge/resourcebridge.h"
+extern void Mk64Diagnostics3DSKartPrefetch(size_t, size_t, size_t, size_t, size_t)
+    __attribute__((weak));
+#endif]=]
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
+        "${SPAGHETTIKART_SPAWN_PLAYERS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_SPAWN_PLAYERS_ORIGINAL)
+        message(FATAL_ERROR "The upstream initial kart prefetch include insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_INCLUDE_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
+    string(REPLACE
+        "Player* D_801653C0[8];"
+        [=[Player* D_801653C0[8];
+
+#if defined(PLATFORM_3DS)
+#define MK64_3DS_INITIAL_KART_PREFETCH_LIMIT 8
+static uint64_t sInitialKartPrefetchKeys3DS[MK64_3DS_INITIAL_KART_PREFETCH_LIMIT];
+static size_t sInitialKartPrefetchAttempted3DS = 0;
+static size_t sInitialKartPrefetchLoaded3DS = 0;
+static size_t sInitialKartPrefetchBytes3DS = 0;
+static size_t sInitialKartPrefetchDuplicates3DS = 0;
+static size_t sInitialKartPrefetchUnavailable3DS = 0;
+
+static void mk64_3ds_report_initial_kart_prefetch(void) {
+    if (Mk64Diagnostics3DSKartPrefetch != NULL) {
+        Mk64Diagnostics3DSKartPrefetch(
+            sInitialKartPrefetchAttempted3DS,
+            sInitialKartPrefetchLoaded3DS,
+            sInitialKartPrefetchBytes3DS,
+            sInitialKartPrefetchDuplicates3DS,
+            sInitialKartPrefetchUnavailable3DS);
+    }
+}
+
+static void mk64_3ds_reset_initial_kart_prefetch(void) {
+    sInitialKartPrefetchAttempted3DS = 0;
+    sInitialKartPrefetchLoaded3DS = 0;
+    sInitialKartPrefetchBytes3DS = 0;
+    sInitialKartPrefetchDuplicates3DS = 0;
+    sInitialKartPrefetchUnavailable3DS = 0;
+    mk64_3ds_report_initial_kart_prefetch();
+}
+
+static void mk64_3ds_prefetch_initial_kart(const char* path) {
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    const uint64_t key = ResourceGetCrcByName(path);
+    for (size_t index = 0; index < sInitialKartPrefetchAttempted3DS; ++index) {
+        if (sInitialKartPrefetchKeys3DS[index] == key) {
+            sInitialKartPrefetchDuplicates3DS++;
+            mk64_3ds_report_initial_kart_prefetch();
+            return;
+        }
+    }
+    if (sInitialKartPrefetchAttempted3DS >= MK64_3DS_INITIAL_KART_PREFETCH_LIMIT) {
+        return;
+    }
+    sInitialKartPrefetchKeys3DS[sInitialKartPrefetchAttempted3DS++] = key;
+    if (ResourceGetDataByName(path) != NULL) {
+        sInitialKartPrefetchLoaded3DS++;
+        sInitialKartPrefetchBytes3DS += ResourceGetSizeByName(path);
+    } else {
+        sInitialKartPrefetchUnavailable3DS++;
+    }
+    mk64_3ds_report_initial_kart_prefetch();
+}
+#endif]=]
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_SPAWN_PLAYERS_INCLUDE_TEXT)
+        message(FATAL_ERROR "The upstream initial kart prefetch helper insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_HELPER_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
+    string(REPLACE
+        [=[        }
+
+        gLastAnimFrameSelector[screenId][playerId] = player->animFrameSelector[screenId];]=]
+        [=[        }
+
+#if defined(PLATFORM_3DS)
+        const char* initialKartTexture = ((screenId == 0) || (screenId == 1))
+            ? (const char*)gEncodedKartTexture[0][screenId][playerId].unk_00
+            : (const char*)gEncodedKartTexture[0][screenId - 2][playerId + 4].unk_00;
+        mk64_3ds_prefetch_initial_kart(initialKartTexture);
+#endif
+        gLastAnimFrameSelector[screenId][playerId] = player->animFrameSelector[screenId];]=]
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_SPAWN_PLAYERS_HELPER_TEXT)
+        message(FATAL_ERROR "The upstream initial kart prefetch call insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_CALL_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
+    string(REPLACE
+        "void load_kart_textures(void) {\n    size_t screens = 0;"
+        "void load_kart_textures(void) {\n#if defined(PLATFORM_3DS)\n    mk64_3ds_reset_initial_kart_prefetch();\n#endif\n    size_t screens = 0;"
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_SPAWN_PLAYERS_CALL_TEXT)
+        message(FATAL_ERROR "The upstream initial kart prefetch reset insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
+             SPAGHETTIKART_3DS_SPAWN_PLAYERS_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_SPAWN_PLAYERS_EXISTING STREQUAL
+       SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
+             "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
     endif()
 
     # The desktop direct-audio path normally advances sample-DMA state through
@@ -313,6 +585,59 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         file(WRITE "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}" "${SPAGHETTIKART_3DS_SEQPLAYER_TEXT}")
     endif()
 
+    # The non-matching C menu renderer lost the stock dark overlay call for
+    # unselected character portraits. Generate a 3DS-only copy so a clean
+    # checkout contains the fix without modifying the pinned upstream gitlink.
+    file(READ "${SPAGHETTIKART_MENU_ITEMS_SOURCE}" SPAGHETTIKART_MENU_ITEMS_TEXT)
+    string(REPLACE
+        "                 func_800A12BC(arg0, D_800E7D54[arg0->type - CHARACTER_SELECT_MENU_MARIO]);\n                /* fallthrough */"
+        "                func_800A12BC(arg0, D_800E7D54[arg0->type - CHARACTER_SELECT_MENU_MARIO]);\n                func_8009A76C(arg0->D_8018DEE0_index, arg0->column, arg0->row, arg0->param1);\n                func_800A1350(arg0);\n                break;"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT
+        "${SPAGHETTIKART_MENU_ITEMS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL SPAGHETTIKART_MENU_ITEMS_TEXT)
+        message(FATAL_ERROR "The upstream character-portrait overlay insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}" SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING STREQUAL SPAGHETTIKART_3DS_MENU_ITEMS_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}" "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    endif()
+
+    # The podium ceremony rebuilds collision data independently of Track::Init.
+    # Reset the same fixed visit hash there so a completed race cannot leak
+    # entries into the Royal Raceway ending mesh.
+    file(READ "${SPAGHETTIKART_ENDING_SOURCE}" SPAGHETTIKART_ENDING_TEXT)
+    set(SPAGHETTIKART_3DS_ENDING_ORIGINAL "${SPAGHETTIKART_ENDING_TEXT}")
+    string(REPLACE
+        "#include <racing/memory.h>"
+        "#include <racing/memory.h>\n\nextern void mk64_3ds_collision_reset_visits(void);"
+        SPAGHETTIKART_3DS_ENDING_TEXT
+        "${SPAGHETTIKART_ENDING_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_ENDING_TEXT STREQUAL SPAGHETTIKART_3DS_ENDING_ORIGINAL)
+        message(FATAL_ERROR "The upstream ending collision-reset declaration point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_ENDING_DECL_TEXT "${SPAGHETTIKART_3DS_ENDING_TEXT}")
+    string(REPLACE
+        "    gCollisionMeshCount = 0;\n    bFog = false;"
+        "    gCollisionMeshCount = 0;\n    mk64_3ds_collision_reset_visits();\n    bFog = false;"
+        SPAGHETTIKART_3DS_ENDING_TEXT
+        "${SPAGHETTIKART_3DS_ENDING_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_ENDING_TEXT STREQUAL SPAGHETTIKART_3DS_ENDING_DECL_TEXT)
+        message(FATAL_ERROR "The upstream ending collision-reset call point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_ENDING_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_ENDING_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_ENDING_SOURCE}" SPAGHETTIKART_3DS_ENDING_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_ENDING_EXISTING STREQUAL SPAGHETTIKART_3DS_ENDING_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_ENDING_SOURCE}" "${SPAGHETTIKART_3DS_ENDING_TEXT}")
+    endif()
+
     set(SPAGHETTIKART_GAME_OS_MATH
         "${SPAGHETTIKART_ROOT}/src/os/guLookAtF.c"
         "${SPAGHETTIKART_ROOT}/src/os/guPerspectiveF.c"
@@ -331,17 +656,23 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         ${SPAGHETTIKART_GAME_ROOT}
         ${SPAGHETTIKART_GAME_RECURSIVE}
         ${SPAGHETTIKART_GAME_OS_MATH}
+        platform/3ds/source/resource_prefetch_3ds.c
         "${SPAGHETTIKART_3DS_MEMORY_SOURCE}"
         "${SPAGHETTIKART_3DS_COLLISION_SOURCE}"
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
         "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}"
         "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}"
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}"
+        "${SPAGHETTIKART_3DS_ENDING_SOURCE}"
     )
     target_include_directories(mk64-3ds-game-core PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/include"
         "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/compat"
         "${SPAGHETTIKART_ROOT}"
         "${SPAGHETTIKART_ROOT}/include"
         "${SPAGHETTIKART_ROOT}/include/assets"
         "${SPAGHETTIKART_ROOT}/src"
+        "${SPAGHETTIKART_ROOT}/src/ending"
         "${SPAGHETTIKART_ROOT}/libultraship/include"
         "${SPAGHETTIKART_ROOT}/libultraship/include/libultraship"
         "${SPAGHETTIKART_ROOT}/libultraship/include/fast"

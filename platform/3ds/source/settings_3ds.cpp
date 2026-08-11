@@ -24,7 +24,7 @@ struct Settings {
 
 constexpr Settings kDefaults = {
     MK64_ASPECT_RATIO_3DS_WIDE,
-    true,
+    false,
     400,
     1,
     100,

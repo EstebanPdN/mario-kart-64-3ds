@@ -38,6 +38,12 @@ void Mk64Diagnostics3DSSetStage(const char* stage);
 void Mk64Diagnostics3DSFailure(const char* stage, const char* reason);
 void Mk64Diagnostics3DSSetResource(const char* path, size_t loadedCount);
 void Mk64Diagnostics3DSSetArchiveEntryCount(size_t entryCount);
+void Mk64Diagnostics3DSCoursePrefetch(size_t dependencies, size_t loadedEntries,
+                                      size_t chargedBytes, size_t budgetSkips,
+                                      size_t unavailableEntries);
+void Mk64Diagnostics3DSKartPrefetch(size_t attemptedEntries, size_t loadedEntries,
+                                    size_t loadedBytes, size_t duplicateEntries,
+                                    size_t unavailableEntries);
 void Mk64Diagnostics3DSSetGameArena(const void* base, size_t capacity);
 void Mk64Diagnostics3DSSetDisplayList(const void* base, size_t size);
 void Mk64Diagnostics3DSSetFrame(uint64_t frame, unsigned presentation);
