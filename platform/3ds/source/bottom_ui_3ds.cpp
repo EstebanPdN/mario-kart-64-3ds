@@ -33,15 +33,33 @@ constexpr uint32_t kMaxUiTextureDimension = 512;
 constexpr int kCStickTurboDeadzone = 30;
 constexpr uint64_t kFpsWindowMilliseconds = 2000;
 constexpr size_t kFpsHistoryCount = 5;
-constexpr size_t kTextGlyphCapacity = 2048;
 constexpr size_t kC2DObjectCapacity = 1024;
 constexpr size_t kRetiredTextureCapacity = 8;
+constexpr float kBinaryAngleToRadians = 6.28318530717958647692f / 65536.0f;
+constexpr uint16_t kFontAtlasWidth = 512;
+constexpr uint16_t kFontAtlasHeight = 64;
+constexpr uint16_t kFontGlyphCellWidth = 32;
+constexpr uint16_t kFontGlyphCellHeight = 16;
+constexpr size_t kFontGlyphsPerRow = kFontAtlasWidth / kFontGlyphCellWidth;
+constexpr size_t kFontGlyphCount = 42;
 constexpr float kOptionsTabY = 36.0f;
 constexpr float kOptionsRowY = 70.0f;
 constexpr float kOptionsRowStep = 39.0f;
 constexpr const char* kOptionLogoResource = "__OTR__textures/texture_tkmk00/texture_option";
 constexpr const char* kGameSelectOptionResource = "__OTR__textures/texture_tkmk00/texture_l_option";
 constexpr const char* kGameSelectDataResource = "__OTR__textures/texture_tkmk00/texture_r_data";
+constexpr const char* kSelectionTriangleResource =
+    "__OTR__textures/player_selection/texture_small_green_triangle";
+constexpr const char* kHudLapResource = "__OTR__textures/common_data/common_texture_hud_lap";
+constexpr const char* kHudTimeResource = "__OTR__textures/common_data/common_texture_hud_time";
+constexpr const char* kHudTimerDigitsResource =
+    "__OTR__textures/common_data/common_texture_hud_normal_digit";
+constexpr const char* kPortraitBorderResource =
+    "__OTR__textures/common_data/common_texture_character_portrait_border";
+constexpr const char* kStandingRankPaletteResource =
+    "__OTR__textures/common_data/common_tlut_hud_type_C_rank_font";
+constexpr const char* kMinimapFinishLineResource =
+    "__OTR__textures/common_data/common_texture_minimap_finish_line";
 
 constexpr uint32_t kTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
                                     GX_TRANSFER_RAW_COPY(0) |
@@ -91,7 +109,37 @@ struct UiTexture {
     bool initialized = false;
     uint16_t width = 0;
     uint16_t height = 0;
+    uint16_t backingWidth = 0;
+    uint16_t backingHeight = 0;
     char resourceName[192] = {};
+    char paletteName[192] = {};
+};
+
+struct FontGlyph {
+    Tex3DS_SubTexture subTexture = {};
+    uint8_t advance = 7;
+    bool loaded = false;
+};
+
+struct UiFontAtlas {
+    C3D_Tex texture = {};
+    bool initialized = false;
+    std::array<FontGlyph, kFontGlyphCount> glyphs = {};
+};
+
+struct RaceHudTextures {
+    bool loadAttempted = false;
+    UiTexture lapLabel;
+    std::array<UiTexture, 3> lapCounts = {};
+    UiTexture timeLabel;
+    UiTexture timerDigits;
+    std::array<UiTexture, 8> places = {};
+    std::array<UiTexture, 8> portraits = {};
+    UiTexture portraitBorder;
+    std::array<UiTexture, 8> standingRanks = {};
+    std::array<UiTexture, 16> items = {};
+    UiTexture finishLine;
+    std::array<UiTexture, 8> minimapKarts = {};
 };
 
 struct FpsSample {
@@ -102,13 +150,15 @@ struct FpsSample {
 struct BottomUiState {
     bool initialized = false;
     C3D_RenderTarget* bottomTarget = nullptr;
-    C2D_TextBuf textBuffer = nullptr;
+    UiFontAtlas font;
     UiTexture menuBackground;
     UiTexture coursePreview;
     UiTexture minimap;
     UiTexture optionLogo;
     UiTexture gameSelectOption;
     UiTexture gameSelectData;
+    UiTexture selectionTriangle;
+    RaceHudTextures raceHud;
     std::array<UiTexture, kRetiredTextureCapacity> retiredTextures = {};
     size_t retiredTextureCount = 0;
     Mk64BottomUIGameState3DS game = {};
@@ -137,21 +187,157 @@ struct BottomUiState {
 
 BottomUiState sUi;
 
-constexpr std::array<const char*, 8> kCharacterNames = {
-    "MARIO", "LUIGI", "YOSHI", "TOAD", "D.K.", "WARIO", "PEACH", "BOWSER",
+constexpr std::array<const char*, kFontGlyphCount> kFontResources = {
+    "__OTR__textures/texture_data_2/font_letter_A",
+    "__OTR__textures/texture_data_2/font_letter_B",
+    "__OTR__textures/texture_data_2/font_letter_C",
+    "__OTR__textures/texture_data_2/font_letter_D",
+    "__OTR__textures/texture_data_2/font_letter_E",
+    "__OTR__textures/texture_data_2/font_letter_F",
+    "__OTR__textures/texture_data_2/font_letter_G",
+    "__OTR__textures/texture_data_2/font_letter_H",
+    "__OTR__textures/texture_data_2/font_letter_I",
+    "__OTR__textures/texture_data_2/font_letter_J",
+    "__OTR__textures/texture_data_2/font_letter_K",
+    "__OTR__textures/texture_data_2/font_letter_L",
+    "__OTR__textures/texture_data_2/font_letter_M",
+    "__OTR__textures/texture_data_2/font_letter_N",
+    "__OTR__textures/texture_data_2/font_letter_O",
+    "__OTR__textures/texture_data_2/font_letter_P",
+    "__OTR__textures/texture_data_2/font_letter_Q",
+    "__OTR__textures/texture_data_2/font_letter_R",
+    "__OTR__textures/texture_data_2/font_letter_S",
+    "__OTR__textures/texture_data_2/font_letter_T",
+    "__OTR__textures/texture_data_2/font_letter_U",
+    "__OTR__textures/texture_data_2/font_letter_V",
+    "__OTR__textures/texture_data_2/font_letter_W",
+    "__OTR__textures/texture_data_2/font_letter_X",
+    "__OTR__textures/texture_data_2/font_letter_Y",
+    "__OTR__textures/texture_data_2/font_letter_Z",
+    "__OTR__textures/texture_data_2/font_number_zero",
+    "__OTR__textures/texture_data_2/font_number_one",
+    "__OTR__textures/texture_data_2/font_number_two",
+    "__OTR__textures/texture_data_2/font_number_three",
+    "__OTR__textures/texture_data_2/font_number_four",
+    "__OTR__textures/texture_data_2/font_number_five",
+    "__OTR__textures/texture_data_2/font_number_six",
+    "__OTR__textures/texture_data_2/font_number_seven",
+    "__OTR__textures/texture_data_2/font_number_eight",
+    "__OTR__textures/texture_data_2/font_number_nine",
+    "__OTR__textures/texture_data_2/7F1534",
+    "__OTR__textures/texture_data_2/font_minus",
+    "__OTR__textures/texture_data_2/7F16D4",
+    "__OTR__textures/texture_data_2/font_exclamation_mark",
+    "__OTR__textures/texture_data_2/font_plus",
+    "__OTR__textures/texture_data_2/7F17A4",
 };
 
-constexpr std::array<uint32_t, 8> kCharacterColors = {
-    C2D_Color32(245, 60, 55, 255), C2D_Color32(65, 220, 75, 255),
-    C2D_Color32(80, 210, 95, 255), C2D_Color32(90, 165, 255, 255),
-    C2D_Color32(176, 112, 64, 255), C2D_Color32(245, 205, 45, 255),
-    C2D_Color32(255, 125, 190, 255), C2D_Color32(235, 125, 45, 255),
+// These are the original display advances used by print_text1 for the same
+// glyphs. The 26x16 bitmap includes its own side bearings.
+constexpr std::array<uint8_t, kFontGlyphCount> kFontAdvances = {
+    12, 13, 11, 11, 10, 11, 11, 13, 7, 10, 12, 10, 18,
+    13, 12, 12, 12, 12, 11, 13, 12, 12, 18, 13, 12, 12,
+    10, 8, 11, 12, 12, 13, 10, 11, 10, 10,
+    6, 10, 10, 10, 10, 6,
 };
 
-constexpr std::array<const char*, 16> kItemNames = {
-    "NONE", "BANANA", "BANANA BUNCH", "GREEN SHELL", "3 GREEN SHELLS", "RED SHELL",
-    "3 RED SHELLS", "SPINY SHELL", "THUNDERBOLT", "FAKE ITEM BOX", "STAR", "BOO",
-    "MUSHROOM", "2 MUSHROOMS", "3 MUSHROOMS", "SUPER MUSHROOM",
+constexpr std::array<const char*, 3> kLapCountResources = {
+    "__OTR__textures/common_data/common_texture_hud_lap_1_on_3",
+    "__OTR__textures/common_data/common_texture_hud_lap_2_on_3",
+    "__OTR__textures/common_data/common_texture_hud_lap_3_on_3",
+};
+
+constexpr std::array<const char*, 8> kPortraitResources = {
+    "__OTR__textures/common_data/common_texture_portrait_mario",
+    "__OTR__textures/common_data/common_texture_portrait_luigi",
+    "__OTR__textures/common_data/common_texture_portrait_yoshi",
+    "__OTR__textures/common_data/common_texture_portrait_toad",
+    "__OTR__textures/common_data/common_texture_portrait_donkey_kong",
+    "__OTR__textures/common_data/common_texture_portrait_wario",
+    "__OTR__textures/common_data/common_texture_portrait_peach",
+    "__OTR__textures/common_data/common_texture_portrait_bowser",
+};
+
+constexpr std::array<const char*, 8> kPortraitPaletteResources = {
+    "__OTR__textures/common_data/common_tlut_portrait_mario",
+    "__OTR__textures/common_data/common_tlut_portrait_luigi",
+    "__OTR__textures/common_data/common_tlut_portrait_yoshi",
+    "__OTR__textures/common_data/common_tlut_portrait_toad",
+    "__OTR__textures/common_data/common_tlut_portrait_donkey_kong",
+    "__OTR__textures/common_data/common_tlut_portrait_wario",
+    "__OTR__textures/common_data/common_tlut_portrait_peach",
+    "__OTR__textures/common_data/common_tlut_portrait_bowser",
+};
+
+constexpr std::array<const char*, 16> kItemResources = {
+    "__OTR__textures/common_data/common_texture_item_window_none",
+    "__OTR__textures/common_data/common_texture_item_window_banana",
+    "__OTR__textures/common_data/common_texture_item_window_banana_bunch",
+    "__OTR__textures/common_data/common_texture_item_window_green_shell",
+    "__OTR__textures/common_data/common_texture_item_window_triple_green_shell",
+    "__OTR__textures/common_data/common_texture_item_window_red_shell",
+    "__OTR__textures/common_data/common_texture_item_window_triple_red_shell",
+    "__OTR__textures/common_data/common_texture_item_window_blue_shell",
+    "__OTR__textures/common_data/common_texture_item_window_thunder_bolt",
+    "__OTR__textures/common_data/common_texture_item_window_fake_item_box",
+    "__OTR__textures/common_data/common_texture_item_window_star",
+    "__OTR__textures/common_data/common_texture_item_window_boo",
+    "__OTR__textures/common_data/common_texture_item_window_mushroom",
+    "__OTR__textures/common_data/common_texture_item_window_double_mushroom",
+    "__OTR__textures/common_data/common_texture_item_window_triple_mushroom",
+    "__OTR__textures/common_data/common_texture_item_window_super_mushroom",
+};
+
+constexpr std::array<const char*, 16> kItemPaletteResources = {
+    "__OTR__textures/common_data/common_tlut_item_window_none",
+    "__OTR__textures/common_data/common_tlut_item_window_banana",
+    "__OTR__textures/common_data/common_tlut_item_window_banana_bunch",
+    "__OTR__textures/common_data/common_tlut_item_window_green_shell",
+    "__OTR__textures/common_data/common_tlut_item_window_triple_green_shell",
+    "__OTR__textures/common_data/common_tlut_item_window_red_shell",
+    "__OTR__textures/common_data/common_tlut_item_window_triple_red_shell",
+    "__OTR__textures/common_data/common_tlut_item_window_blue_shell",
+    "__OTR__textures/common_data/common_tlut_item_window_thunder_bolt",
+    "__OTR__textures/common_data/common_tlut_item_window_fake_item_box",
+    "__OTR__textures/common_data/common_tlut_item_window_star",
+    "__OTR__textures/common_data/common_tlut_item_window_boo",
+    "__OTR__textures/common_data/common_tlut_item_window_mushroom",
+    "__OTR__textures/common_data/common_tlut_item_window_double_mushroom",
+    "__OTR__textures/common_data/common_tlut_item_window_triple_mushroom",
+    "__OTR__textures/common_data/common_tlut_item_window_super_mushroom",
+};
+
+constexpr std::array<const char*, 8> kPlaceResources = {
+    "__OTR__textures/common_data/common_texture_hud_1st",
+    "__OTR__textures/common_data/common_texture_hud_2nd",
+    "__OTR__textures/common_data/common_texture_hud_3rd",
+    "__OTR__textures/common_data/common_texture_hud_4th",
+    "__OTR__textures/common_data/common_texture_hud_5th",
+    "__OTR__textures/common_data/common_texture_hud_6th",
+    "__OTR__textures/common_data/common_texture_hud_7th",
+    "__OTR__textures/common_data/common_texture_hud_8th",
+};
+
+constexpr std::array<const char*, 8> kStandingRankResources = {
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_1",
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_2",
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_3",
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_4",
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_5",
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_6",
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_7",
+    "__OTR__textures/common_data/common_texture_hud_type_C_rank_font_8",
+};
+
+constexpr std::array<const char*, 8> kMinimapKartResources = {
+    "__OTR__textures/common_data/common_texture_minimap_kart_mario",
+    "__OTR__textures/common_data/common_texture_minimap_kart_luigi",
+    "__OTR__textures/common_data/common_texture_minimap_kart_yoshi",
+    "__OTR__textures/common_data/common_texture_minimap_kart_toad",
+    "__OTR__textures/common_data/common_texture_minimap_kart_donkey_kong",
+    "__OTR__textures/common_data/common_texture_minimap_kart_wario",
+    "__OTR__textures/common_data/common_texture_minimap_kart_peach",
+    "__OTR__textures/common_data/common_texture_minimap_kart_bowser",
 };
 
 constexpr std::array<uint16_t, 6> kVolumeSteps = { 25, 50, 75, 100, 150, 200 };
@@ -215,15 +401,43 @@ size_t RequiredTextureBytes(const Mk64TextureResource3DS& resource) {
         case TextureRgba32: return pixels * 4U;
         case TextureRgba16:
         case TextureIa16: return pixels * 2U;
+        case TexturePalette4:
         case TextureI4:
         case TextureIa4: return (pixels + 1U) / 2U;
+        case TexturePalette8:
         case TextureI8:
         case TextureIa8: return pixels;
         default: return 0;
     }
 }
 
-uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixelIndex) {
+constexpr uint32_t UiSourceRowForBackingRow(uint32_t sourceHeight, uint32_t destinationRow) {
+    return destinationRow < sourceHeight ? destinationRow : sourceHeight - 1U;
+}
+
+constexpr uint8_t Palette4Index(uint8_t packed, size_t pixelIndex) {
+    return (pixelIndex & 1U) == 0 ? packed >> 4U : packed & 0x0FU;
+}
+
+static_assert(UiSourceRowForBackingRow(240, 0) == 0);
+static_assert(UiSourceRowForBackingRow(240, 239) == 239);
+static_assert(UiSourceRowForBackingRow(240, 255) == 239);
+static_assert(UiSourceRowForBackingRow(19, 31) == 18);
+static_assert(Palette4Index(0xAB, 0) == 0xA);
+static_assert(Palette4Index(0xAB, 1) == 0xB);
+
+uint32_t DecodeRgba16(const uint8_t* pixel) {
+    const uint16_t packed = static_cast<uint16_t>((pixel[0] << 8U) | pixel[1]);
+    const uint8_t red = Scale5To8(static_cast<uint8_t>(packed >> 11U));
+    const uint8_t green = Scale5To8(static_cast<uint8_t>((packed >> 6U) & 0x1FU));
+    const uint8_t blue = Scale5To8(static_cast<uint8_t>((packed >> 1U) & 0x1FU));
+    const uint8_t alpha = (packed & 1U) != 0 ? 255 : 0;
+    return static_cast<uint32_t>(red) | (static_cast<uint32_t>(green) << 8U) |
+           (static_cast<uint32_t>(blue) << 16U) | (static_cast<uint32_t>(alpha) << 24U);
+}
+
+uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixelIndex,
+                            const Mk64TextureResource3DS* palette = nullptr) {
     uint8_t red = 0;
     uint8_t green = 0;
     uint8_t blue = 0;
@@ -238,17 +452,19 @@ uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixel
             break;
         }
         case TextureRgba16: {
-            const uint8_t* pixel = resource.data + pixelIndex * 2U;
-            const uint16_t packed = static_cast<uint16_t>((pixel[0] << 8U) | pixel[1]);
-            red = Scale5To8(static_cast<uint8_t>(packed >> 11U));
-            green = Scale5To8(static_cast<uint8_t>((packed >> 6U) & 0x1FU));
-            blue = Scale5To8(static_cast<uint8_t>((packed >> 1U) & 0x1FU));
-            alpha = (packed & 1U) != 0 ? 255 : 0;
-            break;
+            return DecodeRgba16(resource.data + pixelIndex * 2U);
+        }
+        case TexturePalette4:
+        case TexturePalette8: {
+            if (palette == nullptr || palette->data == nullptr) break;
+            const uint8_t paletteIndex = resource.type == TexturePalette4
+                ? Palette4Index(resource.data[pixelIndex / 2U], pixelIndex)
+                : resource.data[pixelIndex];
+            return DecodeRgba16(palette->data + static_cast<size_t>(paletteIndex) * 2U);
         }
         case TextureI4: {
             const uint8_t packed = resource.data[pixelIndex / 2U];
-            const uint8_t intensity = (pixelIndex & 1U) == 0 ? packed >> 4U : packed & 0x0FU;
+            const uint8_t intensity = Palette4Index(packed, pixelIndex);
             red = green = blue = alpha = Scale4To8(intensity);
             break;
         }
@@ -279,24 +495,45 @@ uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixel
            (static_cast<uint32_t>(blue) << 16U) | (static_cast<uint32_t>(alpha) << 24U);
 }
 
-bool LoadTexture(const char* resourceName, UiTexture& destination) {
+void RememberMissingTexture(const char* resourceName, const char* paletteName,
+                            UiTexture& destination) {
+    UiTexture missing;
+    std::snprintf(missing.resourceName, sizeof(missing.resourceName), "%s",
+                  resourceName == nullptr ? "" : resourceName);
+    std::snprintf(missing.paletteName, sizeof(missing.paletteName), "%s",
+                  paletteName == nullptr ? "" : paletteName);
+    ReplaceTexture(destination, missing);
+}
+
+bool LoadTexture(const char* resourceName, UiTexture& destination, const char* paletteName = nullptr) {
     if (resourceName == nullptr || resourceName[0] == '\0') return false;
-    if (std::strcmp(destination.resourceName, resourceName) == 0) return destination.initialized;
+    const char* normalizedPaletteName = paletteName == nullptr ? "" : paletteName;
+    if (std::strcmp(destination.resourceName, resourceName) == 0 &&
+        std::strcmp(destination.paletteName, normalizedPaletteName) == 0) {
+        return destination.initialized;
+    }
 
     Mk64TextureResource3DS resource = {};
     if (!Mk64Resource3DSGetTexture(resourceName, &resource) || resource.data == nullptr ||
         resource.width == 0 || resource.height == 0 || resource.width > kMaxUiTextureDimension ||
         resource.height > kMaxUiTextureDimension) {
-        UiTexture missing;
-        std::snprintf(missing.resourceName, sizeof(missing.resourceName), "%s", resourceName);
-        ReplaceTexture(destination, missing);
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
         return false;
     }
     const size_t required = RequiredTextureBytes(resource);
     if (required == 0 || resource.size < required) {
-        UiTexture missing;
-        std::snprintf(missing.resourceName, sizeof(missing.resourceName), "%s", resourceName);
-        ReplaceTexture(destination, missing);
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
+        return false;
+    }
+
+    Mk64TextureResource3DS palette = {};
+    const bool paletteRequired = resource.type == TexturePalette4 || resource.type == TexturePalette8;
+    const size_t paletteEntries = resource.type == TexturePalette4 ? 16U : 256U;
+    if (paletteRequired &&
+        (normalizedPaletteName[0] == '\0' ||
+         !Mk64Resource3DSGetTexture(normalizedPaletteName, &palette) || palette.data == nullptr ||
+         palette.type != TextureRgba16 || palette.size < paletteEntries * 2U)) {
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
         return false;
     }
 
@@ -304,13 +541,14 @@ bool LoadTexture(const char* resourceName, UiTexture& destination) {
     decoded.width = resource.width;
     decoded.height = resource.height;
     std::snprintf(decoded.resourceName, sizeof(decoded.resourceName), "%s", resourceName);
+    std::snprintf(decoded.paletteName, sizeof(decoded.paletteName), "%s", normalizedPaletteName);
     const uint16_t backingWidth = NextPowerOfTwo(resource.width);
     const uint16_t backingHeight = NextPowerOfTwo(resource.height);
+    decoded.backingWidth = backingWidth;
+    decoded.backingHeight = backingHeight;
     if (backingWidth < resource.width || backingHeight < resource.height ||
         !C3D_TexInit(&decoded.texture, backingWidth, backingHeight, GPU_RGBA8)) {
-        UiTexture missing;
-        std::snprintf(missing.resourceName, sizeof(missing.resourceName), "%s", resourceName);
-        ReplaceTexture(destination, missing);
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
         return false;
     }
     decoded.initialized = true;
@@ -323,13 +561,16 @@ bool LoadTexture(const char* resourceName, UiTexture& destination) {
                 (static_cast<size_t>(tileY / 8U) * tilesPerRow + tileX / 8U) * 64U;
             for (uint32_t row = 0; row < 8U; ++row) {
                 const uint32_t destinationY = tileY + row;
-                const uint32_t sourceY =
-                    (backingHeight - 1U - destinationY) % resource.height;
+                // Tex3DS/Citro2D subtextures use top=1 and address source rows
+                // top-down. Fast3D's V=0 POT-backed row inversion must not be
+                // reused here; doing so turns every lower-screen image over.
+                const uint32_t sourceY = UiSourceRowForBackingRow(resource.height, destinationY);
                 for (uint32_t column = 0; column < 8U; ++column) {
                     const uint32_t sourceX = std::min<uint32_t>(tileX + column, resource.width - 1U);
                     const size_t sourceIndex = static_cast<size_t>(sourceY) * resource.width + sourceX;
                     tile[MortonOffset8x8(column, row)] =
-                        __builtin_bswap32(DecodeTexturePixel(resource, sourceIndex));
+                        __builtin_bswap32(DecodeTexturePixel(
+                            resource, sourceIndex, paletteRequired ? &palette : nullptr));
                 }
             }
         }
@@ -355,17 +596,149 @@ bool LoadTexture(const char* resourceName, UiTexture& destination) {
     return true;
 }
 
+void WriteTiledPixel(C3D_Tex& texture, uint16_t backingWidth, uint16_t x, uint16_t y,
+                     uint32_t rgba) {
+    auto* pixels = static_cast<uint32_t*>(texture.data);
+    const uint32_t tilesPerRow = backingWidth / 8U;
+    const size_t tile = (static_cast<size_t>(y / 8U) * tilesPerRow + x / 8U) * 64U;
+    pixels[tile + MortonOffset8x8(x & 7U, y & 7U)] = __builtin_bswap32(rgba);
+}
+
+bool LoadFontAtlas() {
+    UiFontAtlas& font = sUi.font;
+    if (font.initialized) return true;
+    if (!C3D_TexInit(&font.texture, kFontAtlasWidth, kFontAtlasHeight, GPU_RGBA8)) return false;
+    std::memset(font.texture.data, 0,
+                static_cast<size_t>(kFontAtlasWidth) * kFontAtlasHeight * sizeof(uint32_t));
+
+    size_t loadedCount = 0;
+    for (size_t index = 0; index < kFontResources.size(); ++index) {
+        Mk64TextureResource3DS resource = {};
+        if (!Mk64Resource3DSGetTexture(kFontResources[index], &resource) ||
+            resource.data == nullptr || resource.width != 26 || resource.height != 16 ||
+            resource.type != TextureI4 || resource.size < RequiredTextureBytes(resource)) {
+            continue;
+        }
+        const uint16_t atlasX = static_cast<uint16_t>((index % kFontGlyphsPerRow) * kFontGlyphCellWidth);
+        const uint16_t atlasY = static_cast<uint16_t>((index / kFontGlyphsPerRow) * kFontGlyphCellHeight);
+        for (uint16_t y = 0; y < resource.height; ++y) {
+            for (uint16_t x = 0; x < resource.width; ++x) {
+                const size_t pixel = static_cast<size_t>(y) * resource.width + x;
+                WriteTiledPixel(font.texture, kFontAtlasWidth, atlasX + x, atlasY + y,
+                                DecodeTexturePixel(resource, pixel));
+            }
+        }
+        FontGlyph& glyph = font.glyphs[index];
+        glyph.subTexture = {
+            .width = resource.width,
+            .height = resource.height,
+            .left = static_cast<float>(atlasX) / kFontAtlasWidth,
+            .top = 1.0f - static_cast<float>(atlasY) / kFontAtlasHeight,
+            .right = static_cast<float>(atlasX + resource.width) / kFontAtlasWidth,
+            .bottom = 1.0f - static_cast<float>(atlasY + resource.height) / kFontAtlasHeight,
+        };
+        glyph.advance = kFontAdvances[index];
+        glyph.loaded = true;
+        ++loadedCount;
+    }
+    C3D_TexFlush(&font.texture);
+    C3D_TexSetFilter(&font.texture, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&font.texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    font.initialized = loadedCount >= 36;
+    if (!font.initialized) C3D_TexDelete(&font.texture);
+    return font.initialized;
+}
+
 C2D_Image TextureImage(UiTexture& texture) {
     return { .tex = &texture.texture, .subtex = &texture.subTexture };
 }
 
+int GlyphIndexForCharacter(char character) {
+    if (character >= 'a' && character <= 'z') character = static_cast<char>(character - 'a' + 'A');
+    if (character >= 'A' && character <= 'Z') return character - 'A';
+    if (character >= '0' && character <= '9') return 26 + character - '0';
+    switch (character) {
+        case '.': return 36;
+        case '-': return 37;
+        case '?': return 38;
+        case '!': return 39;
+        case '+': return 40;
+        case '\'': return 41;
+        default: return -1;
+    }
+}
+
+float CharacterAdvance(char character) {
+    if (character == ' ') return 7.0f;
+    if (character == ':' || character == '/') return 8.0f;
+    if (character == '%') return 14.0f;
+    const int glyphIndex = GlyphIndexForCharacter(character);
+    if (glyphIndex >= 0) return kFontAdvances[static_cast<size_t>(glyphIndex)];
+    return kFontAdvances[38];
+}
+
+float MeasureText(const char* value, float scale) {
+    if (value == nullptr) return 0.0f;
+    float width = 0.0f;
+    while (*value != '\0') width += CharacterAdvance(*value++) * scale;
+    return width;
+}
+
+void DrawSpecialCharacter(char character, float x, float y, float scale, uint32_t color,
+                          float depth) {
+    const float thickness = std::max(1.0f, 1.35f * scale);
+    if (character == ':') {
+        const float size = std::max(1.0f, 2.0f * scale);
+        C2D_DrawRectSolid(x + 2.0f * scale, y + 4.0f * scale, depth, size, size, color);
+        C2D_DrawRectSolid(x + 2.0f * scale, y + 11.0f * scale, depth, size, size, color);
+    } else if (character == '/') {
+        C2D_DrawLine(x + 1.0f * scale, y + 14.0f * scale, color,
+                     x + 7.0f * scale, y + 2.0f * scale, color, thickness, depth);
+    } else if (character == '%') {
+        C2D_DrawRectSolid(x + scale, y + 2.0f * scale, depth, 3.0f * scale, 3.0f * scale, color);
+        C2D_DrawLine(x + 2.0f * scale, y + 14.0f * scale, color,
+                     x + 11.0f * scale, y + 2.0f * scale, color, thickness, depth);
+        C2D_DrawRectSolid(x + 9.0f * scale, y + 11.0f * scale, depth,
+                          3.0f * scale, 3.0f * scale, color);
+    }
+}
+
 void DrawText(const char* value, float x, float y, float scale, uint32_t color,
-              uint32_t alignment = C2D_AlignLeft, float depth = 0.8f) {
-    if (value == nullptr || sUi.textBuffer == nullptr) return;
-    C2D_Text text = {};
-    if (C2D_TextParse(&text, sUi.textBuffer, value) == nullptr) return;
-    C2D_TextOptimize(&text);
-    C2D_DrawText(&text, C2D_WithColor | alignment, x, y, depth, scale, scale, color);
+              uint32_t alignment = C2D_AlignLeft, float depth = 0.8f, bool shadow = false) {
+    if (value == nullptr || !sUi.font.initialized) return;
+    const float width = MeasureText(value, scale);
+    float cursor = x;
+    if ((alignment & C2D_AlignCenter) != 0) cursor -= width * 0.5f;
+    if ((alignment & C2D_AlignRight) != 0) cursor -= width;
+
+    const auto drawPass = [&](float offsetX, float offsetY, uint32_t passColor, float passDepth) {
+        C2D_ImageTint tint = {};
+        C2D_PlainImageTint(&tint, passColor, 1.0f);
+        float glyphX = cursor;
+        for (const char* character = value; *character != '\0'; ++character) {
+            const float advance = CharacterAdvance(*character) * scale;
+            const int glyphIndex = GlyphIndexForCharacter(*character);
+            if (glyphIndex >= 0 && sUi.font.glyphs[static_cast<size_t>(glyphIndex)].loaded) {
+                FontGlyph& glyph = sUi.font.glyphs[static_cast<size_t>(glyphIndex)];
+                C2D_Image image = { .tex = &sUi.font.texture, .subtex = &glyph.subTexture };
+                const C2D_DrawParams params = {
+                    .pos = { .x = glyphX + offsetX, .y = y + offsetY,
+                             .w = 26.0f * scale, .h = 16.0f * scale },
+                    .center = { .x = 0.0f, .y = 0.0f },
+                    .depth = passDepth,
+                    .angle = 0.0f,
+                };
+                C2D_DrawImage(image, &params, &tint);
+            } else if (*character != ' ') {
+                DrawSpecialCharacter(*character, glyphX + offsetX, y + offsetY,
+                                     scale, passColor, passDepth);
+            }
+            glyphX += advance;
+        }
+    };
+    if (shadow) drawPass(std::max(1.0f, scale), std::max(1.0f, scale),
+                         C2D_Color32(0, 0, 0, 210), depth - 0.01f);
+    drawPass(0.0f, 0.0f, color, depth);
 }
 
 void DrawTexture(UiTexture& texture, float x, float y, float width, float height, float depth,
@@ -386,13 +759,100 @@ void DrawTexture(UiTexture& texture, float x, float y, float width, float height
     C2D_DrawImage(image, &params, tint);
 }
 
-void DrawTextureCover(UiTexture& texture, float x, float y, float width, float height, float depth) {
+void DrawTextureRotated(UiTexture& texture, float centerX, float centerY, float width,
+                        float height, float depth, float angle) {
+    if (!texture.initialized || texture.width == 0 || texture.height == 0) return;
+    const C2D_Image image = TextureImage(texture);
+    C2D_DrawImageAtRotated(image, centerX, centerY, depth, angle, nullptr,
+                           width / texture.width, height / texture.height);
+}
+
+void DrawTextureRegion(UiTexture& texture, float sourceX, float sourceY, float sourceWidth,
+                       float sourceHeight, float x, float y, float width, float height,
+                       float depth, const C2D_ImageTint* tint = nullptr) {
+    if (!texture.initialized || texture.backingWidth == 0 || texture.backingHeight == 0) return;
+    sourceX = std::clamp(sourceX, 0.0f, static_cast<float>(texture.width));
+    sourceY = std::clamp(sourceY, 0.0f, static_cast<float>(texture.height));
+    sourceWidth = std::clamp(sourceWidth, 0.0f, texture.width - sourceX);
+    sourceHeight = std::clamp(sourceHeight, 0.0f, texture.height - sourceY);
+    Tex3DS_SubTexture region = {
+        .width = static_cast<uint16_t>(sourceWidth),
+        .height = static_cast<uint16_t>(sourceHeight),
+        .left = sourceX / texture.backingWidth,
+        .top = 1.0f - sourceY / texture.backingHeight,
+        .right = (sourceX + sourceWidth) / texture.backingWidth,
+        .bottom = 1.0f - (sourceY + sourceHeight) / texture.backingHeight,
+    };
+    C2D_Image image = { .tex = &texture.texture, .subtex = &region };
+    const C2D_DrawParams params = {
+        .pos = { .x = x, .y = y, .w = width, .h = height },
+        .center = { .x = 0.0f, .y = 0.0f },
+        .depth = depth,
+        .angle = 0.0f,
+    };
+    C2D_DrawImage(image, &params, tint);
+}
+
+void DrawTextureCover(UiTexture& texture, float x, float y, float width, float height, float depth,
+                      const C2D_ImageTint* tint = nullptr) {
     if (!texture.initialized) return;
     const float scale = std::max(width / texture.width, height / texture.height);
     const float drawWidth = texture.width * scale;
     const float drawHeight = texture.height * scale;
     DrawTexture(texture, x + (width - drawWidth) * 0.5f, y + (height - drawHeight) * 0.5f,
-                drawWidth, drawHeight, depth);
+                drawWidth, drawHeight, depth, tint);
+}
+
+template <size_t Count>
+void DeleteTextures(std::array<UiTexture, Count>& textures) {
+    for (UiTexture& texture : textures) DeleteTexture(texture);
+}
+
+void DeleteFontAtlas() {
+    if (sUi.font.initialized) C3D_TexDelete(&sUi.font.texture);
+    sUi.font = {};
+}
+
+void LoadRaceHudTextures() {
+    RaceHudTextures& hud = sUi.raceHud;
+    if (hud.loadAttempted) return;
+    hud.loadAttempted = true;
+
+    LoadTexture(kHudLapResource, hud.lapLabel);
+    for (size_t index = 0; index < hud.lapCounts.size(); ++index) {
+        LoadTexture(kLapCountResources[index], hud.lapCounts[index]);
+    }
+    LoadTexture(kHudTimeResource, hud.timeLabel);
+    LoadTexture(kHudTimerDigitsResource, hud.timerDigits);
+    for (size_t index = 0; index < hud.places.size(); ++index) {
+        LoadTexture(kPlaceResources[index], hud.places[index]);
+        LoadTexture(kPortraitResources[index], hud.portraits[index],
+                    kPortraitPaletteResources[index]);
+        LoadTexture(kStandingRankResources[index], hud.standingRanks[index],
+                    kStandingRankPaletteResource);
+        LoadTexture(kMinimapKartResources[index], hud.minimapKarts[index]);
+    }
+    LoadTexture(kPortraitBorderResource, hud.portraitBorder);
+    for (size_t index = 0; index < hud.items.size(); ++index) {
+        LoadTexture(kItemResources[index], hud.items[index], kItemPaletteResources[index]);
+    }
+    LoadTexture(kMinimapFinishLineResource, hud.finishLine);
+}
+
+void DeleteRaceHudTextures() {
+    RaceHudTextures& hud = sUi.raceHud;
+    DeleteTexture(hud.lapLabel);
+    DeleteTextures(hud.lapCounts);
+    DeleteTexture(hud.timeLabel);
+    DeleteTexture(hud.timerDigits);
+    DeleteTextures(hud.places);
+    DeleteTextures(hud.portraits);
+    DeleteTexture(hud.portraitBorder);
+    DeleteTextures(hud.standingRanks);
+    DeleteTextures(hud.items);
+    DeleteTexture(hud.finishLine);
+    DeleteTextures(hud.minimapKarts);
+    hud.loadAttempted = false;
 }
 
 void DrawFallbackBackground() {
@@ -404,14 +864,40 @@ void DrawFallbackBackground() {
 void DrawDimMenuBackground() {
     DrawFallbackBackground();
     if (sUi.menuBackground.initialized) {
-        DrawTexture(sUi.menuBackground, 0.0f, 0.0f, kBottomWidth, kBottomHeight, 0.05f);
+        // Match the original grayscale menu filters: Game Select red, Player
+        // Select green, and Course Select blue-purple.
+        uint32_t tintColor = C2D_Color32(255, 255, 255, 255);
+        bool filtered = true;
+        if (sUi.game.menuSelection == 11) {
+            tintColor = C2D_Color32(255, 175, 175, 255);
+        } else if (sUi.game.menuSelection == 12) {
+            tintColor = C2D_Color32(175, 255, 175, 255);
+        } else if (sUi.game.menuSelection == 13) {
+            tintColor = C2D_Color32(175, 175, 255, 255);
+        } else {
+            filtered = false;
+        }
+        if (filtered) {
+            C2D_ImageTint tint = {};
+            C2D_PlainImageTint(&tint, tintColor, 1.0f);
+            // The N64 menu enables grayscale and applies gBackgroundColor;
+            // Citro2D's luma tint is the equivalent operation. Solid tinting
+            // would discard the background detail and produce a flat quad.
+            C2D_SetTintMode(C2D_TintLuma);
+            DrawTextureCover(sUi.menuBackground, 0.0f, 0.0f, kBottomWidth, kBottomHeight,
+                             0.05f, &tint);
+            C2D_SetTintMode(C2D_TintSolid);
+        } else {
+            DrawTextureCover(sUi.menuBackground, 0.0f, 0.0f, kBottomWidth, kBottomHeight,
+                             0.05f);
+        }
         // The source image contributes roughly twenty percent to the result.
         C2D_DrawRectSolid(0.0f, 0.0f, 0.1f, kBottomWidth, kBottomHeight,
                           C2D_Color32(0, 0, 0, 204));
     }
 }
 
-void DrawRaceBackground(float scrimAlpha = 150.0f) {
+void DrawRaceBackground(float scrimAlpha = 204.0f) {
     if (sUi.coursePreview.initialized) {
         C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, kBottomWidth, kBottomHeight,
                           C2D_Color32(0, 0, 0, 255));
@@ -421,14 +907,6 @@ void DrawRaceBackground(float scrimAlpha = 150.0f) {
     } else {
         DrawDimMenuBackground();
     }
-}
-
-void DrawPanel(float x, float y, float width, float height, bool selected = false) {
-    const uint32_t border = selected ? C2D_Color32(255, 210, 55, 245)
-                                     : C2D_Color32(100, 155, 220, 215);
-    C2D_DrawRectSolid(x, y, 0.35f, width, height, border);
-    C2D_DrawRectSolid(x + 2.0f, y + 2.0f, 0.4f, width - 4.0f, height - 4.0f,
-                      C2D_Color32(4, 9, 18, 218));
 }
 
 BaseView GetBaseView(const Mk64BottomUIGameState3DS& game) {
@@ -669,58 +1147,51 @@ void UpdateFpsCounter() {
 
 void DrawStatus() {
     if (sUi.status[0] == '\0' || osGetTime() >= sUi.statusExpiresAt) return;
-    C2D_DrawRectSolid(35.0f, 188.0f, 0.82f, 250.0f, 20.0f, C2D_Color32(0, 0, 0, 225));
-    DrawText(sUi.status, 160.0f, 191.0f, 0.42f, C2D_Color32(255, 225, 90, 255),
-             C2D_AlignCenter, 0.86f);
+    DrawText(sUi.status, 160.0f, 191.0f, 0.62f, C2D_Color32(255, 230, 92, 255),
+             C2D_AlignCenter, 0.86f, true);
 }
 
 void DrawGameSelect() {
     DrawDimMenuBackground();
-    DrawText("GAME SELECT", 160.0f, 54.0f, 0.72f, C2D_Color32(255, 225, 90, 255), C2D_AlignCenter);
-    DrawPanel(22.0f, 100.0f, 132.0f, 58.0f);
-    DrawPanel(166.0f, 100.0f, 132.0f, 58.0f);
     if (sUi.gameSelectOption.initialized) {
-        DrawTexture(sUi.gameSelectOption, 30.0f, 110.0f, 116.0f, 38.0f, 0.7f);
+        DrawTexture(sUi.gameSelectOption, 44.5f, 106.0f, 87.0f, 28.5f, 0.7f);
     } else {
-        DrawText("L  OPTION", 88.0f, 115.0f, 0.58f, C2D_Color32(255, 255, 255, 255),
-                 C2D_AlignCenter);
+        DrawText("L OPTION", 88.0f, 111.0f, 0.8f, C2D_Color32(255, 255, 255, 255),
+                 C2D_AlignCenter, 0.7f, true);
     }
     if (sUi.gameSelectData.initialized) {
-        DrawTexture(sUi.gameSelectData, 174.0f, 110.0f, 116.0f, 38.0f, 0.7f);
+        DrawTexture(sUi.gameSelectData, 188.5f, 106.0f, 87.0f, 28.5f, 0.7f);
     } else {
-        DrawText("R  DATA", 232.0f, 115.0f, 0.58f, C2D_Color32(255, 255, 255, 255),
-                 C2D_AlignCenter);
+        DrawText("R DATA", 232.0f, 111.0f, 0.8f, C2D_Color32(255, 255, 255, 255),
+                 C2D_AlignCenter, 0.7f, true);
     }
-    DrawText("BUTTONS OR TOUCH", 160.0f, 174.0f, 0.42f, C2D_Color32(155, 195, 235, 255),
-             C2D_AlignCenter);
 }
 
-void FormatCourseTime(char* output, size_t outputSize, float seconds) {
-    const int hundredthsTotal = std::clamp(static_cast<int>(seconds * 100.0f), 0, 599999);
+void DrawTimerDigits(float x, float y, float scale) {
+    if (!sUi.raceHud.timerDigits.initialized) return;
+    int hundredthsTotal = std::clamp(static_cast<int>(sUi.game.courseTimerSeconds * 100.0f),
+                                     0, 599999);
     const int minutes = hundredthsTotal / 6000;
-    const int secondsPart = (hundredthsTotal / 100) % 60;
+    hundredthsTotal %= 6000;
+    const int seconds = hundredthsTotal / 100;
     const int hundredths = hundredthsTotal % 100;
-    std::snprintf(output, outputSize, "%d:%02d.%02d", minutes, secondsPart, hundredths);
+    const std::array<uint8_t, 8> glyphs = {
+        static_cast<uint8_t>((minutes / 10) % 10), static_cast<uint8_t>(minutes % 10), 10,
+        static_cast<uint8_t>(seconds / 10), static_cast<uint8_t>(seconds % 10), 11,
+        static_cast<uint8_t>(hundredths / 10), static_cast<uint8_t>(hundredths % 10),
+    };
+    for (size_t index = 0; index < glyphs.size(); ++index) {
+        DrawTextureRegion(sUi.raceHud.timerDigits, glyphs[index] * 8.0f, 0.0f, 8.0f, 16.0f,
+                          x + index * 8.0f * scale, y, 8.0f * scale, 16.0f * scale, 0.7f);
+    }
 }
 
 void DrawMinimap() {
-    constexpr float panelX = 124.0f;
-    constexpr float panelY = 49.0f;
-    constexpr float panelWidth = 190.0f;
-    constexpr float panelHeight = 184.0f;
-    DrawPanel(panelX, panelY, panelWidth, panelHeight);
-    DrawText("MAP", panelX + panelWidth * 0.5f, panelY + 7.0f, 0.45f,
-             C2D_Color32(150, 205, 255, 255), C2D_AlignCenter);
-    if (!sUi.minimap.initialized) {
-        DrawText("MAP UNAVAILABLE", panelX + panelWidth * 0.5f, panelY + 85.0f, 0.4f,
-                 C2D_Color32(190, 190, 190, 255), C2D_AlignCenter);
-        return;
-    }
-
-    constexpr float areaX = panelX + 9.0f;
-    constexpr float areaY = panelY + 29.0f;
-    constexpr float areaWidth = panelWidth - 18.0f;
-    constexpr float areaHeight = panelHeight - 38.0f;
+    if (!sUi.minimap.initialized) return;
+    constexpr float areaX = 165.0f;
+    constexpr float areaY = 48.0f;
+    constexpr float areaWidth = 149.0f;
+    constexpr float areaHeight = 184.0f;
     const float scale = std::min(areaWidth / sUi.minimap.width, areaHeight / sUi.minimap.height);
     const float mapWidth = sUi.minimap.width * scale;
     const float mapHeight = sUi.minimap.height * scale;
@@ -729,13 +1200,24 @@ void DrawMinimap() {
     C2D_ImageTint tint = {};
     C2D_PlainImageTint(&tint,
                        C2D_Color32(sUi.game.minimapRed, sUi.game.minimapGreen,
-                                   sUi.game.minimapBlue, 209),
+                                   sUi.game.minimapBlue, 230),
                        1.0f);
-    DrawTexture(sUi.minimap, mapX, mapY, mapWidth, mapHeight, 0.52f, &tint,
+    DrawTexture(sUi.minimap, mapX, mapY, mapWidth, mapHeight, 0.55f, &tint,
                 sUi.game.mirrorMode);
 
     const float logicalWidth = sUi.game.minimapWidth > 0 ? sUi.game.minimapWidth : sUi.minimap.width;
     const float logicalHeight = sUi.game.minimapHeight > 0 ? sUi.game.minimapHeight : sUi.minimap.height;
+
+    const float finishX = (sUi.game.minimapPlayerX + sUi.game.minimapFinishlineX) /
+                          logicalWidth;
+    const float finishY = (sUi.game.minimapPlayerY + sUi.game.minimapFinishlineY) /
+                          logicalHeight;
+    if (sUi.raceHud.finishLine.initialized && finishX >= 0.0f && finishX <= 1.0f &&
+        finishY >= 0.0f && finishY <= 1.0f) {
+        DrawTexture(sUi.raceHud.finishLine, mapX + finishX * mapWidth - 4.0f,
+                    mapY + finishY * mapHeight - 4.0f, 8.0f, 8.0f, 0.66f);
+    }
+
     for (size_t playerId = 0; playerId < MK64_BOTTOM_UI_RACER_COUNT; ++playerId) {
         const Mk64BottomUIRacer3DS& racer = sUi.game.racers[playerId];
         if (!racer.active) continue;
@@ -747,67 +1229,65 @@ void DrawMinimap() {
             continue;
         }
         const int character = racer.characterId >= 0 && racer.characterId < 8 ? racer.characterId : 0;
-        if (playerId == 0) {
-            C2D_DrawCircleSolid(markerX, markerY, 0.69f, 4.3f, C2D_Color32(255, 255, 255, 255));
-        }
-        C2D_DrawCircleSolid(markerX, markerY, 0.72f, playerId == 0 ? 3.0f : 2.4f,
-                            kCharacterColors[character]);
+        UiTexture& marker = sUi.raceHud.minimapKarts[static_cast<size_t>(character)];
+        const uint16_t heading = static_cast<uint16_t>(
+            static_cast<uint16_t>(racer.rotationY) + 0x8000U);
+        DrawTextureRotated(marker, markerX, markerY, 8.0f, 8.0f,
+                           racer.rank == 0 ? 0.72f : 0.69f,
+                           heading * kBinaryAngleToRadians);
     }
 }
 
 void DrawRaceHud() {
-    DrawRaceBackground();
-    DrawPanel(6.0f, 5.0f, 308.0f, 38.0f);
-    DrawPanel(6.0f, 49.0f, 112.0f, 184.0f);
+    DrawRaceBackground(204.0f);
 
-    char time[24] = {};
-    FormatCourseTime(time, sizeof(time), sUi.game.courseTimerSeconds);
-    DrawText("TIME", 15.0f, 9.0f, 0.38f, C2D_Color32(135, 190, 245, 255));
-    DrawText(time, 15.0f, 22.0f, 0.52f, C2D_Color32(255, 255, 255, 255));
-
-    char lap[20] = {};
-    if (sUi.game.gameMode == 3) {
-        std::snprintf(lap, sizeof(lap), "BATTLE");
-    } else {
-        std::snprintf(lap, sizeof(lap), "LAP %d/%d", sUi.game.currentLap, sUi.game.totalLaps);
+    const int item = std::clamp<int>(sUi.game.currentItem, 0,
+                                     static_cast<int>(sUi.raceHud.items.size()) - 1);
+    DrawTexture(sUi.raceHud.items[static_cast<size_t>(item)], 6.0f, 5.0f, 40.0f, 32.0f, 0.7f);
+    DrawTexture(sUi.raceHud.timeLabel, 52.0f, 13.0f, 32.0f, 16.0f, 0.7f);
+    DrawTimerDigits(84.0f, 13.0f, 1.0f);
+    if (sUi.game.gameMode != 3) {
+        DrawTexture(sUi.raceHud.lapLabel, 154.0f, 17.0f, 32.0f, 8.0f, 0.7f);
+        const int lap = std::clamp<int>(sUi.game.currentLap, 1, 3) - 1;
+        DrawTexture(sUi.raceHud.lapCounts[static_cast<size_t>(lap)],
+                    182.0f, 13.0f, 32.0f, 16.0f, 0.7f);
     }
-    DrawText(lap, 160.0f, 15.0f, 0.52f, C2D_Color32(255, 225, 80, 255), C2D_AlignCenter);
 
-    const char* item = sUi.game.currentItem >= 0 && sUi.game.currentItem < static_cast<int>(kItemNames.size())
-                           ? kItemNames[sUi.game.currentItem]
-                           : "UNKNOWN";
-    DrawText("ITEM", 305.0f, 9.0f, 0.38f, C2D_Color32(135, 190, 245, 255), C2D_AlignRight);
-    DrawText(item, 305.0f, 22.0f, 0.35f, C2D_Color32(255, 255, 255, 255), C2D_AlignRight);
-
-    DrawText(sUi.game.gameMode == 3 ? "PLAYERS" : "TOP 5", 62.0f, 57.0f, 0.46f,
-             C2D_Color32(150, 205, 255, 255), C2D_AlignCenter);
-    for (size_t rank = 0; rank < MK64_BOTTOM_UI_STANDING_COUNT; ++rank) {
-        const bool available = rank < sUi.game.standingCount;
-        const int character = available ? sUi.game.standingCharacterIds[rank] : -1;
-        const int playerId = available ? sUi.game.standingPlayerIds[rank] : -1;
-        const float y = 83.0f + rank * 27.0f;
-        if (playerId == 0) {
-            C2D_DrawRectSolid(10.0f, y - 3.0f, 0.54f, 104.0f, 24.0f,
-                              C2D_Color32(70, 115, 165, 170));
+    constexpr size_t kVisibleStandings = 5;
+    for (size_t rank = 0; rank < kVisibleStandings && rank < sUi.game.standingCount; ++rank) {
+        const int character = sUi.game.standingCharacterIds[rank];
+        if (character < 0 || character >= 8) continue;
+        const float y = 43.0f + rank * 27.0f;
+        C2D_DrawRectSolid(7.0f, y, 0.48f, 26.0f, 26.0f, C2D_Color32(0, 0, 0, 220));
+        DrawTexture(sUi.raceHud.portraits[static_cast<size_t>(character)],
+                    7.0f, y, 26.0f, 26.0f, 0.6f);
+        DrawTexture(sUi.raceHud.portraitBorder, 7.0f, y, 26.0f, 26.0f, 0.64f);
+        DrawTexture(sUi.raceHud.standingRanks[rank], 37.0f, y + 6.0f,
+                    14.0f, 14.0f, 0.66f);
+        if (sUi.game.standingPlayerIds[rank] == 0 && sUi.selectionTriangle.initialized) {
+            DrawTexture(sUi.selectionTriangle, 54.0f, y + 10.0f, 10.0f, 6.0f, 0.67f);
         }
-        char position[8] = {};
-        std::snprintf(position, sizeof(position), "%lu", static_cast<unsigned long>(rank + 1U));
-        DrawText(position, 17.0f, y, 0.48f, C2D_Color32(255, 220, 70, 255));
-        DrawText(character >= 0 && character < 8 ? kCharacterNames[character] : "---",
-                 39.0f, y, 0.43f,
-                 character >= 0 && character < 8 ? kCharacterColors[character]
-                                                    : C2D_Color32(150, 150, 150, 255));
+    }
+
+    if (sUi.game.gameMode != 3) {
+        int rank = sUi.game.racers[0].rank;
+        if (rank < 0 || rank >= 8) rank = 0;
+        C2D_ImageTint placeTint = {};
+        C2D_PlainImageTint(&placeTint, C2D_Color32(255, 218, 65, 255), 1.0f);
+        DrawTexture(sUi.raceHud.places[static_cast<size_t>(rank)], 43.0f, 181.0f,
+                    112.0f, 56.0f, 0.68f, &placeTint);
     }
     DrawMinimap();
 }
 
 void DrawPausedPrompt() {
-    DrawRaceBackground(188.0f);
-    DrawPanel(56.0f, 76.0f, 208.0f, 88.0f);
-    DrawText("PAUSED", 160.0f, 87.0f, 0.68f, C2D_Color32(255, 225, 80, 255), C2D_AlignCenter);
-    DrawText("L  OPTIONS", 160.0f, 119.0f, 0.58f, C2D_Color32(255, 255, 255, 255), C2D_AlignCenter);
-    DrawText("BUTTON OR TOUCH", 160.0f, 145.0f, 0.36f, C2D_Color32(150, 195, 235, 255),
-             C2D_AlignCenter);
+    DrawRaceBackground(204.0f);
+    if (sUi.gameSelectOption.initialized) {
+        DrawTexture(sUi.gameSelectOption, 116.5f, 105.0f, 87.0f, 28.5f, 0.7f);
+    } else {
+        DrawText("L OPTION", 160.0f, 110.0f, 0.8f, C2D_Color32(255, 255, 255, 255),
+                 C2D_AlignCenter, 0.7f, true);
+    }
 }
 
 const char* TabName(OptionsTab tab) {
@@ -826,7 +1306,7 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
     switch (tab) {
         case OptionsTab::Game:
             *label = sUi.modalOpenedFromPause ? "RETURN TO PAUSE" : "CLOSE OPTIONS";
-            std::snprintf(value, valueSize, "A / TOUCH");
+            std::snprintf(value, valueSize, "A OR TOUCH");
             break;
         case OptionsTab::Screen:
             if (row == 0) {
@@ -859,7 +1339,7 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
                 std::snprintf(value, valueSize, "X%u  C-STICK", Mk64Settings3DSGetTurboMultiplier());
             } else {
                 *label = "MASTER VOLUME";
-                std::snprintf(value, valueSize, "%u%%", Mk64Settings3DSGetMasterVolumePercent());
+                std::snprintf(value, valueSize, "%u PCT", Mk64Settings3DSGetMasterVolumePercent());
             }
             break;
         case OptionsTab::Developer:
@@ -882,44 +1362,58 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
 void DrawOptions() {
     if (sUi.game.racing) DrawRaceBackground(205.0f); else DrawDimMenuBackground();
     C2D_DrawRectSolid(0.0f, 0.0f, 0.25f, kBottomWidth, kBottomHeight,
-                      C2D_Color32(1, 4, 10, 100));
+                      C2D_Color32(0, 0, 0, 82));
     if (sUi.optionLogo.initialized) {
         DrawTexture(sUi.optionLogo, 95.0f, 2.0f, 130.0f, 32.0f, 0.67f);
     } else {
-        DrawText("OPTION", 160.0f, 7.0f, 0.62f, C2D_Color32(255, 225, 75, 255),
-                 C2D_AlignCenter);
+        DrawText("OPTION", 160.0f, 7.0f, 0.95f, C2D_Color32(255, 225, 75, 255),
+                 C2D_AlignCenter, 0.67f, true);
     }
     for (int index = 0; index < static_cast<int>(OptionsTab::Count); ++index) {
         const bool selected = index == static_cast<int>(sUi.tab);
-        DrawPanel(index * 80.0f + 2.0f, kOptionsTabY, 76.0f, 28.0f, selected);
         DrawText(TabName(static_cast<OptionsTab>(index)), index * 80.0f + 40.0f,
-                 kOptionsTabY + 7.0f,
-                 index == 3 ? 0.34f : 0.4f,
-                 selected ? C2D_Color32(255, 225, 75, 255) : C2D_Color32(180, 200, 220, 255),
-                 C2D_AlignCenter);
+                 kOptionsTabY + 4.0f, index == 3 ? 0.5f : 0.58f,
+                 selected ? C2D_Color32(255, 225, 75, 255)
+                          : C2D_Color32(210, 220, 220, 230),
+                 C2D_AlignCenter, 0.72f, selected);
+        if (selected && sUi.selectionTriangle.initialized) {
+            DrawTexture(sUi.selectionTriangle, index * 80.0f + 34.0f, 55.0f,
+                        12.0f, 7.0f, 0.71f);
+        }
     }
+    C2D_DrawRectSolid(8.0f, 64.0f, 0.42f, 304.0f, 1.0f, C2D_Color32(255, 235, 150, 92));
 
     const uint8_t rows = RowCount(sUi.tab);
     for (uint8_t row = 0; row < rows; ++row) {
         const float y = kOptionsRowY + row * kOptionsRowStep;
-        DrawPanel(12.0f, y, 296.0f, 33.0f, row == sUi.selectedRow);
         const char* label = "";
         char value[48] = {};
         GetRowText(sUi.tab, row, &label, value, sizeof(value));
-        DrawText(label, 22.0f, y + 8.0f, 0.43f, C2D_Color32(235, 240, 248, 255));
-        DrawText(value, 298.0f, y + 8.0f, 0.39f, C2D_Color32(120, 215, 255, 255),
-                 C2D_AlignRight);
+        const bool selected = row == sUi.selectedRow;
+        if (selected && sUi.selectionTriangle.initialized) {
+            DrawTexture(sUi.selectionTriangle, 7.0f, y + 10.0f, 12.0f, 7.0f, 0.73f);
+        }
+        DrawText(label, 23.0f, y + 5.0f, 0.7f,
+                 selected ? C2D_Color32(255, 229, 79, 255)
+                          : C2D_Color32(238, 238, 230, 245),
+                 C2D_AlignLeft, 0.74f, selected);
+        DrawText(value, 304.0f, y + 6.0f, 0.62f,
+                 selected ? C2D_Color32(167, 255, 151, 255)
+                          : C2D_Color32(198, 222, 210, 240),
+                 C2D_AlignRight, 0.74f);
+        C2D_DrawRectSolid(22.0f, y + 29.0f, 0.44f, 282.0f, 1.0f,
+                          C2D_Color32(255, 255, 255, selected ? 75 : 35));
     }
-    DrawPanel(84.0f, 207.0f, 152.0f, 30.0f);
-    DrawText("B  BACK", 160.0f, 214.0f, 0.43f, C2D_Color32(220, 230, 240, 255), C2D_AlignCenter);
+    DrawText("B BACK", 160.0f, 214.0f, 0.68f, C2D_Color32(235, 238, 225, 255),
+             C2D_AlignCenter, 0.74f, true);
     DrawStatus();
 }
 
 void DrawDeveloperOverlay() {
     if (sUi.game.racing) DrawRaceBackground(216.0f); else DrawDimMenuBackground();
     C2D_DrawRectSolid(7.0f, 5.0f, 0.4f, 306.0f, 197.0f, C2D_Color32(0, 0, 0, 230));
-    DrawText("DEVELOPER OVERLAY", 160.0f, 10.0f, 0.56f, C2D_Color32(255, 215, 70, 255),
-             C2D_AlignCenter);
+    DrawText("DEVELOPER OVERLAY", 160.0f, 10.0f, 0.72f,
+             C2D_Color32(255, 215, 70, 255), C2D_AlignCenter, 0.8f, true);
 
     const struct mallinfo heap = mallinfo();
     const uint32_t buffered = Mk64Audio3DSBufferedFrames != nullptr ? Mk64Audio3DSBufferedFrames() : 0;
@@ -964,7 +1458,7 @@ void DrawDeveloperOverlay() {
                       static_cast<unsigned long>(activeWidth), aspect);
     } else {
         std::snprintf(lines[4].data(), lines[4].size(),
-                      "DISPLAY   %lu PX (%u PENDING)  %s",
+                      "DISPLAY   %lu PX  PENDING %u  %s",
                       static_cast<unsigned long>(activeWidth), configuredWidth, aspect);
     }
     std::snprintf(lines[5].data(), lines[5].size(), "MEM FREE  APP %luK  LIN %luK  VRAM %luK",
@@ -973,7 +1467,7 @@ void DrawDeveloperOverlay() {
                   static_cast<unsigned long>(vramSpaceFree() / 1024U));
     std::snprintf(lines[6].data(), lines[6].size(), "HEAP      USED %dK  FREE %dK", heap.uordblks / 1024,
                   heap.fordblks / 1024);
-    std::snprintf(lines[7].data(), lines[7].size(), "RENDER    TEX %lu/%lu  %luK  SH %lu",
+    std::snprintf(lines[7].data(), lines[7].size(), "RENDER    TEX %lu OF %lu  %luK  SH %lu",
                   static_cast<unsigned long>(liveTextures), static_cast<unsigned long>(textureSlots),
                   static_cast<unsigned long>(textureBytes / 1024U), static_cast<unsigned long>(shaders));
     std::snprintf(lines[8].data(), lines[8].size(), "AUDIO     BUF %lu  QUE %lu  DROP %lu",
@@ -987,7 +1481,7 @@ void DrawDeveloperOverlay() {
         std::snprintf(lines[11].data(), lines[11].size(), "INTERP    DISABLED");
     } else {
         std::snprintf(lines[11].data(), lines[11].size(),
-                      "INTERP    MID %lu RET %lu  LAST %lu/%lu",
+                      "INTERP    MID %lu RET %lu  LAST %lu OF %lu",
                       static_cast<unsigned long>(interpolatedFrames),
                       static_cast<unsigned long>(retainedFrames),
                       static_cast<unsigned long>(matchedMatrices),
@@ -995,36 +1489,26 @@ void DrawDeveloperOverlay() {
     }
     (void) clipBytes;
     for (size_t i = 0; i < lines.size(); ++i) {
-        DrawText(lines[i].data(), 15.0f, 35.0f + i * 13.8f, 0.36f,
-                 i == 2 ? C2D_Color32(120, 255, 145, 255) : C2D_Color32(210, 225, 240, 255));
+        DrawText(lines[i].data(), 15.0f, 35.0f + i * 13.8f, 0.52f,
+                 i == 2 ? C2D_Color32(120, 255, 145, 255)
+                        : C2D_Color32(218, 228, 225, 255));
     }
-    DrawPanel(84.0f, 207.0f, 152.0f, 30.0f);
-    DrawText("B  BACK", 160.0f, 214.0f, 0.43f, C2D_Color32(255, 225, 80, 255), C2D_AlignCenter);
+    DrawText("B BACK", 160.0f, 214.0f, 0.66f, C2D_Color32(255, 225, 80, 255),
+             C2D_AlignCenter, 0.82f, true);
 }
 
 void DrawTopFps(C3D_RenderTarget* topTarget) {
     if (topTarget == nullptr || !Mk64Settings3DSGetShowFpsEnabled()) return;
-    // Fast3D leaves its reverse-depth contents intact. Clear only depth so
-    // Citro2D's GEQUAL overlay is never hidden by scene geometry; preserve the
-    // completed game color buffer underneath.
-    C3D_FrameSplit(0);
-    C3D_RenderTargetClear(topTarget, C3D_CLEAR_DEPTH, 0, 0);
-    C2D_SceneBegin(topTarget);
     // Citro2D keeps a 400x240 logical projection for the top screen even when
     // Fast3D renders into the 800-wide high-density target.
     constexpr float topWidth = 400.0f;
-    constexpr float boxWidth = 82.0f;
-    C2D_DrawRectSolid(topWidth - boxWidth - 5.0f, 5.0f, 0.85f,
-                      boxWidth, 23.0f, C2D_Color32(0, 0, 0, 205));
     char fps[32] = {};
     std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.currentFps);
-    DrawText(fps, topWidth - 10.0f, 9.0f, 0.43f,
-             C2D_Color32(125, 255, 145, 255), C2D_AlignRight, 0.9f);
+    DrawText(fps, topWidth - 8.0f, 6.0f, 0.62f,
+             C2D_Color32(125, 255, 145, 255), C2D_AlignRight, 0.9f, true);
 }
 
 void DrawBottom() {
-    C2D_TargetClear(sUi.bottomTarget, C2D_Color32(0, 0, 0, 255));
-    C2D_SceneBegin(sUi.bottomTarget);
     if (Mk64Settings3DSGetOverlayEnabled()) {
         DrawDeveloperOverlay();
     } else if (sUi.modalOpen) {
@@ -1041,6 +1525,46 @@ void DrawBottom() {
     }
 }
 
+void PrepareC2DBatch() {
+    // Fast3D can leave all six TEV stages, the TEV buffer update mask and
+    // alpha tests configured for an N64 combiner. Reset that inherited state
+    // before Citro2D installs its own shader and batching state. In particular,
+    // this keeps I4/IA4 alpha masks from becoming solid colored quads.
+    C3D_TexEnvBufUpdate(C3D_Both, 0);
+    C3D_TexEnvBufColor(0xFFFFFFFF);
+    for (int stage = 0; stage < 6; ++stage) C3D_TexEnvInit(C3D_GetTexEnv(stage));
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA,
+                   GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C2D_Prepare();
+}
+
+void DrawBottomBatch() {
+    // Clear before any Citro2D objects are queued. C2D_TargetClear after a top
+    // batch used to split that pending batch and could invalidate its texture
+    // state on hardware.
+    C3D_FrameSplit(0);
+    C3D_RenderTargetClear(sUi.bottomTarget, C3D_CLEAR_ALL, C2D_Color32(0, 0, 0, 255), 0);
+    PrepareC2DBatch();
+    C2D_SceneBegin(sUi.bottomTarget);
+    DrawBottom();
+    C2D_Flush();
+}
+
+void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
+    if (topTarget == nullptr || !Mk64Settings3DSGetShowFpsEnabled()) return;
+    // Preserve the completed game color buffer and clear only reverse-depth so
+    // the overlay cannot be hidden behind scene geometry.
+    C3D_FrameSplit(0);
+    C3D_RenderTargetClear(topTarget, C3D_CLEAR_DEPTH, 0, 0);
+    PrepareC2DBatch();
+    C2D_SceneBegin(topTarget);
+    DrawTopFps(topTarget);
+    C2D_Flush();
+}
+
 } // namespace
 
 extern "C" bool Mk64BottomUI3DSInit() {
@@ -1053,11 +1577,11 @@ extern "C" bool Mk64BottomUI3DSInit() {
         return false;
     }
     C3D_RenderTargetSetOutput(sUi.bottomTarget, GFX_BOTTOM, GFX_LEFT, kTransferFlags);
-    sUi.textBuffer = C2D_TextBufNew(kTextGlyphCapacity);
-    if (sUi.textBuffer == nullptr) {
+    if (!LoadFontAtlas()) {
         C3D_RenderTargetDelete(sUi.bottomTarget);
         sUi.bottomTarget = nullptr;
         C2D_Fini();
+        sUi = {};
         return false;
     }
     C2D_Prepare();
@@ -1070,10 +1594,15 @@ extern "C" bool Mk64BottomUI3DSInit() {
     LoadTexture(kOptionLogoResource, sUi.optionLogo);
     LoadTexture(kGameSelectOptionResource, sUi.gameSelectOption);
     LoadTexture(kGameSelectDataResource, sUi.gameSelectData);
-    if (sUi.game.racing) {
-        LoadTexture(sUi.game.coursePreviewTexture, sUi.coursePreview);
-        LoadTexture(sUi.game.minimapTexture, sUi.minimap);
-    }
+    LoadTexture(kSelectionTriangleResource, sUi.selectionTriangle);
+    // Preload the complete, bounded lower HUD while menus are starting. No
+    // archive reads or C3D allocations are then needed when a race begins,
+    // an item changes, or the standings reorder.
+    LoadRaceHudTextures();
+    // Stage the selected course art in menus so entering a race never has to
+    // allocate or decode these lower-screen textures on its first frame.
+    LoadTexture(sUi.game.coursePreviewTexture, sUi.coursePreview);
+    LoadTexture(sUi.game.minimapTexture, sUi.minimap);
     Mk64GameState3DSSetTopHudEnabled(Mk64Settings3DSGetTopHudEnabled());
     return true;
 }
@@ -1087,13 +1616,15 @@ extern "C" void Mk64BottomUI3DSShutdown() {
     C3D_FrameSync();
     Mk64GameState3DSApplyTurbo(false, 1);
     DrainRetiredTextures();
+    DeleteRaceHudTextures();
     DeleteTexture(sUi.minimap);
     DeleteTexture(sUi.coursePreview);
     DeleteTexture(sUi.menuBackground);
     DeleteTexture(sUi.gameSelectData);
     DeleteTexture(sUi.gameSelectOption);
     DeleteTexture(sUi.optionLogo);
-    if (sUi.textBuffer != nullptr) C2D_TextBufDelete(sUi.textBuffer);
+    DeleteTexture(sUi.selectionTriangle);
+    DeleteFontAtlas();
     if (sUi.bottomTarget != nullptr) C3D_RenderTargetDelete(sUi.bottomTarget);
     C2D_Fini();
     sUi = {};
@@ -1108,23 +1639,23 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
     }
     const BaseView oldView = sUi.view;
     const bool wasPaused = sUi.game.paused;
+    const int32_t oldMenuSelection = sUi.game.menuSelection;
     const size_t oldTrack = sUi.game.trackIndex;
     const char* oldBackground = sUi.game.mainBackgroundTexture;
     Mk64GameState3DSGetBottomUISnapshot(&sUi.game);
     sUi.view = GetBaseView(sUi.game);
-    if (oldView != sUi.view || oldTrack != sUi.game.trackIndex ||
+    if (oldView != sUi.view || oldMenuSelection != sUi.game.menuSelection ||
+        oldTrack != sUi.game.trackIndex ||
         oldBackground != sUi.game.mainBackgroundTexture) {
         sUi.bottomDirty = true;
     }
     LoadTexture(sUi.game.mainBackgroundTexture, sUi.menuBackground);
-    if (sUi.game.racing) {
-        // The selected track usually changes while still in Map Select, before
-        // the RACING edge. Compare the actual resource names every frame so a
-        // second race can never retain the previous course art. LoadTexture's
-        // strcmp fast path makes the steady-state call allocation-free.
-        LoadTexture(sUi.game.coursePreviewTexture, sUi.coursePreview);
-        LoadTexture(sUi.game.minimapTexture, sUi.minimap);
-    }
+    // The selected track usually changes while still in Map Select, before
+    // the RACING edge. Compare the actual resource names every frame so a
+    // second race can never retain the previous course art. LoadTexture's
+    // strcmp fast path makes the steady state allocation- and I/O-free.
+    LoadTexture(sUi.game.coursePreviewTexture, sUi.coursePreview);
+    LoadTexture(sUi.game.minimapTexture, sUi.minimap);
 
     Mk64DiagnosticsInput3DS input = {};
     if (!Mk64Diagnostics3DSConsumeInput(&input)) {
@@ -1175,12 +1706,12 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
             OpenOptions(true);
             openedThisFrame = true;
         } else if ((input.downMask & KEY_TOUCH) != 0) {
-            if (sUi.game.gameSelectVisible && PointInside(input.touchX, input.touchY, 22, 100, 132, 58)) {
+            if (sUi.game.gameSelectVisible && PointInside(input.touchX, input.touchY, 38, 96, 100, 49)) {
                 OpenOptions(false);
                 openedThisFrame = true;
-            } else if (sUi.game.gameSelectVisible && PointInside(input.touchX, input.touchY, 166, 100, 132, 58)) {
+            } else if (sUi.game.gameSelectVisible && PointInside(input.touchX, input.touchY, 182, 96, 100, 49)) {
                 sUi.injectedGameKeys |= KEY_R;
-            } else if (sUi.game.paused && PointInside(input.touchX, input.touchY, 56, 76, 208, 88)) {
+            } else if (sUi.game.paused && PointInside(input.touchX, input.touchY, 108, 96, 104, 48)) {
                 OpenOptions(true);
                 openedThisFrame = true;
             }
@@ -1225,14 +1756,11 @@ extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
     UpdateFpsCounter();
     const bool drawTopFps = existingTopTarget != nullptr && Mk64Settings3DSGetShowFpsEnabled();
     if (!sUi.bottomDirty && !drawTopFps) return;
-    C2D_Prepare();
-    C2D_TextBufClear(sUi.textBuffer);
-    DrawTopFps(static_cast<C3D_RenderTarget*>(existingTopTarget));
     if (sUi.bottomDirty) {
-        DrawBottom();
+        DrawBottomBatch();
         sUi.bottomDirty = false;
     }
-    C2D_Flush();
+    DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
 }
 
 extern "C" uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t heldKeys) {

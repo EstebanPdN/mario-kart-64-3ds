@@ -17,6 +17,7 @@ enum class Mk64O2rValidationError : std::uint8_t {
     InvalidPath,
     OpenFailed,
     EmptyArchive,
+    IncompleteArchive,
     MissingVersion,
     InvalidVersion,
     WrongGameVersion,
@@ -46,6 +47,8 @@ inline const char* Mk64O2rValidationMessage(Mk64O2rValidationError error) {
             return "ZIP directory could not be read";
         case Mk64O2rValidationError::EmptyArchive:
             return "archive contains no files";
+        case Mk64O2rValidationError::IncompleteArchive:
+            return "archive contains fewer entries than a complete MK64 extraction";
         case Mk64O2rValidationError::MissingVersion:
             return "archive version entry is missing";
         case Mk64O2rValidationError::InvalidVersion:
@@ -67,6 +70,10 @@ inline const char* Mk64O2rValidationMessage(Mk64O2rValidationError error) {
 namespace detail {
 
 constexpr std::size_t kOtrHeaderSize = 64;
+// The corrected bounded-memory extractor emits 32,445 canonical resources.
+// Older complete archives contain two redundant legacy vertex aliases and
+// therefore also pass this lower bound.
+constexpr std::size_t kMinimumExpectedEntryCount = 32445;
 
 constexpr std::uint32_t MakeResourceType(char a, char b, char c, char d) {
     return (static_cast<std::uint32_t>(a) << 24) | (static_cast<std::uint32_t>(b) << 16) |
@@ -122,7 +129,8 @@ inline bool ReadU32(const std::vector<std::uint8_t>& bytes, std::size_t offset, 
 
 } // namespace detail
 
-inline Mk64O2rValidationResult ValidateMk64O2rArchive(std::string_view archivePath) {
+inline Mk64O2rValidationResult ValidateMk64O2rArchive(std::string_view archivePath,
+                                                      bool verifyAllEntries = false) {
     Mk64O2rValidationResult validation{};
     if (archivePath.empty()) {
         validation.error = Mk64O2rValidationError::InvalidPath;
@@ -138,6 +146,11 @@ inline Mk64O2rValidationResult ValidateMk64O2rArchive(std::string_view archivePa
         validation.entryCount = archive.Entries().size();
         if (validation.entryCount == 0) {
             validation.error = Mk64O2rValidationError::EmptyArchive;
+            return validation;
+        }
+        if (validation.entryCount < detail::kMinimumExpectedEntryCount) {
+            validation.error = Mk64O2rValidationError::IncompleteArchive;
+            validation.component = "archive entry set";
             return validation;
         }
 
@@ -185,6 +198,19 @@ inline Mk64O2rValidationResult ValidateMk64O2rArchive(std::string_view archivePa
                 validation.error = Mk64O2rValidationError::InvalidRequiredResource;
                 validation.component = required.component;
                 return validation;
+            }
+        }
+
+        if (verifyAllEntries) {
+            // A freshly extracted archive is read back completely before its
+            // atomic rename. miniz verifies each stored payload and CRC, so an
+            // SD write error cannot be mistaken for a successful install.
+            for (std::size_t entryIndex = 0; entryIndex < validation.entryCount; ++entryIndex) {
+                if (archive.ReadEntryByIndex(entryIndex, &bytes) != O2rReadResult::Ok) {
+                    validation.error = Mk64O2rValidationError::InvalidRequiredResource;
+                    validation.component = "archive payload";
+                    return validation;
+                }
             }
         }
 

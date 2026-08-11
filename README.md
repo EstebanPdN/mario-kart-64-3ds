@@ -18,29 +18,56 @@ The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O
 interface, 3DS input, NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game
 remains a work in progress and is not yet a stable release.
 
-The v0.18 pre-release adds a native bottom-screen interface using textures loaded from the owner-generated local O2R
-archive. Game Select mirrors the `L Option` and `R Data` actions. Options captures controller and touch input without
-changing the top-screen selection and provides Game, Screen, Gameplay, and Developer tabs. During a race, the bottom
-screen uses the selected course preview as a cropped background and displays time, lap, current item, the leading five
-racers, and the minimap. Pausing automatically replaces that race HUD with Options. Settings are stored locally in
-`sd:/3ds/MK64/mk64-3ds.cfg`.
+The v0.19 pre-release rebuilds the native bottom-screen interface with the game's own font and HUD textures. Game
+Select shows only the smaller stock `L Option` and `R Data` entries over a correctly oriented, aspect-filled menu
+background at roughly 20% visibility. Options captures controller and touch input without changing the top-screen
+selection and provides Game, Screen, Gameplay, and Developer tabs without the earlier blue frames. During a race, the
+bottom screen uses the selected course preview as a correctly oriented crop at roughly 20% visibility and reproduces
+the stock item, time, lap, leading-five ranking, current-place, and minimap elements. The duplicate top HUD is off by
+default and remains selectable. Pausing automatically replaces the race HUD with Options. Settings are stored locally
+in `sd:/3ds/MK64/mk64-3ds.cfg`.
 
-The renderer now implements the grayscale-tint state used by Game Select, Player Select, and Course Select, and it
-restores the opaque black tiles behind character portraits. It batches packed-vertex cache flushes, avoids duplicate
-texture-resource lookups and wrapper allocations on hot hits, and expands the bounded texture cache for animated kart
-frames. New 3DS midpoint interpolation uses fixed-capacity recording and lookup tables instead of the unbounded desktop
-recorder or per-matrix map allocations.
+The renderer now preserves the red, green, and blue-purple filters used by Game Select, Player Select, and Course
+Select even when an N64 combiner leaves too few PICA200 stages for the exact grayscale pass. A clean 3DS build also
+restores the stock dark treatment behind unselected character portraits. The FPS counter uses the same native font,
+has no black backing box, and keeps fixed storage so race frames cannot corrupt its text.
 
-Mario Kart 64's simulation remains 30 Hz. At 400 pixels on New Nintendo 3DS, v0.18 can present a bounded
-matrix-interpolated midpoint between simulation key frames. Old Nintendo 3DS and the 800-pixel quality mode present
-key frames at a 30 Hz target. These are implementation targets, not measured guarantees: sustained 60 FPS and 30 FPS
-are not claimed without representative physical-hardware captures.
+Mario Kart 64's simulation remains 30 Hz. At the default 400-pixel setting on New Nintendo 3DS, v0.19 can present a
+bounded matrix-interpolated midpoint between simulation key frames. The adaptive presenter skips that extra decode and
+uses a retained image when frame time, texture uploads, resource loading, Citro3D, or the audio safety margin indicates
+pressure; the mandatory key frame is never skipped. Old Nintendo 3DS and the 800-pixel quality mode present key frames
+at a 30 Hz target. These are implementation targets, not measured guarantees: sustained 60 FPS and 30 FPS are not
+claimed without representative physical-hardware captures.
 
-First-run extraction now leaves the 8 MiB game arena unreserved until game data is ready and avoids duplicating
-read-only Torch input buffers. The SD-card installer log mirrors progress and multi-line extractor diagnostics, adds
-per-YAML stages and real heap/linear-memory checkpoints, and closes an interrupted O2R writer before validating its
-partial output. These changes compile successfully, but their visual result, extraction completion, and performance
-still require physical Nintendo 3DS testing.
+Race setup now preloads only display-list texture dependencies within fixed 1 MiB/2,048-entry limits and at most the
+eight current kart frames. Indexed O2R reads, constant-time prefetch deduplication, buffered diagnostics, and aggregate
+telemetry remove repeated name scans and hot-path SD logging. Audio synthesis uses an auxiliary ARM11 core when the
+model permits it, with a safe synchronous fallback. Its approximately 2.54 MiB sound graph is resolved once before
+graphics start, and NDSP queue access and remaining-sample accounting are synchronized so rendering cannot race the
+mixer or mistake a nearly consumed buffer for a full one.
+
+These choices were informed by a source-level review of
+[Super Mario 64 3DS Port Ultimate](https://github.com/Epic0522/Super-Mario-64-3ds-port---Ultimate): New-3DS CPU/L2
+configuration, 400/800-pixel display paths, fixed memory, auxiliary-core audio work, fast cache flushes, and conservative
+frame pacing were adapted where their invariants fit this port. Its enhanced RSPA and game-specific renderer code were
+not copied.
+
+First-run extraction now processes each large kart metadata file in bounded 64-texture chunks. Each texture is written
+to the SD-backed O2R immediately and released before the next chunk, instead of building duplicate full YAML trees and
+retaining thousands of parsed textures in RAM. The ZIP central directory is spooled separately on the SD card, parsed
+payloads and address indices are released after their last consumer, and finished audio/decompression state is freed
+before the kart phase. The corrected extractor emits 32,445 canonical entries; older complete archives with two unused
+legacy vertex aliases remain accepted. A new archive must meet that completeness floor and every payload is read back
+with CRC verification before the temporary file is atomically finalized. Non-resumable partial archives and abandoned
+central-directory spools are removed before a retry, legacy v0.18 partial quarantines are reclaimed, and diagnostic
+quarantine now keeps only the newest rejected archive of each class instead of growing without a bound.
+
+During extraction, lid-close sleep and HOME suspension are disabled so the console can continue unattended; display
+refreshes stop while the lid is closed. After the generated archive passes validation and is moved into place, the app
+requests a persistent blue notification LED and restores the previous sleep policy. The LED is best-effort on 3DSX
+environments that do not grant the MCU service. Keep the console charged for a long first-run extraction. These changes
+compile successfully, but complete extraction, lid behavior, and the notification LED still require physical Nintendo
+3DS testing.
 
 Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
 3DS and New Nintendo 3DS performance still require real-hardware profiling.
@@ -63,8 +90,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.18.3dsx
-build-3ds/game/mk64-3ds-v0.18.cia
+build-3ds/game/mk64-3ds-game-v0.19.3dsx
+build-3ds/game/mk64-3ds-v0.19.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -87,15 +114,18 @@ sd:/3ds/MK64/baserom.us.z64
 ```
 
 On first boot, the 3DS build checks the ROM, copies its public extraction metadata into the local MK64 folder,
-and shows a preparation screen while it writes the O2R directly to the SD card. If extraction succeeds, it creates:
+and shows a preparation screen while it writes the O2R directly to the SD card. Large kart files are streamed in
+bounded chunks, so completed texture data does not remain in RAM. You may close the lid during this step; the app
+temporarily prevents sleep and stops display refresh while extraction continues. If extraction succeeds, it creates:
 
 ```text
 sd:/3ds/MK64/mk64.o2r
 ```
 
-The final archive is only moved into place after it closes successfully, so an interrupted installation is retried on
-the next launch. Later launches reuse that generated archive. This release does not embed or redistribute the ROM,
-generated O2R archive, or extracted game data.
+The final archive is only moved into place after it closes, meets the 32,445-entry completeness floor and required-
+resource checks, and every present payload passes readback/CRC validation, so an interrupted installation is retried
+on the next launch. A blue notification LED is requested after successful finalization. Later launches reuse that
+generated archive. This release does not embed or redistribute the ROM, generated O2R archive, or extracted game data.
 
 If preparation stops, copy the local diagnostic file from the SD card before retrying:
 
@@ -111,9 +141,11 @@ details.
 During this first-run step the top screen shows the bundled loading image with an overlaid progress bar, while the
 bottom screen mirrors the live installer output. The game memory arena is reserved after game-data preparation,
 the ROM is loaded after the Torch configuration is parsed, and the 3DS O2R writer spools the ZIP central directory to
-the SD card instead of keeping it in RAM. The 3DS cartridge and read-only binary readers borrow their input buffers,
-Torch hash-cache generation is disabled for this one-shot installer, and memory checkpoints are included in the local
-installation log. Runtime memory is based on the 64 MiB Old 3DS application limit; the renderer uses the vanilla
+the SD card instead of keeping it in RAM. Large kart YAML files are parsed in 64-asset chunks, parsed audio state is
+released before those chunks begin, and decompression caches are destroyed at each chunk boundary. The 3DS cartridge
+and read-only binary readers borrow their input buffers, Torch hash-cache generation is disabled for this one-shot
+installer, and memory checkpoints are included in the local installation log. Runtime memory is based on the 64 MiB
+Old 3DS application limit; the renderer uses the vanilla
 archive's actual texture-size requirements rather than reserving a 1024x1024 upload surface.
 
 Install the CIA with your normal homebrew installer, or place the 3DSX in a Homebrew Launcher application folder.

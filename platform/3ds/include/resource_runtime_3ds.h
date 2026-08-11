@@ -24,6 +24,10 @@ typedef struct Mk64TextureResource3DS {
 /* Resolve texture bytes and metadata with one archive/cache lookup. */
 bool Mk64Resource3DSGetTexture(const char* name, Mk64TextureResource3DS* outTexture);
 
+/* Query serialized entry size without reading or caching its payload. */
+bool Mk64Resource3DSGetArchiveEntrySizeByName(const char* name, size_t* byteCount);
+bool Mk64Resource3DSGetArchiveEntrySizeByCrc(uint64_t crc, size_t* byteCount);
+
 #ifdef __cplusplus
 }
 #endif

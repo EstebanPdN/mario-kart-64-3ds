@@ -170,7 +170,7 @@ index 9f38169..4c63daa 100644
  };
  } // namespace LUS
 diff --git a/src/Companion.cpp b/src/Companion.cpp
-index a881533..8c60316 100644
+index a881533..2171891 100644
 --- a/src/Companion.cpp
 +++ b/src/Companion.cpp
 @@ -12,6 +12,27 @@
@@ -201,11 +201,20 @@ index a881533..8c60316 100644
  #include "factories/GenericArrayFactory.h"
  #include "factories/VtxFactory.h"
  #include "factories/MtxFactory.h"
-@@ -128,6 +149,16 @@ static std::string GetTypeNode(YAML::Node& node) {
+@@ -128,6 +149,58 @@ static std::string GetTypeNode(YAML::Node& node) {
  
  Companion* Companion::Instance;
  
-+Companion::~Companion() {
++Companion::~Companion() noexcept {
++    // Decompression buffers are process-global in Torch. Release them before
++    // any other extractor state so an exception cannot strand several MiB
++    // until application exit or contaminate a retry in the same process.
++    Decompressor::ClearCache();
++#ifdef NAUDIO_SUPPORT
++    delete AudioManager::Instance;
++    AudioManager::Instance = nullptr;
++    AudioContext::Reset();
++#endif
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +    // Process() owns the archive writer. Destroy it even when a factory throws
 +    // so stdio handles are closed before the installer validates or moves the
@@ -215,11 +224,43 @@ index a881533..8c60316 100644
 +#endif
 +}
 +
++bool Companion::ExportBinaryResult(ParseResultData& result) {
++    if(!result.data.has_value()) {
++        return false;
++    }
++
++    const auto factory = this->GetFactory(result.type);
++    if(!factory.has_value()) {
++        throw std::runtime_error("No factory available while exporting binary asset '" + result.name + "'");
++    }
++    const auto exporter = factory->get()->GetExporter(ExportType::Binary);
++    if(!exporter.has_value()) {
++        return false;
++    }
++    if(this->gCurrentWrapper == nullptr) {
++        throw std::runtime_error("Binary archive writer is unavailable while exporting '" + result.name + "'");
++    }
++
++    std::ostringstream stream;
++    auto data = result.data.value();
++    exporter->get()->Export(stream, data, result.name, result.node, &result.name);
++    auto serialized = stream.str();
++    std::vector<char> binaryData(serialized.begin(), serialized.end());
++    this->gCurrentWrapper->AddFile(result.name, std::move(binaryData));
++
++    for(auto& entry : this->gCompanionFiles) {
++        auto output = (this->gCurrentDirectory / entry.first).string();
++        std::replace(output.begin(), output.end(), '\\', '/');
++        this->gCurrentWrapper->AddFile(output, std::move(entry.second));
++    }
++    this->gCompanionFiles.clear();
++    return true;
++}
++
  void Companion::Init(const ExportType type) {
  
      spdlog::set_level(spdlog::level::debug);
-@@ -383,13 +414,22 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
- 
+@@ -384,11 +457,25 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
                      this->gCurrentFile = externalFileName;
                      this->gCurrentDirectory = std::filesystem::relative(externalFileName, this->gAssetPath).replace_extension("");
  
@@ -232,16 +273,21 @@ index a881533..8c60316 100644
                      YAML::Node root = YAML::LoadFile(externalFileName);
  
                      if (!this->gProcessedFiles.contains(this->gCurrentFile)) {
-                         ProcessFile(root);
+-                        ProcessFile(root);
++                        ProcessFile(root, true);
                          this->gProcessedFiles.insert(this->gCurrentFile);
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +                        Mk64InstallLogWrite("Torch: completed dependent YAML.");
 +#endif
++                    } else {
++                        // Binary export discards parsed data once it has been
++                        // written to SD. Rebuild only the compact address index
++                        // when a later parent needs this already-written file.
++                        this->IndexAddressNodes(root, false);
                      }
  
                      SPDLOG_INFO("Finishing processing of file: {}", currentFile);
- 
-@@ -507,6 +547,13 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
+@@ -507,6 +594,13 @@ void Companion::ParseCurrentFileConfig(YAML::Node node) {
  }
  
  void Companion::ParseHash() {
@@ -255,7 +301,7 @@ index a881533..8c60316 100644
      const auto out = this->gDestinationDirectory / "torch.hash.yml";
  
      if(fs::exists(out)) {
-@@ -514,6 +561,7 @@ void Companion::ParseHash() {
+@@ -514,6 +608,7 @@ void Companion::ParseHash() {
      } else {
          this->gHashNode = YAML::Node();
      }
@@ -263,7 +309,7 @@ index a881533..8c60316 100644
  }
  
  std::string ExportTypeToString(ExportType type) {
-@@ -530,6 +578,12 @@ std::string ExportTypeToString(ExportType type) {
+@@ -530,6 +625,12 @@ std::string ExportTypeToString(ExportType type) {
  
  bool Companion::NodeHasChanges(const std::string& path) {
  
@@ -276,23 +322,264 @@ index a881533..8c60316 100644
      if(this->gConfig.modding) {
          return true;
      }
-@@ -734,12 +788,13 @@ void Companion::ProcessFile(YAML::Node root) {
-                 stream.clear();
-                 exporter->get()->Export(stream, data, result.name, result.node, &result.name);
-                 auto data = stream.str();
+@@ -608,7 +709,186 @@ void Companion::ProcessTables(YAML::Node& rom) {
+     }
+ }
+ 
+-void Companion::ProcessFile(YAML::Node root) {
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++bool Companion::ShouldStreamKartFile(const std::string& path) const {
++    if(this->gConfig.exporterType != ExportType::Binary) {
++        return false;
++    }
++
++    const fs::path yamlPath(path);
++    const std::string filename = yamlPath.filename().string();
++    return filename.ends_with("_kart.yml") && yamlPath.parent_path().filename() == "karts" &&
++           yamlPath.parent_path().parent_path().filename() == "textures";
++}
++
++void Companion::ProcessStreamedKartFile(const std::string& path) {
++    constexpr size_t kAssetsPerChunk = 64;
++    constexpr size_t kExpectedAssetsPerKart = 2345;
++
++    std::ifstream input(path);
++    if(!input.is_open()) {
++        throw std::runtime_error("Could not open streamed kart metadata: " + path);
++    }
++
++    this->gConfig.segment.local.clear();
++    this->gFileHeader.clear();
++    this->gCurrentPad = 0;
++    this->gCurrentVram = std::nullopt;
++    this->gCurrentVirtualPath.clear();
++    this->gCurrentSegmentNumber = 0;
++    this->gCurrentCompressionType = CompressionType::None;
++    this->gCurrentFileOffset = 0;
++    this->gTables.clear();
++    this->gCurrentExternalFiles.clear();
++    this->gManualSegments.clear();
++    GFXDOverride::ClearVtx();
++
++    std::string currentKey;
++    std::string currentBlock;
++    std::string chunkYaml;
++    size_t pendingAssets = 0;
++    size_t processedAssets = 0;
++    size_t processedChunks = 0;
++    bool configParsed = false;
++
++    const auto processChunk = [&]() {
++        if(pendingAssets == 0) {
++            return;
++        }
++
++        YAML::Node chunkRoot = YAML::Load(chunkYaml);
++        if(!chunkRoot.IsMap() || chunkRoot.size() != pendingAssets) {
++            throw std::runtime_error("Streamed kart metadata chunk did not preserve every top-level asset");
++        }
++
++        size_t chunkAssets = 0;
++        for(auto asset = chunkRoot.begin(); asset != chunkRoot.end(); ++asset) {
++            const std::string entryName = asset->first.as<std::string>();
++            auto assetNode = asset->second;
++            if(GetTypeNode(assetNode) != "TEXTURE" || !assetNode["offset"] ||
++               (assetNode["tlut"] && assetNode["colors"])) {
++                throw std::runtime_error("Streamed kart metadata contains an unsupported asset: " + entryName);
++            }
++
++            if(this->gCurrentFileOffset) {
++                const auto offset = assetNode["offset"].as<uint32_t>();
++                if(!IS_SEGMENTED(offset)) {
++                    assetNode["offset"] = (this->gCurrentSegmentNumber << 24) | offset;
++                }
++            }
++            if(!this->gCurrentVirtualPath.empty()) {
++                assetNode["path"] = this->gCurrentVirtualPath;
++            }
++
++            std::string output = (this->gCurrentDirectory / entryName).string();
++            std::replace(output.begin(), output.end(), '\\', '/');
++            this->gConfig.segment.temporal.clear();
++            auto result = this->ParseNode(assetNode, output);
++            if(!result.has_value() || !this->ExportBinaryResult(result.value())) {
++                throw std::runtime_error("Streamed kart texture could not be exported: " + entryName);
++            }
++            ++chunkAssets;
++            ++processedAssets;
++        }
++
++        if(chunkAssets != pendingAssets) {
++            throw std::runtime_error("Streamed kart metadata chunk ended with an unexpected asset count");
++        }
++
++        chunkRoot = YAML::Node();
++        Decompressor::ClearCache();
++        ++processedChunks;
++        Mk64InstallLogWritef("Torch: streamed kart chunk %zu (%zu/%zu textures written to SD).",
++                             processedChunks, processedAssets, kExpectedAssetsPerKart);
++        if((processedChunks % 8) == 0) {
++            Mk64LogApplicationMemory("streamed kart extraction");
++        }
++        chunkYaml.clear();
++        pendingAssets = 0;
++    };
++
++    const auto finishBlock = [&]() {
++        if(currentKey.empty()) {
++            return;
++        }
++
++        if(currentKey == ":config") {
++            if(configParsed || pendingAssets != 0 || processedAssets != 0) {
++                throw std::runtime_error("Streamed kart metadata has a misplaced or duplicate :config block");
++            }
++            YAML::Node configRoot = YAML::Load(currentBlock);
++            if(!configRoot.IsMap() || configRoot.size() != 1 || !configRoot[":config"]) {
++                throw std::runtime_error("Streamed kart metadata has an invalid :config block");
++            }
++            const YAML::Node config = configRoot[":config"];
++            if(config["external_files"]) {
++                throw std::runtime_error("Streamed kart metadata cannot contain external YAML dependencies");
++            }
++            this->ParseCurrentFileConfig(config);
++            configRoot = YAML::Node();
++            configParsed = true;
++        } else {
++            if(!configParsed) {
++                throw std::runtime_error("Streamed kart metadata must begin with :config");
++            }
++            chunkYaml.append(currentBlock);
++            ++pendingAssets;
++            if(pendingAssets == kAssetsPerChunk) {
++                processChunk();
++            }
++        }
++
++        currentKey.clear();
++        currentBlock.clear();
++    };
++
++    std::string inputLine;
++    while(std::getline(input, inputLine)) {
++        const bool isTopLevel = !inputLine.empty() && inputLine.front() != ' ' && inputLine.front() != '\t' &&
++                                inputLine.front() != '#';
++        if(isTopLevel) {
++            finishBlock();
++            const size_t keyEnd = inputLine.find_last_not_of(" \t\r");
++            if(keyEnd == std::string::npos || inputLine[keyEnd] != ':') {
++                throw std::runtime_error("Streamed kart metadata contains a non-mapping top-level line");
++            }
++            currentKey = inputLine.substr(0, keyEnd);
++        } else if(currentKey.empty()) {
++            const size_t content = inputLine.find_first_not_of(" \t\r");
++            if(content != std::string::npos && inputLine[content] != '#') {
++                throw std::runtime_error("Streamed kart metadata contains content before :config");
++            }
++            continue;
++        }
++        currentBlock.append(inputLine);
++        currentBlock.push_back('\n');
++    }
++    if(input.bad()) {
++        throw std::runtime_error("Could not finish reading streamed kart metadata: " + path);
++    }
++
++    finishBlock();
++    processChunk();
++    if(!configParsed || processedAssets != kExpectedAssetsPerKart) {
++        throw std::runtime_error("Streamed kart metadata did not contain the expected 2345 textures");
++    }
++
++    this->gParseResults.erase(this->gCurrentFile);
++    this->gWriteMap.erase(this->gCurrentFile);
++    this->gAddrMap.erase(this->gCurrentFile);
++    Decompressor::ClearCache();
++    malloc_trim(0);
++    Mk64InstallLogWritef("Torch: streamed kart YAML completed in %zu chunks with %zu textures.",
++                         processedChunks, processedAssets);
++    Mk64LogApplicationMemory("streamed kart completion");
++}
++#endif
++
++void Companion::IndexAddressNodes(YAML::Node& root, const bool bindAudioSamples) {
++    this->gCurrentSegmentNumber = 0;
++    this->gCurrentFileOffset = 0;
++    this->gCurrentCompressionType = CompressionType::None;
++
+     // Set compressed file offsets and compression type
+     if (auto segments = root[":config"]["segments"]) {
+         if (segments.IsSequence() && segments.size() > 0) {
+@@ -625,15 +905,21 @@ void Companion::ProcessFile(YAML::Node root) {
+         }
+     }
+ 
++    auto& addressEntries = this->gAddrMap[this->gCurrentFile];
++    addressEntries.clear();
++
+     for(auto asset = root.begin(); asset != root.end(); ++asset){
+         auto node = asset->second;
+         auto entryName = asset->first.as<std::string>();
+         auto output = (this->gCurrentDirectory / entryName).string();
+         std::replace(output.begin(), output.end(), '\\', '/');
+ 
+-        if(node["type"]){
++        if(bindAudioSamples && node["type"]){
+             const auto type = GetTypeNode(node);
+             if(type == "NAUDIO:V0:SAMPLE"){
++                if(AudioManager::Instance == nullptr) {
++                    throw std::runtime_error("Legacy audio state is unavailable while indexing a sample");
++                }
+                 AudioManager::Instance->bind_sample(node, output);
+             }
+         }
+@@ -652,8 +938,12 @@ void Companion::ProcessFile(YAML::Node root) {
+             node["path"] = gCurrentVirtualPath;
+         }
+ 
+-        this->gAddrMap[this->gCurrentFile][node["offset"].as<uint32_t>()] = std::make_tuple(output, node);
++        addressEntries[node["offset"].as<uint32_t>()] = std::make_tuple(output, node);
+     }
++}
++
++void Companion::ProcessFile(YAML::Node root, const bool retainAddressMapForCaller) {
++    this->IndexAddressNodes(root, true);
+ 
+     // Stupid hack because the iteration broke the assets
+     root = YAML::LoadFile(this->gCurrentFile);
+@@ -674,6 +964,11 @@ void Companion::ProcessFile(YAML::Node root) {
+         this->ParseCurrentFileConfig(root[":config"]);
+     }
+ 
++    // These dependency indices must remain alive through the complete parent
++    // parse/export pass. They are compact YAML address maps, not parsed asset
++    // payloads, and are erased immediately after their direct consumer ends.
++    const auto directExternalFiles = this->gCurrentExternalFiles;
++
+     if(!this->NodeHasChanges(this->gCurrentFile) && !this->gNodeForceProcessing) {
+         return;
+     }
+@@ -730,18 +1025,7 @@ void Companion::ProcessFile(YAML::Node root) {
+ 
+         switch (this->gConfig.exporterType) {
+             case ExportType::Binary: {
+-                stream.str("");
+-                stream.clear();
+-                exporter->get()->Export(stream, data, result.name, result.node, &result.name);
+-                auto data = stream.str();
 -                this->gCurrentWrapper->AddFile(result.name, std::vector(data.begin(), data.end()));
-+                std::vector<char> binaryData(data.begin(), data.end());
-+                this->gCurrentWrapper->AddFile(result.name, std::move(binaryData));
- 
-                 for(auto& entry : this->gCompanionFiles){
-                     auto output = (this->gCurrentDirectory / entry.first).string();
-                     std::replace(output.begin(), output.end(), '\\', '/');
+-
+-                for(auto& entry : this->gCompanionFiles){
+-                    auto output = (this->gCurrentDirectory / entry.first).string();
+-                    std::replace(output.begin(), output.end(), '\\', '/');
 -                    this->gCurrentWrapper->AddFile(output, entry.second);
-+                    this->gCurrentWrapper->AddFile(output, std::move(entry.second));
-                 }
- 
+-                }
+-
++                this->ExportBinaryResult(result);
                  break;
-@@ -789,7 +844,7 @@ void Companion::ProcessFile(YAML::Node root) {
+             }
+             case ExportType::XML:
+@@ -789,7 +1073,7 @@ void Companion::ProcessFile(YAML::Node root) {
  
          this->gCompanionFiles.clear();
  
@@ -301,7 +588,7 @@ index a881533..8c60316 100644
              auto alignment = GetSafeNode<uint32_t>(result.node, "alignment", impl->GetAlignment());
              if(!endptr.has_value()) {
                  wEntry = {
-@@ -832,7 +887,16 @@ void Companion::ProcessFile(YAML::Node root) {
+@@ -832,7 +1116,21 @@ void Companion::ProcessFile(YAML::Node root) {
              }
          }
  
@@ -314,12 +601,17 @@ index a881533..8c60316 100644
 +    if(this->gConfig.exporterType == ExportType::Binary) {
 +        this->gParseResults.erase(this->gCurrentFile);
 +        this->gWriteMap.erase(this->gCurrentFile);
-+        this->gAddrMap.erase(this->gCurrentFile);
++        for(const auto& externalFile : directExternalFiles) {
++            this->gAddrMap.erase(externalFile);
++        }
++        if(!retainAddressMapForCaller) {
++            this->gAddrMap.erase(this->gCurrentFile);
++        }
 +        Decompressor::ClearCache();
      }
  
      auto fsout = fs::path(this->gConfig.outputPath);
-@@ -1022,26 +1086,76 @@ void Companion::Process() {
+@@ -1022,28 +1320,78 @@ void Companion::Process() {
      auto configPath = this->gSourceDirectory / "config.yml";
  
      if(!fs::exists(configPath)) {
@@ -396,8 +688,9 @@ index a881533..8c60316 100644
              return;
 +#endif
          }
-@@ -1090,10 +1204,15 @@ void Companion::Process() {
-     }
+ 
+         this->gConfig.parseMode = ParseMode::Default;
+@@ -1091,8 +1439,13 @@ void Companion::Process() {
  
      auto cfg = rom["config"];
      if(!cfg) {
@@ -411,9 +704,7 @@ index a881533..8c60316 100644
      }
  
      if (rom["metadata"]) {
-         ProcessTables(rom);
-@@ -1165,10 +1284,15 @@ void Companion::Process() {
-         } else if (key == "F3DEX_MK64") {
+@@ -1166,8 +1519,13 @@ void Companion::Process() {
              this->gConfig.gbi.version = GBIVersion::f3dex;
              this->gConfig.gbi.subversion = GBIMinorVersion::Mk64;
          } else {
@@ -427,9 +718,7 @@ index a881533..8c60316 100644
          }
  
          if(gbi_floats) {
-             this->gConfig.gbi.useFloats = gbi_floats.as<bool>();
-@@ -1271,12 +1395,15 @@ void Companion::Process() {
-                 throw std::runtime_error("Invalid archive type for export type Binary");
+@@ -1272,10 +1630,13 @@ void Companion::Process() {
          }
      }
  
@@ -445,8 +734,7 @@ index a881533..8c60316 100644
  
      auto vWriter = LUS::BinaryWriter();
      vWriter.SetEndianness(Torch::Endianness::Big);
-     vWriter.Write(static_cast<uint8_t>(Torch::Endianness::Big));
-@@ -1287,6 +1414,7 @@ void Companion::Process() {
+@@ -1287,6 +1648,7 @@ void Companion::Process() {
          vWriter.Write((uint32_t) 0);
      }
  
@@ -454,8 +742,7 @@ index a881533..8c60316 100644
      for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){
          if(entry.is_directory())  {
              continue;
-@@ -1302,14 +1430,26 @@ void Companion::Process() {
-         if(yamlPath.find("config.yml") != std::string::npos) {
+@@ -1302,14 +1664,46 @@ void Companion::Process() {
              continue;
          }
  
@@ -464,8 +751,6 @@ index a881533..8c60316 100644
          this->gCurrentFile = yamlPath;
 -
 -        if (!this->gProcessedFiles.contains(this->gCurrentFile)) {
--            ProcessFile(root);
--            this->gProcessedFiles.insert(this->gCurrentFile);
 +        if (this->gProcessedFiles.contains(this->gCurrentFile)) {
 +            continue;
 +        }
@@ -475,24 +760,41 @@ index a881533..8c60316 100644
 +        Mk64InstallLogWritef("Torch: loading YAML %zu: %s.", processedYamlFiles + 1,
 +                             diagnosticPath.empty() ? "(unknown metadata file)" : diagnosticPath.c_str());
 +#endif
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++        if(this->ShouldStreamKartFile(yamlPath)) {
++            Mk64InstallLogWrite("Torch: using bounded-memory kart streaming; parsed textures are written directly to SD.");
++            this->ProcessStreamedKartFile(yamlPath);
++        } else {
++            YAML::Node root = YAML::LoadFile(yamlPath);
+             ProcessFile(root);
+-            this->gProcessedFiles.insert(this->gCurrentFile);
+         }
++#else
 +        YAML::Node root = YAML::LoadFile(yamlPath);
 +        ProcessFile(root);
++#endif
 +        this->gProcessedFiles.insert(this->gCurrentFile);
 +        ++processedYamlFiles;
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
++#ifdef NAUDIO_SUPPORT
++        if(entry.path().filename() == "sequences.yml" && entry.path().parent_path().filename() == "sound") {
++            delete AudioManager::Instance;
++            AudioManager::Instance = nullptr;
++            AudioContext::Reset();
++            malloc_trim(0);
++            Mk64InstallLogWrite("Torch: released legacy audio extraction state after writing the sound subtree.");
++            Mk64LogApplicationMemory("legacy audio cleanup");
++        }
++#endif
 +        Mk64InstallLogWritef("Torch: completed YAML %zu.", processedYamlFiles);
 +        if((processedYamlFiles % 8) == 0) {
 +            Mk64LogApplicationMemory("asset extraction");
-         }
++        }
 +#endif
      }
  
-@@ -1315,14 +1455,19 @@ void Companion::Process() {
      if(wrapper != nullptr) {
-         // Add additional files specified by the user
-         for (const auto& filePath : this->gAdditionalFiles) {
-             std::ifstream input(this->gSourceDirectory / filePath, std::ios::binary);
-             if (input.is_open()) {
+@@ -1320,10 +1714,15 @@ void Companion::Process() {
                  std::vector<char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
                  input.close();
                  std::string filename = fs::path(filePath).filename().string();
@@ -508,7 +810,8 @@ index a881533..8c60316 100644
 +#endif
              }
          }
-@@ -1333,10 +1478,15 @@ void Companion::Process() {
+ 
+@@ -1333,10 +1732,15 @@ void Companion::Process() {
          wrapper->Close();
      }
  
@@ -524,7 +827,7 @@ index a881533..8c60316 100644
  
      auto end = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
      auto level = spdlog::get_level();
-@@ -1393,7 +1543,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
+@@ -1393,7 +1797,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
          std::replace(normalized.begin(), normalized.end(), '\\', '/');
          // Remove parent folder
          normalized = normalized.substr(folder.length() + 1);
@@ -533,7 +836,7 @@ index a881533..8c60316 100644
          SPDLOG_CRITICAL("> Added {}", normalized);
      }
  
-@@ -1710,7 +1860,7 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
+@@ -1710,7 +2114,7 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
          }
      }
  
@@ -543,7 +846,7 @@ index a881533..8c60316 100644
  
      if(!factory.has_value()) {
 diff --git a/src/Companion.h b/src/Companion.h
-index 40a664e..45022f2 100644
+index 40a664e..2081aa9 100644
 --- a/src/Companion.h
 +++ b/src/Companion.h
 @@ -125,7 +125,7 @@ public:
@@ -559,12 +862,12 @@ index 40a664e..45022f2 100644
      explicit Companion(std::vector<uint8_t> rom, const ArchiveType otr, const bool debug, const std::string& srcDir = "", const std::string& destPath = "") :
                         Companion(rom, otr, debug, false, srcDir, destPath) {}
  
-+    ~Companion();
++    ~Companion() noexcept;
 +
      void Init(ExportType type);
  
      bool NodeHasChanges(const std::string& string);
-@@ -156,7 +156,7 @@ public:
+@@ -156,7 +158,7 @@ public:
      GBIVersion GetGBIVersion() const { return this->gConfig.gbi.version; }
      GBIMinorVersion GetGBIMinorVersion() const { return  this->gConfig.gbi.subversion; }
      std::unordered_map<std::string, std::vector<YAML::Node>> GetCourseMetadata() { return this->gCourseMetadata; }
@@ -582,6 +885,21 @@ index 40a664e..45022f2 100644
  
      // Temporal Variables
      std::string gCurrentFile;
+@@ -236,7 +238,13 @@ private:
+     std::unordered_map<std::string, std::tuple<uint32_t, uint32_t>> gVirtualAddrMap;
+     std::unordered_map<std::string, std::unordered_map<uint32_t, std::tuple<std::string, YAML::Node>>> gAddrMap;
+ 
+-    void ProcessFile(YAML::Node root);
++    void IndexAddressNodes(YAML::Node& root, bool bindAudioSamples);
++    void ProcessFile(YAML::Node root, bool retainAddressMapForCaller = false);
++    bool ExportBinaryResult(ParseResultData& result);
++#if defined(__3DS__) || defined(PLATFORM_3DS)
++    bool ShouldStreamKartFile(const std::string& path) const;
++    void ProcessStreamedKartFile(const std::string& path);
++#endif
+     void ParseEnums(std::string& file);
+     void ParseHash();
+     void ParseModdingConfig();
 diff --git a/src/archive/BinaryWrapper.h b/src/archive/BinaryWrapper.h
 index d6f4b39..9820fdb 100644
 --- a/src/archive/BinaryWrapper.h
@@ -622,7 +940,7 @@ index 5e0096e..61c8bff 100644
  #ifdef USE_STORMLIB
  private:
 diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
-index 6440b62..c062c0c 100644
+index 6440b62..74c9e55 100644
 --- a/src/archive/ZWrapper.cpp
 +++ b/src/archive/ZWrapper.cpp
 @@ -5,21 +5,166 @@
@@ -729,8 +1047,8 @@ index 6440b62..c062c0c 100644
 +#else
      this->mZip = new miniz_cpp::zip_file;
 +#endif
- }
- 
++}
++
 +ZWrapper::~ZWrapper() {
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
 +    const int savedErrno = errno;
@@ -761,8 +1079,8 @@ index 6440b62..c062c0c 100644
 +    delete this->mZip;
 +    this->mZip = nullptr;
 +#endif
-+}
-+
+ }
+ 
  int32_t ZWrapper::CreateArchive() {
      SPDLOG_INFO("Loaded ZIP (O2R) archive: {}", mPath.c_str());
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
@@ -793,7 +1111,7 @@ index 6440b62..c062c0c 100644
      char* fileData = data.data();
      size_t fileSize = data.size();
  
-@@ -34,11 +147,130 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
+@@ -34,11 +179,141 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
          stream.close();
      }
  
@@ -902,7 +1220,18 @@ index 6440b62..c062c0c 100644
 +        if(!closed && closeError == 0) closeError = errno != 0 ? errno : EIO;
 +        this->mArchiveFile = nullptr;
 +    }
-+    fs::remove(this->mCentralDirectoryPath);
++    // The archive is already fully flushed and closed. Failure to remove the
++    // private central-directory spool must not turn a valid extraction into a
++    // false failure (for example after a transient FAT cleanup error).
++    std::error_code cleanupError;
++    fs::remove(this->mCentralDirectoryPath, cleanupError);
++    if(cleanupError) {
++        char cleanupMessage[256] = {};
++        std::snprintf(cleanupMessage, sizeof(cleanupMessage),
++                      "O2R finalized, but its temporary central-directory spool could not be removed (%d).",
++                      cleanupError.value());
++        Mk64InstallLogWrite(cleanupMessage);
++    }
 +    this->mArchiveOpen = false;
 +    if(!ok || closeError != 0) {
 +        char message[320] = {};
@@ -925,7 +1254,7 @@ index 6440b62..c062c0c 100644
      return 0;
  }
 diff --git a/src/archive/ZWrapper.h b/src/archive/ZWrapper.h
-index d1fe867..4f3eee5 100644
+index d1fe867..266a29d 100644
 --- a/src/archive/ZWrapper.h
 +++ b/src/archive/ZWrapper.h
 @@ -1,20 +1,37 @@
@@ -967,11 +1296,102 @@ index d1fe867..4f3eee5 100644
      miniz_cpp::zip_file* mZip;
 +#endif
  };
+diff --git a/src/factories/TextureFactory.cpp b/src/factories/TextureFactory.cpp
+index 8e9d53c..9a0d294 100644
+--- a/src/factories/TextureFactory.cpp
++++ b/src/factories/TextureFactory.cpp
+@@ -172,7 +172,7 @@ ExportResult TextureCodeExporter::Export(std::ostream &write, std::shared_ptr<IP
+ ExportResult TextureBinaryExporter::Export(std::ostream &write, std::shared_ptr<IParsedData> raw, std::string& entryName, YAML::Node &node, std::string* replacement) {
+     auto writer = LUS::BinaryWriter();
+     auto texture = std::static_pointer_cast<TextureData>(raw);
+-    auto data = texture->mBuffer;
++    const auto& data = texture->mBuffer;
+ 
+     WriteHeader(writer, Torch::ResourceType::Texture, 0);
+ 
+diff --git a/src/factories/naudio/v0/AudioManager.cpp b/src/factories/naudio/v0/AudioManager.cpp
+index 1e7fc9a..782b5dc 100644
+--- a/src/factories/naudio/v0/AudioManager.cpp
++++ b/src/factories/naudio/v0/AudioManager.cpp
+@@ -18,6 +18,32 @@ std::unordered_map<std::string, uint32_t> name_table;
+ std::unordered_map<uint32_t, std::string> sample_table;
+ AudioManager* AudioManager::Instance;
+ 
++AudioManager::~AudioManager() noexcept {
++    // Every SampleBank owns the unique samples in its entries map. Walk those
++    // owners directly: building a temporary set here could allocate and call
++    // std::terminate if cleanup is running because the heap is exhausted.
++    for (auto* bank : this->loaded_tbl.banks) {
++        if (bank == nullptr) {
++            continue;
++        }
++        for (const auto& [offset, sample] : bank->entries) {
++            (void)offset;
++            delete sample;
++        }
++    }
++
++    this->sampleMap.clear();
++    this->banks.clear();
++    for (auto* bank : this->loaded_tbl.banks) {
++        delete bank;
++    }
++    this->loaded_tbl.banks.clear();
++    this->loaded_tbl.tbls.clear();
++    this->loaded_tbl.map.clear();
++    name_table.clear();
++    sample_table.clear();
++}
++
+ std::vector<uint32_t> PyUtils::range(uint32_t start, uint32_t end) {
+     std::vector<uint32_t> result;
+     for (uint32_t i = start; i < end; ++i) {
+@@ -560,4 +586,4 @@ std::vector<AudioBankSample*> AudioManager::get_samples() {
+         }
+     }
+     return samples;
+-}
+\ No newline at end of file
++}
+diff --git a/src/factories/naudio/v0/AudioManager.h b/src/factories/naudio/v0/AudioManager.h
+index 6f4a880..6ee20b8 100644
+--- a/src/factories/naudio/v0/AudioManager.h
++++ b/src/factories/naudio/v0/AudioManager.h
+@@ -124,6 +124,7 @@ struct Bank {
+ class AudioManager {
+ public:
+     static AudioManager* Instance;
++    ~AudioManager() noexcept;
+     void initialize(std::vector<uint8_t>& buffer, YAML::Node& data);
+     void bind_sample(YAML::Node& node, const std::string& path);
+     std::string& get_sample(uint32_t id);
+@@ -148,4 +149,4 @@ private:
+     static std::vector<AdsrEnvelope> parse_envelope(uint32_t addr, std::vector<uint8_t>& dataBank);
+     static Bank parse_ctl(CTLHeader header, std::vector<uint8_t> data, SampleBank* bank, uint32_t index);
+     static TBLFile parse_tbl(std::vector<uint8_t>& data, std::vector<Entry>& entries);
+-};
+\ No newline at end of file
++};
 diff --git a/src/factories/naudio/v1/AudioContext.cpp b/src/factories/naudio/v1/AudioContext.cpp
-index f2b0dd0..e68db41 100644
+index f2b0dd0..1411eae 100644
 --- a/src/factories/naudio/v1/AudioContext.cpp
 +++ b/src/factories/naudio/v1/AudioContext.cpp
-@@ -45,7 +45,9 @@ std::optional<std::shared_ptr<IParsedData>> AudioContextFactory::parse(std::vect
+@@ -6,6 +6,14 @@
+ std::unordered_map<AudioTableType, TableEntry> AudioContext::tables;
+ NAudioDrivers AudioContext::driver = NAudioDrivers::UNKNOWN;
+ 
++void AudioContext::Reset() noexcept {
++    // Swapping with an empty container releases owned audio buffers without a
++    // rehash allocation, which is critical on low-memory exception paths.
++    decltype(AudioContext::tables) emptyTables;
++    AudioContext::tables.swap(emptyTables);
++    AudioContext::driver = NAudioDrivers::UNKNOWN;
++}
++
+ std::optional<std::shared_ptr<IParsedData>> AudioContextFactory::parse(std::vector<uint8_t>& buffer, YAML::Node& node) {
+     auto driver = GetSafeNode<std::string>(node, "driver");
+ 
+@@ -45,7 +53,9 @@ std::optional<std::shared_ptr<IParsedData>> AudioContextFactory::parse(std::vect
  }
  
  LUS::BinaryReader AudioContext::MakeReader(AudioTableType type, uint32_t offset) {
@@ -982,17 +1402,74 @@ index f2b0dd0..e68db41 100644
  
      LUS::BinaryReader reader(entry.data(), entry.size());
      reader.SetEndianness(Torch::Endianness::Big);
-@@ -146,4 +148,4 @@ const char* AudioContext::GetCodecStr(uint8_t codec) {
+@@ -146,4 +156,4 @@ const char* AudioContext::GetCodecStr(uint8_t codec) {
          default:
              return "ERROR";
      }
 -}
 \ No newline at end of file
 +}
+diff --git a/src/factories/naudio/v1/AudioContext.h b/src/factories/naudio/v1/AudioContext.h
+index 415d1f1..b7555ce 100644
+--- a/src/factories/naudio/v1/AudioContext.h
++++ b/src/factories/naudio/v1/AudioContext.h
+@@ -26,6 +26,7 @@ public:
+     static std::unordered_map<AudioTableType, TableEntry> tables;
+     static NAudioDrivers driver;
+ 
++    static void Reset() noexcept;
+     static LUS::BinaryReader MakeReader(AudioTableType type, uint32_t offset);
+     static TunedSample LoadTunedSample(LUS::BinaryReader& reader, uint32_t parent, uint32_t sampleBankId);
+     static uint64_t GetPathByAddr(uint32_t addr);
+@@ -48,4 +49,4 @@ public:
+     }
+ 
+     bool HasModdedDependencies() override { return true; }
+-};
+\ No newline at end of file
++};
+diff --git a/src/factories/naudio/v1/AudioConverter.cpp b/src/factories/naudio/v1/AudioConverter.cpp
+index 7c4ebb4..540ddb0 100644
+--- a/src/factories/naudio/v1/AudioConverter.cpp
++++ b/src/factories/naudio/v1/AudioConverter.cpp
+@@ -168,7 +168,7 @@ void AudioConverter::SampleV0ToAIFC(AudioBankSample* sample, LUS::BinaryWriter &
+ void AudioConverter::SampleV1ToAIFC(NSampleData* sample, LUS::BinaryWriter &out) {
+     auto loop = std::static_pointer_cast<ADPCMLoopData>(Companion::Instance->GetParseDataByAddr(sample->loop)->data.value());
+     auto book = std::static_pointer_cast<ADPCMBookData>(Companion::Instance->GetParseDataByAddr(sample->book)->data.value());
+-    auto entry = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
++    const auto& entry = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
+     auto sampleData = entry.buffer.data() + entry.info->entries[sample->sampleBankId].addr + sample->sampleAddr;
+     auto aifc = AIFCWriter();
+     std::vector<uint8_t> data(sampleData, sampleData + sample->size);
+@@ -235,4 +235,4 @@ void AudioConverter::SampleV1ToAIFC(NSampleData* sample, LUS::BinaryWriter &out)
+     }
+ 
+     aifc.Close(out);
+-}
+\ No newline at end of file
++}
 diff --git a/src/factories/naudio/v1/SampleFactory.cpp b/src/factories/naudio/v1/SampleFactory.cpp
-index 616d883..a797746 100644
+index 616d883..7aefcac 100644
 --- a/src/factories/naudio/v1/SampleFactory.cpp
 +++ b/src/factories/naudio/v1/SampleFactory.cpp
+@@ -37,7 +37,7 @@ ExportResult NSampleBinaryExporter::Export(std::ostream &write, std::shared_ptr<
+     writer.Write(AudioContext::GetPathByAddr(data->loop));
+     writer.Write(AudioContext::GetPathByAddr(data->book));
+ 
+-    auto table = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
++    const auto& table = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
+     writer.Write((char*) table.buffer.data() + table.info->entries[data->sampleBankId].addr + data->sampleAddr, data->size);
+ 
+     writer.Finish(write);
+@@ -51,7 +51,7 @@ ExportResult NSampleModdingExporter::Export(std::ostream &write, std::shared_ptr
+ #ifdef SF64_SUPPORT
+     if(AudioContext::driver == NAudioDrivers::SF64 && data->codec == 2) {
+         *replacement += ".pcm";
+-        auto table = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
++        const auto& table = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
+         auto ptr = table.buffer.data() + table.info->entries[data->sampleBankId].addr + data->sampleAddr;
+         auto vec = std::vector<uint8_t>(ptr, ptr + data->size);
+         auto output = new int16_t[data->size * 2];
 @@ -87,18 +87,18 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
      root->SetAttribute("Version", 0);
      root->SetAttribute("Codec", AudioContext::GetCodecStr(entry->codec));
@@ -1028,6 +1505,15 @@ index 616d883..a797746 100644
  
          for (auto& page : book->book) {
              tinyxml2::XMLElement* bookEntry = adpcmBook->InsertNewChildElement("Book");
+@@ -128,7 +128,7 @@ ExportResult NSampleXMLExporter::Export(std::ostream &write, std::shared_ptr<IPa
+     sample.Accept(&printer);
+     write.write(printer.CStr(), printer.CStrSize() - 1);
+ 
+-    auto table = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
++    const auto& table = AudioContext::tables[AudioTableType::SAMPLE_TABLE];
+     auto sampleData = table.buffer.data() + table.info->entries[entry->sampleBankId].addr + entry->sampleAddr;
+     std::vector<char> data(sampleData, sampleData + entry->size);
+     Companion::Instance->RegisterCompanionFile(path.filename().string() + "_data", data);
 diff --git a/src/factories/naudio/v1/SoundFontFactory.cpp b/src/factories/naudio/v1/SoundFontFactory.cpp
 index cd00123..7925b06 100644
 --- a/src/factories/naudio/v1/SoundFontFactory.cpp
@@ -1160,10 +1646,119 @@ index 4477a59..6992694 100644
 \ No newline at end of file
 +}
 diff --git a/src/utils/Decompressor.cpp b/src/utils/Decompressor.cpp
-index dd24650..138c2a8 100644
+index dd24650..0f71ffc 100644
 --- a/src/utils/Decompressor.cpp
 +++ b/src/utils/Decompressor.cpp
-@@ -123,8 +123,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
+@@ -1,5 +1,8 @@
+ #include "Decompressor.h"
+ 
++#include <cstdlib>
++#include <memory>
++#include <new>
+ #include <stdexcept>
+ #include "spdlog/spdlog.h"
+ #include <Companion.h>
+@@ -13,6 +16,47 @@ extern "C" {
+ 
+ std::unordered_map<uint32_t, DataChunk*> gCachedChunks;
+ 
++namespace {
++using MallocBuffer = std::unique_ptr<uint8_t, decltype(&std::free)>;
++
++MallocBuffer AllocateBuffer(const size_t size) {
++    auto* raw = static_cast<uint8_t*>(std::malloc(size));
++    if(raw == nullptr && size != 0) {
++        throw std::bad_alloc();
++    }
++    return MallocBuffer(raw, &std::free);
++}
++
++void DeleteCachedChunk(DataChunk* chunk) noexcept {
++    if(chunk == nullptr) {
++        return;
++    }
++    std::free(chunk->data);
++    delete chunk;
++}
++
++DataChunk* CacheChunk(const uint32_t offset, MallocBuffer data, const size_t size, const bool replace) {
++    auto chunk = std::make_unique<DataChunk>(DataChunk{ data.get(), size });
++
++    if(replace) {
++        const auto existing = gCachedChunks.find(offset);
++        if(existing != gCachedChunks.end()) {
++            DeleteCachedChunk(existing->second);
++            gCachedChunks.erase(existing);
++        }
++    }
++
++    const auto [entry, inserted] = gCachedChunks.emplace(offset, chunk.get());
++    if(!inserted) {
++        return entry->second;
++    }
++
++    data.release();
++    chunk.release();
++    return entry->second;
++}
++}
++
+ DataChunk* Decompressor::Decode(const std::vector<uint8_t>& buffer, const uint32_t offset, const CompressionType type, bool ignoreCache) {
+ 
+     if(!ignoreCache && gCachedChunks.contains(offset)){
+@@ -28,10 +72,11 @@ DataChunk* Decompressor::Decode(const std::vector<uint8_t>& buffer, const uint32
+                 throw std::runtime_error("Failed to decode MIO0 header");
+             }
+ 
+-            const auto decompressed = new uint8_t[head.dest_size];
+-            mio0_decode(in_buf, decompressed, nullptr);
+-            gCachedChunks[offset] = new DataChunk{ decompressed, head.dest_size };
+-            return gCachedChunks[offset];
++            auto decompressed = AllocateBuffer(head.dest_size);
++            if(mio0_decode(in_buf, decompressed.get(), nullptr) < 0) {
++                throw std::runtime_error("Failed to decode MIO0 data");
++            }
++            return CacheChunk(offset, std::move(decompressed), head.dest_size, ignoreCache);
+         }
+         case CompressionType::YAY0: {
+             uint32_t size = 0;
+@@ -41,8 +86,7 @@ DataChunk* Decompressor::Decode(const std::vector<uint8_t>& buffer, const uint32
+                 throw std::runtime_error("Failed to decode YAY0");
+             }
+ 
+-            gCachedChunks[offset] = new DataChunk{ decompressed, size };
+-            return gCachedChunks[offset];
++            return CacheChunk(offset, MallocBuffer(decompressed, &std::free), size, ignoreCache);
+         }
+         case CompressionType::YAY1: {
+             uint32_t size = 0;
+@@ -52,8 +96,7 @@ DataChunk* Decompressor::Decode(const std::vector<uint8_t>& buffer, const uint32
+                 throw std::runtime_error("Failed to decode YAY1");
+             }
+ 
+-            gCachedChunks[offset] = new DataChunk{ decompressed, size };
+-            return gCachedChunks[offset];
++            return CacheChunk(offset, MallocBuffer(decompressed, &std::free), size, ignoreCache);
+         }
+         default:
+             throw std::runtime_error("Unknown compression type");
+@@ -67,11 +110,10 @@ DataChunk* Decompressor::DecodeTKMK00(const std::vector<uint8_t>& buffer, const
+ 
+     const uint8_t* in_buf = buffer.data() + offset;
+ 
+-    const auto decompressed = new uint8_t[size];
+-    const auto rgba = new uint8_t[size];
+-    tkmk00_decode(in_buf, decompressed, rgba, alpha);
+-    gCachedChunks[offset] = new DataChunk{ rgba, size };
+-    return gCachedChunks[offset];
++    auto decompressed = AllocateBuffer(size);
++    auto rgba = AllocateBuffer(size);
++    tkmk00_decode(in_buf, decompressed.get(), rgba.get(), alpha);
++    return CacheChunk(offset, std::move(rgba), size, false);
+ }
+ 
+ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>& buffer, std::optional<size_t> manualSize) {
+@@ -123,8 +165,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
              offset = ASSET_PTR(offset);
  
              auto decoded = Decode(buffer, fileOffset, type);
@@ -1175,7 +1770,7 @@ index dd24650..138c2a8 100644
              return {
                  .root = decoded,
                  .segment = { decoded->data + offset, size }
-@@ -136,8 +137,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
+@@ -136,8 +179,9 @@ DecompressedData Decompressor::AutoDecode(YAML::Node& node, std::vector<uint8_t>
          {
              fileOffset = TranslateAddr(offset, false);
  
@@ -1187,8 +1782,13 @@ index dd24650..138c2a8 100644
  
              return {
                  .root = nullptr,
-@@ -227,4 +229,4 @@ void Decompressor::ClearCache() {
-         delete[] value->data;
+@@ -224,7 +268,8 @@ bool Decompressor::IsSegmented(uint32_t addr) {
+ 
+ void Decompressor::ClearCache() {
+     for(auto& [key, value] : gCachedChunks){
+-        delete[] value->data;
++        (void)key;
++        DeleteCachedChunk(value);
      }
      gCachedChunks.clear();
 -}

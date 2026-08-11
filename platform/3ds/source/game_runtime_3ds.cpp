@@ -1,5 +1,7 @@
 #include "game_runtime_3ds.h"
 
+#include "adaptive_presentation_3ds.hpp"
+#include "audio_ndsp_3ds.h"
 #include "bottom_ui_3ds.h"
 #include "diagnostics_3ds.h"
 #include "gfx_citro3d.h"
@@ -7,6 +9,7 @@
 #include "settings_3ds.h"
 
 #include <3ds.h>
+#include <citro3d.h>
 #include <fast/interpreter.h>
 
 #include <cmath>
@@ -19,6 +22,7 @@ void GfxSetInstance(std::shared_ptr<Interpreter> interpreter);
 }
 
 extern "C" size_t Mk64Resource3DSLoadedCount(void);
+extern "C" void Mk64GameAudio3DSBeginFrame(void) __attribute__((weak));
 extern "C" Gfx* gDisplayListHead;
 extern "C" void Mk64FrameInterpolation3DSSetEnabled(bool enabled);
 extern "C" bool Mk64FrameInterpolation3DSIsEnabled(void);
@@ -40,6 +44,26 @@ constexpr uint32_t kLogicalWidth = 400;
 uint32_t sOutputWidth = 400;
 bool sResolvedNewModel = false;
 bool sUseIntermediatePresentation = false;
+mk64_3ds::AdaptivePresentationState sAdaptivePresentation;
+uint64_t sLastPresentationStart = 0;
+uint64_t sPreviousPresentationDuration = 0;
+size_t sLastObservedResourceCount = 0;
+uint64_t sLastObservedTextureUploadCount = 0;
+uint64_t sLastObservedTextureUploadBytes = 0;
+
+constexpr uint32_t kAudioFramesPerGameTick = 896;
+// The audio worker schedules at two ticks or less and adds one tick. Treat one
+// tick as immediate pressure, while allowing recovery at the worker's normal
+// two-tick target instead of waiting for a nondeterministic third buffer.
+constexpr uint32_t kAudioLowWaterFrames = kAudioFramesPerGameTick;
+constexpr uint32_t kAudioRecoveryFrames = kAudioFramesPerGameTick * 2;
+// libctru documents osGetTime() in milliseconds.
+constexpr uint64_t kSlowTickMilliseconds = 40;
+constexpr uint64_t kHeavyTextureUploadBytes = 64u * 1024u;
+constexpr uint64_t kHeavyTextureUploadCount = 2;
+constexpr float kBusyProcessingMilliseconds = 13.0f;
+constexpr float kBusyDrawingMilliseconds = 14.0f;
+constexpr float kBusyCommandBufferUsage = 0.85f;
 
 uint32_t GetViewportWidth() {
     return Mk64Settings3DSGetAspectRatio() == MK64_ASPECT_RATIO_3DS_ORIGINAL
@@ -69,6 +93,47 @@ void SetRendererStage(const char* stage) {
     } else {
         Mk64Diagnostics3DSSetStage(stage);
     }
+}
+
+bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
+    const size_t resourceCount = Mk64Resource3DSLoadedCount();
+    const uint64_t textureUploadCount = sRenderer->GetTextureCacheUploadCount();
+    const uint64_t textureUploadBytes = sRenderer->GetTextureCacheUploadBytes();
+    const size_t resourceDelta = resourceCount >= sLastObservedResourceCount
+                                     ? resourceCount - sLastObservedResourceCount
+                                     : 0;
+    const uint64_t textureUploadDelta = textureUploadCount >= sLastObservedTextureUploadCount
+                                            ? textureUploadCount - sLastObservedTextureUploadCount
+                                            : 0;
+    const uint64_t textureUploadByteDelta = textureUploadBytes >= sLastObservedTextureUploadBytes
+                                                ? textureUploadBytes - sLastObservedTextureUploadBytes
+                                                : 0;
+    sLastObservedResourceCount = resourceCount;
+    sLastObservedTextureUploadCount = textureUploadCount;
+    sLastObservedTextureUploadBytes = textureUploadBytes;
+
+    const bool slowStartInterval = sLastPresentationStart != 0 &&
+                                   presentationStart - sLastPresentationStart > kSlowTickMilliseconds;
+    const bool previousTickSlow = slowStartInterval ||
+                                  sPreviousPresentationDuration > kSlowTickMilliseconds;
+    sLastPresentationStart = presentationStart;
+
+    const bool citro3DBusy = C3D_GetProcessingTime() > kBusyProcessingMilliseconds ||
+                             C3D_GetDrawingTime() > kBusyDrawingMilliseconds ||
+                             C3D_GetCmdBufUsage() > kBusyCommandBufferUsage;
+    const bool uploadActivity = textureUploadDelta >= kHeavyTextureUploadCount ||
+                                textureUploadByteDelta >= kHeavyTextureUploadBytes;
+
+    mk64_3ds::AdaptivePresentationInputs inputs = {};
+    inputs.hasPriorTopFrame = sHasPresentedTopFrame;
+    inputs.audioBufferedFrames = Mk64Audio3DSBufferedFrames();
+    inputs.audioLowWaterFrames = kAudioLowWaterFrames;
+    inputs.audioRecoveryFrames = kAudioRecoveryFrames;
+    inputs.previousTickSlow = previousTickSlow;
+    inputs.resourceActivity = resourceDelta != 0;
+    inputs.textureUploadActivity = uploadActivity;
+    inputs.citro3DBusy = citro3DBusy;
+    return mk64_3ds::UpdateAdaptivePresentation(&sAdaptivePresentation, inputs).renderMidpoint;
 }
 }
 
@@ -101,6 +166,12 @@ extern "C" bool Mk64Graphics3DSInit() {
     sRendererFaultCounter = 0;
     sRendererFaulted = false;
     sHasPresentedTopFrame = false;
+    sAdaptivePresentation = {};
+    sLastPresentationStart = 0;
+    sPreviousPresentationDuration = 0;
+    sLastObservedResourceCount = Mk64Resource3DSLoadedCount();
+    sLastObservedTextureUploadCount = 0;
+    sLastObservedTextureUploadBytes = 0;
     // Diagnostics resolves the hardware model once during process startup.
     // Every graphics component consumes this same conservative answer so a
     // failed APT query cannot produce mismatched target sizes/frame rates.
@@ -142,6 +213,8 @@ extern "C" bool Mk64Graphics3DSInit() {
         Mk64Graphics3DSShutdown();
         return false;
     }
+    sLastObservedTextureUploadCount = sRenderer->GetTextureCacheUploadCount();
+    sLastObservedTextureUploadBytes = sRenderer->GetTextureCacheUploadBytes();
     // Desktop builds receive this rectangle from the ImGui viewport. The 3DS
     // runtime has no desktop UI, so bind the game viewport to the top LCD.
     UpdateGameViewport();
@@ -162,11 +235,23 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sResolvedNewModel = false;
     sUseIntermediatePresentation = false;
     sHasPresentedTopFrame = false;
+    sAdaptivePresentation = {};
+    sLastPresentationStart = 0;
+    sPreviousPresentationDuration = 0;
+    sLastObservedResourceCount = 0;
+    sLastObservedTextureUploadCount = 0;
+    sLastObservedTextureUploadBytes = 0;
 }
 
 extern "C" void Graphics_PushFrame(Gfx* commands) {
     if (commands == nullptr || sInterpreter == nullptr || sWindow == nullptr) {
         return;
+    }
+    // The audio runtime may dispatch synthesis to a worker here. Keep the
+    // weak hook before event/frame-readiness early returns so every valid game
+    // frame offers exactly one opportunity to overlap synthesis with graphics.
+    if (Mk64GameAudio3DSBeginFrame != nullptr) {
+        Mk64GameAudio3DSBeginFrame();
     }
 
     const uintptr_t listBegin = reinterpret_cast<uintptr_t>(commands);
@@ -190,11 +275,18 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     // bounded matrix-interpolated midpoint followed by the key frame; Old 3DS
     // and the 800 px quality mode present only the key frame.
     ++sFrameCounter;
+    const uint64_t presentationStart = osGetTime();
+    const bool renderIntermediate = sUseIntermediatePresentation &&
+                                    ShouldRenderIntermediatePresentation(presentationStart);
     SetRendererStage("renderer-prepare");
     try {
         UpdateGameViewport();
         if (sUseIntermediatePresentation) {
-            const bool interpolated = Mk64FrameInterpolation3DSPrepare(0.5f);
+            // Preserve the first 60 Hz interval even when pressure makes a
+            // second display-list decode unsafe. A retained-image repeat is
+            // cheap, while the following keyframe remains mandatory.
+            const bool interpolated = renderIntermediate &&
+                                      Mk64FrameInterpolation3DSPrepare(0.5f);
             Mk64Diagnostics3DSSetFrame(sFrameCounter, 1);
             sInterpreter->mInterpolationIndex = 0;
             sInterpreter->mInterpolationIndexTarget = 0;
@@ -247,13 +339,16 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         Mk64FrameInterpolation3DSClearPrepared();
         SetRendererFault("renderer-exception", exception.what());
         sRenderer->EndFrame();
+        sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     } catch (...) {
         Mk64FrameInterpolation3DSClearPrepared();
         sRenderer->EndFrame();
         SetRendererFault("renderer-exception", "unknown C++ exception");
+        sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     }
+    sPreviousPresentationDuration = osGetTime() - presentationStart;
     SetRendererStage("renderer-frame-presented");
 }
 

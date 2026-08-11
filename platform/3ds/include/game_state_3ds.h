@@ -54,6 +54,8 @@ typedef struct Mk64BottomUIGameState3DS {
     int32_t minimapPlayerX;
     int32_t minimapPlayerY;
     float minimapPlayerScale;
+    float minimapFinishlineX;
+    float minimapFinishlineY;
     uint8_t minimapRed;
     uint8_t minimapGreen;
     uint8_t minimapBlue;

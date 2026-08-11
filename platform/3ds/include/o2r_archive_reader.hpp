@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -31,6 +32,9 @@ class O2rArchiveReader final {
     bool IsOpen() const;
     const std::vector<std::string>& Entries() const;
     O2rReadResult ReadEntry(std::string_view entryPath, std::vector<std::uint8_t>* bytes);
+    O2rReadResult ReadEntryByIndex(std::size_t entryIndex, std::vector<std::uint8_t>* bytes);
+    O2rReadResult GetEntryUncompressedSizeByIndex(std::size_t entryIndex,
+                                                  std::size_t* byteCount);
 
     static O2rReadResult ListEntries(std::string_view archivePath, std::vector<std::string>* entries);
     static O2rReadResult ReadEntry(std::string_view archivePath, std::string_view entryPath,

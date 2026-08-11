@@ -65,6 +65,7 @@ PrintConsole gBottomConsole{};
 std::array<std::array<char, 76>, 22> gInstallConsoleLines{};
 uint32_t gInstallConsoleLineCount = 0;
 int gInstallProgressPercent = 0;
+bool gInstallShellStateAvailable = false;
 
 void PushInstallConsoleLine(const char* format, ...) {
     char line[76] = {};
@@ -168,6 +169,15 @@ void DrawLoadingTopScreen(int percent) {
 
 void RedrawInstallScreens(int percent) {
     gInstallProgressPercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+    if (gInstallShellStateAvailable) {
+        u8 shellState = 1;
+        if (R_SUCCEEDED(PTMU_GetShellState(&shellState)) && shellState == 0) {
+            // Every installer redraw, including log-callback redraws, passes
+            // through this function. Avoid GPU work and VBlank waits while
+            // unattended extraction continues with the lid closed.
+            return;
+        }
+    }
     DrawLoadingTopScreen(gInstallProgressPercent);
     consoleSelect(&gBottomConsole);
     consoleClear();
@@ -268,34 +278,110 @@ bool PreserveInvalidArchive(const char* archivePath, const char* archiveLabel, c
                                       ? static_cast<uint64_t>(archiveInfo.st_size)
                                       : 0;
 
+    // Quarantine is diagnostic, not a retry mechanism. Keep only the newest
+    // rejected archive for each class so repeated failures cannot silently
+    // consume gigabytes of SD space and eventually defeat the next preflight.
     char candidate[768] = {};
-    for (unsigned int index = 1; index <= 99; ++index) {
-        const int written = std::snprintf(candidate, sizeof(candidate), "%s/%s-%02u.o2r", kInvalidArchiveDir,
-                                          archiveLabel, index);
-        if (written <= 0 || static_cast<size_t>(written) >= sizeof(candidate)) {
-            errno = ENAMETOOLONG;
-            return false;
-        }
-        if (FileExists(candidate)) {
-            continue;
-        }
-        if (rename(archivePath, candidate) != 0) {
-            Mk64InstallLogWritef("Could not preserve the rejected O2R archive; errno=%d.", errno);
-            return false;
-        }
-
-        if (preservedPath != nullptr && preservedPathSize > 0) {
-            std::snprintf(preservedPath, preservedPathSize, "%s", candidate);
-        }
-        Mk64InstallLogWritef("Preserved rejected O2R archive privately (%llu bytes, reason: %s).",
-                             static_cast<unsigned long long>(archiveBytes),
-                             reason != nullptr && reason[0] != '\0' ? reason : "validation failed");
-        return true;
+    const int written = std::snprintf(candidate, sizeof(candidate), "%s/%s-latest.o2r",
+                                      kInvalidArchiveDir, archiveLabel);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(candidate)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    if (FileExists(candidate) && std::remove(candidate) != 0) {
+        Mk64InstallLogWritef("Could not replace the previous rejected O2R archive; errno=%d.", errno);
+        return false;
+    }
+    if (rename(archivePath, candidate) != 0) {
+        Mk64InstallLogWritef("Could not preserve the rejected O2R archive; errno=%d.", errno);
+        return false;
     }
 
-    errno = ENOSPC;
-    Mk64InstallLogWrite("No free diagnostic quarantine slot is available for the rejected O2R archive.");
+    if (preservedPath != nullptr && preservedPathSize > 0) {
+        std::snprintf(preservedPath, preservedPathSize, "%s", candidate);
+    }
+    Mk64InstallLogWritef("Preserved the newest rejected O2R archive privately (%llu bytes, reason: %s).",
+                         static_cast<unsigned long long>(archiveBytes),
+                         reason != nullptr && reason[0] != '\0' ? reason : "validation failed");
+    return true;
+}
+
+bool RemoveArchiveCentralDirectorySpool(const char* archivePath) {
+    if (archivePath == nullptr || archivePath[0] == '\0') {
+        errno = EINVAL;
+        return false;
+    }
+    char spoolPath[768] = {};
+    const int written = std::snprintf(spoolPath, sizeof(spoolPath), "%s.cd", archivePath);
+    if (written <= 0 || static_cast<size_t>(written) >= sizeof(spoolPath)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    if (std::remove(spoolPath) == 0 || errno == ENOENT) {
+        return true;
+    }
+    Mk64InstallLogWritef("Could not remove the abandoned O2R central-directory spool; errno=%d.",
+                         errno);
     return false;
+}
+
+bool DiscardIncompleteArchive(const char* archivePath, const char* reason) {
+    if (archivePath == nullptr || !FileExists(archivePath)) {
+        return RemoveArchiveCentralDirectorySpool(archivePath);
+    }
+    struct stat archiveInfo {};
+    const uint64_t archiveBytes = stat(archivePath, &archiveInfo) == 0 && archiveInfo.st_size > 0
+                                      ? static_cast<uint64_t>(archiveInfo.st_size)
+                                      : 0;
+    if (std::remove(archivePath) != 0) {
+        Mk64InstallLogWritef("Could not remove the non-resumable incomplete O2R archive; errno=%d.", errno);
+        return false;
+    }
+    Mk64InstallLogWritef(
+        "Removed a non-resumable incomplete O2R archive (%llu bytes, reason: %s).",
+        static_cast<unsigned long long>(archiveBytes),
+        reason != nullptr && reason[0] != '\0' ? reason : "validation failed");
+    return RemoveArchiveCentralDirectorySpool(archivePath);
+}
+
+void CleanupLegacyIncompleteQuarantine() {
+    // v0.18 could retain a new 50+ MiB partial after every failed retry. None
+    // of those files has a usable ZIP directory or can be resumed, so reclaim
+    // them before the v0.19 free-space preflight. Preserve other rejected
+    // archives, which may still be useful for corruption diagnostics.
+    constexpr std::array<const char*, 2> kLegacyPartialLabels = {
+        "mk64-incomplete",
+        "mk64-interrupted",
+    };
+    uint64_t removedBytes = 0;
+    unsigned int removedFiles = 0;
+    char candidate[768] = {};
+    for (const char* label : kLegacyPartialLabels) {
+        for (unsigned int index = 1; index <= 99; ++index) {
+            const int written = std::snprintf(candidate, sizeof(candidate), "%s/%s-%02u.o2r",
+                                              kInvalidArchiveDir, label, index);
+            if (written <= 0 || static_cast<size_t>(written) >= sizeof(candidate) ||
+                !FileExists(candidate)) {
+                continue;
+            }
+            struct stat archiveInfo {};
+            const uint64_t bytes = stat(candidate, &archiveInfo) == 0 && archiveInfo.st_size > 0
+                                       ? static_cast<uint64_t>(archiveInfo.st_size)
+                                       : 0;
+            if (std::remove(candidate) == 0) {
+                removedBytes += bytes;
+                ++removedFiles;
+            } else {
+                Mk64InstallLogWritef("Could not remove legacy incomplete archive %s; errno=%d.",
+                                     candidate, errno);
+            }
+        }
+    }
+    if (removedFiles != 0) {
+        Mk64InstallLogWritef(
+            "Removed %u legacy non-resumable partial archives and reclaimed %llu bytes.",
+            removedFiles, static_cast<unsigned long long>(removedBytes));
+    }
 }
 
 bool CopyFile(const char* source, const char* destination, CopyStats* stats) {
@@ -412,6 +498,66 @@ void LogInstallerMemory(const char* phase) {
         static_cast<unsigned long>(heap.keepcost), static_cast<unsigned long>(linearSpaceFree()),
         static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
         static_cast<unsigned long>(osGetMemRegionSize(MEMREGION_APPLICATION)));
+}
+
+class ExtractionAwakeGuard {
+public:
+    ExtractionAwakeGuard()
+        : previousSleepAllowed_(aptIsSleepAllowed()), previousHomeAllowed_(aptIsHomeAllowed()),
+          shellServiceReady_(R_SUCCEEDED(ptmuInit())) {
+        aptSetSleepAllowed(false);
+        aptSetHomeAllowed(false);
+        gInstallShellStateAvailable = shellServiceReady_;
+        Mk64InstallLogWrite(
+            "Unattended extraction enabled: lid-close sleep and HOME suspension are disabled until completion.");
+        if(!shellServiceReady_) {
+            Mk64InstallLogWrite("Shell-state service unavailable; extraction remains awake but screen refresh cannot be suppressed.");
+        }
+    }
+
+    ~ExtractionAwakeGuard() {
+        Mk64InstallLogWrite("Unattended extraction ended; restoring the prior sleep and HOME policies.");
+        gInstallShellStateAvailable = false;
+        if(shellServiceReady_) {
+            ptmuExit();
+        }
+        aptSetHomeAllowed(previousHomeAllowed_);
+        aptSetSleepAllowed(previousSleepAllowed_);
+    }
+
+    ExtractionAwakeGuard(const ExtractionAwakeGuard&) = delete;
+    ExtractionAwakeGuard& operator=(const ExtractionAwakeGuard&) = delete;
+
+private:
+    bool previousSleepAllowed_;
+    bool previousHomeAllowed_;
+    bool shellServiceReady_;
+};
+
+bool SignalExtractionComplete() {
+    const Result initResult = mcuHwcInit();
+    if(R_FAILED(initResult)) {
+        Mk64InstallLogWritef("Completion LED service unavailable (0x%08lX).",
+                             static_cast<unsigned long>(initResult));
+        return false;
+    }
+
+    InfoLedPattern pattern{};
+    pattern.delay = 1;
+    pattern.smoothing = 0;
+    pattern.loopDelay = 0;
+    pattern.blinkSpeed = 0;
+    std::memset(pattern.bluePattern, 0xFF, sizeof(pattern.bluePattern));
+    const Result ledResult = MCUHWC_SetInfoLedPattern(&pattern);
+    mcuHwcExit();
+    if(R_FAILED(ledResult)) {
+        Mk64InstallLogWritef("Could not set the blue completion LED (0x%08lX).",
+                             static_cast<unsigned long>(ledResult));
+        return false;
+    }
+
+    Mk64InstallLogWrite("Blue notification LED enabled to signal that extraction completed successfully.");
+    return true;
 }
 
 uint32_t Rol32(uint32_t value, uint32_t bits) {
@@ -588,16 +734,18 @@ bool InstallExtractorFiles(CopyStats* stats) {
 }
 
 namespace {
-mk64_3ds::Mk64O2rValidationResult ValidateArchive(const char* path) {
+mk64_3ds::Mk64O2rValidationResult ValidateArchive(const char* path,
+                                                   bool verifyAllEntries = false) {
 #if defined(MK64_3DS_ON_DEVICE_EXTRACTOR)
     if (path == nullptr || path[0] == '\0') {
         mk64_3ds::Mk64O2rValidationResult validation{};
         validation.error = mk64_3ds::Mk64O2rValidationError::InvalidPath;
         return validation;
     }
-    return mk64_3ds::ValidateMk64O2rArchive(path);
+    return mk64_3ds::ValidateMk64O2rArchive(path, verifyAllEntries);
 #else
     (void)path;
+    (void)verifyAllEntries;
     mk64_3ds::Mk64O2rValidationResult validation{};
     validation.error = mk64_3ds::Mk64O2rValidationError::Ok;
     return validation;
@@ -615,9 +763,17 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
         return false;
     }
 
+    CleanupLegacyIncompleteQuarantine();
+    if (!RemoveArchiveCentralDirectorySpool(kWorkArchivePath)) {
+        std::snprintf(error, errorSize,
+                      "An abandoned extraction spool could not be removed safely.");
+        return false;
+    }
+
     if (FileExists(kWorkArchivePath)) {
         Mk64InstallLogWrite("Found an archive left by an earlier interrupted installation; validating it.");
-        const mk64_3ds::Mk64O2rValidationResult staleValidation = ValidateArchive(kWorkArchivePath);
+        const mk64_3ds::Mk64O2rValidationResult staleValidation =
+            ValidateArchive(kWorkArchivePath, true);
         if (staleValidation.IsValid()) {
             if (FileExists(kPrimaryArchivePath)) {
                 Mk64InstallLogWrite(
@@ -639,10 +795,11 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
         }
 
         LogArchiveValidationFailure("Interrupted temporary O2R archive", staleValidation);
-        if (!PreserveInvalidArchive(kWorkArchivePath, "mk64-interrupted",
-                                    mk64_3ds::Mk64O2rValidationMessage(staleValidation.error), nullptr, 0)) {
+        if (!DiscardIncompleteArchive(
+                kWorkArchivePath,
+                mk64_3ds::Mk64O2rValidationMessage(staleValidation.error))) {
             std::snprintf(error, errorSize,
-                          "The interrupted archive is invalid and could not be preserved for diagnostics.");
+                          "The interrupted archive is invalid and could not be removed safely.");
             return false;
         }
     }
@@ -691,7 +848,8 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
                          static_cast<unsigned long>(copyStats.fileCount),
                          static_cast<unsigned long long>(copyStats.byteCount));
 
-    DrawProgress("Generating mk64.o2r...", "Writing the archive directly to the SD card. This can take several minutes.", 55);
+    DrawProgress("Generating mk64.o2r...",
+                 "Writing directly to SD. You may close the lid; extraction will continue.", 55);
     Mk64InstallLogWrite("Starting O2R archive generation.");
     Mk64InstallLogWrite("Extractor execution mode: in-process Torch library (no child process or shell command).");
     LogInstallerMemory("before Torch setup");
@@ -751,22 +909,26 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
                              error[0] != '\0' ? error : "(no extractor error)");
         LogInstallerMemory("O2R generation failure");
         if (FileExists(kWorkArchivePath)) {
-            const mk64_3ds::Mk64O2rValidationResult partialValidation = ValidateArchive(kWorkArchivePath);
+            const mk64_3ds::Mk64O2rValidationResult partialValidation =
+                ValidateArchive(kWorkArchivePath, true);
             if (partialValidation.IsValid()) {
                 Mk64InstallLogWrite(
                     "The generated archive is complete but remains in the temporary folder for recovery on next launch.");
             } else {
                 LogArchiveValidationFailure("Incomplete generated O2R archive", partialValidation);
-                PreserveInvalidArchive(kWorkArchivePath, "mk64-incomplete",
-                                       mk64_3ds::Mk64O2rValidationMessage(partialValidation.error), nullptr, 0);
+                DiscardIncompleteArchive(
+                    kWorkArchivePath,
+                    mk64_3ds::Mk64O2rValidationMessage(partialValidation.error));
             }
         }
     } else if (!FileExists(kWorkArchivePath)) {
         Mk64InstallLogWrite("Torch reported success but did not create the temporary O2R archive.");
         std::snprintf(error, errorSize, "The extractor did not create a temporary mk64.o2r archive.");
     } else {
-        Mk64InstallLogWrite("Validating the generated temporary O2R archive before finalizing it.");
-        const mk64_3ds::Mk64O2rValidationResult generatedValidation = ValidateArchive(kWorkArchivePath);
+        Mk64InstallLogWrite(
+            "Validating every generated O2R payload and CRC before finalizing it; this intentionally takes time.");
+        const mk64_3ds::Mk64O2rValidationResult generatedValidation =
+            ValidateArchive(kWorkArchivePath, true);
         if (!generatedValidation.IsValid()) {
             LogArchiveValidationFailure("Generated temporary O2R archive", generatedValidation);
             const bool preserved = PreserveInvalidArchive(
@@ -921,7 +1083,15 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
     Mk64InstallLogWrite("ROM SHA-1 verified.");
 
     char extractionError[384] = {};
-    if (!GenerateArchiveFromRom(romPath, extractionError, sizeof(extractionError))) {
+    bool extractionSucceeded = false;
+    {
+        ExtractionAwakeGuard awakeGuard;
+        extractionSucceeded = GenerateArchiveFromRom(romPath, extractionError, sizeof(extractionError));
+        if (extractionSucceeded) {
+            SignalExtractionComplete();
+        }
+    }
+    if (!extractionSucceeded) {
         Mk64InstallLogWritef("Installation failed: %s", extractionError);
         Mk64InstallLogSetCallback(nullptr);
         gfxExit();
