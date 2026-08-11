@@ -37,6 +37,9 @@ struct Mk64O2rValidationResult {
     }
 };
 
+using Mk64O2rValidationProgressCallback =
+    void (*)(std::size_t completedEntries, std::size_t totalEntries, void* userData);
+
 inline const char* Mk64O2rValidationMessage(Mk64O2rValidationError error) {
     switch (error) {
         case Mk64O2rValidationError::Ok:
@@ -130,7 +133,9 @@ inline bool ReadU32(const std::vector<std::uint8_t>& bytes, std::size_t offset, 
 } // namespace detail
 
 inline Mk64O2rValidationResult ValidateMk64O2rArchive(std::string_view archivePath,
-                                                      bool verifyAllEntries = false) {
+                                                      bool verifyAllEntries = false,
+                                                      Mk64O2rValidationProgressCallback progressCallback = nullptr,
+                                                      void* progressUserData = nullptr) {
     Mk64O2rValidationResult validation{};
     if (archivePath.empty()) {
         validation.error = Mk64O2rValidationError::InvalidPath;
@@ -205,11 +210,19 @@ inline Mk64O2rValidationResult ValidateMk64O2rArchive(std::string_view archivePa
             // A freshly extracted archive is read back completely before its
             // atomic rename. miniz verifies each stored payload and CRC, so an
             // SD write error cannot be mistaken for a successful install.
+            if (progressCallback != nullptr) {
+                progressCallback(0, validation.entryCount, progressUserData);
+            }
             for (std::size_t entryIndex = 0; entryIndex < validation.entryCount; ++entryIndex) {
                 if (archive.ReadEntryByIndex(entryIndex, &bytes) != O2rReadResult::Ok) {
                     validation.error = Mk64O2rValidationError::InvalidRequiredResource;
                     validation.component = "archive payload";
                     return validation;
+                }
+                const std::size_t completedEntries = entryIndex + 1;
+                if (progressCallback != nullptr &&
+                    ((completedEntries % 128) == 0 || completedEntries == validation.entryCount)) {
+                    progressCallback(completedEntries, validation.entryCount, progressUserData);
                 }
             }
         }

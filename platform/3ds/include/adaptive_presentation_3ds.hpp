@@ -4,6 +4,8 @@
 
 namespace mk64_3ds {
 
+constexpr std::uint8_t kAdaptivePresentationHealthyTicksToEnable = 8;
+
 enum AdaptivePresentationPressure : std::uint32_t {
     AdaptivePressureNone = 0,
     AdaptivePressureNoPriorFrame = 1u << 0,
@@ -42,8 +44,6 @@ struct AdaptivePresentationDecision {
 // spending CPU/GPU time on interpolating and decoding a second display list.
 inline AdaptivePresentationDecision UpdateAdaptivePresentation(
     AdaptivePresentationState* state, const AdaptivePresentationInputs& inputs) {
-    constexpr std::uint8_t kHealthyTicksToEnable = 4;
-
     AdaptivePresentationDecision decision = {};
     if (state == nullptr) {
         return decision;
@@ -86,10 +86,10 @@ inline AdaptivePresentationDecision UpdateAdaptivePresentation(
         return decision;
     }
 
-    if (state->healthyRecoveryTicks < kHealthyTicksToEnable) {
+    if (state->healthyRecoveryTicks < kAdaptivePresentationHealthyTicksToEnable) {
         ++state->healthyRecoveryTicks;
     }
-    if (state->healthyRecoveryTicks >= kHealthyTicksToEnable) {
+    if (state->healthyRecoveryTicks >= kAdaptivePresentationHealthyTicksToEnable) {
         state->midpointEnabled = true;
         decision.renderMidpoint = true;
     } else {

@@ -732,6 +732,30 @@ extern "C" void Mk64Diagnostics3DSStop() {
     LightLock_Unlock(&sTextLock);
 }
 
+extern "C" void Mk64Diagnostics3DSAbortForProcessExit() {
+    sRunning.store(false, std::memory_order_release);
+    if (sThread != nullptr) {
+        // The normal worker wakes every 16 ms. Bound this wait so a close
+        // request can never inherit an SD/HID stall from an in-progress dump.
+        if (R_SUCCEEDED(threadJoin(sThread, 150ULL * 1000ULL * 1000ULL))) {
+            threadFree(sThread);
+            sThread = nullptr;
+            LightLock_Lock(&sTextLock);
+            if (sLog != nullptr) {
+                FlushLogLocked();
+                std::fclose(sLog);
+                sLog = nullptr;
+            }
+            LightLock_Unlock(&sTextLock);
+        } else {
+            threadDetach(sThread);
+            sThread = nullptr;
+            // Do not race a still-running worker by closing its FILE here.
+            // Process termination reclaims both within the next instruction.
+        }
+    }
+}
+
 extern "C" bool Mk64Diagnostics3DSOwnsHid() {
     return sRunning.load(std::memory_order_acquire);
 }
@@ -869,15 +893,35 @@ extern "C" void Mk64Diagnostics3DSSetFrame(uint64_t frame, unsigned presentation
     sPresentation.store(presentation, std::memory_order_relaxed);
 }
 
-extern "C" void Mk64Diagnostics3DSAudio(uint32_t pump, uint32_t bufferedFrames, uint32_t peak,
+extern "C" void Mk64Diagnostics3DSAudio(uint32_t synthesisBlock, uint32_t bufferedFrames, uint32_t peak,
                                          uint32_t nonzeroSamples, uint32_t queuedBuffers,
                                          uint32_t droppedBuffers) {
     char value[128] = {};
-    std::snprintf(value, sizeof(value), "pump=%lu buffered=%lu peak=%lu nonzero=%lu queued=%lu dropped=%lu",
-                  static_cast<unsigned long>(pump), static_cast<unsigned long>(bufferedFrames),
+    std::snprintf(value, sizeof(value), "block=%lu buffered=%lu peak=%lu nonzero=%lu queued=%lu dropped=%lu",
+                  static_cast<unsigned long>(synthesisBlock), static_cast<unsigned long>(bufferedFrames),
                   static_cast<unsigned long>(peak), static_cast<unsigned long>(nonzeroSamples),
                   static_cast<unsigned long>(queuedBuffers), static_cast<unsigned long>(droppedBuffers));
     LogLine("audio: ", value);
+}
+
+extern "C" void Mk64Diagnostics3DSAudioPump(uint32_t pumpCalls, uint32_t synthesisBlocks,
+                                              uint32_t bufferedBefore, uint32_t bufferedAfter,
+                                              uint32_t blocksThisPump, uint32_t multiBlockPumps,
+                                              uint32_t queueFailures,
+                                              uint32_t observedEmptyTransitions) {
+    char value[224] = {};
+    std::snprintf(value, sizeof(value),
+                  "calls=%lu blocks=%lu before=%lu after=%lu refill=%lu multi=%lu "
+                  "queue_fail=%lu observed_empty=%lu",
+                  static_cast<unsigned long>(pumpCalls),
+                  static_cast<unsigned long>(synthesisBlocks),
+                  static_cast<unsigned long>(bufferedBefore),
+                  static_cast<unsigned long>(bufferedAfter),
+                  static_cast<unsigned long>(blocksThisPump),
+                  static_cast<unsigned long>(multiBlockPumps),
+                  static_cast<unsigned long>(queueFailures),
+                  static_cast<unsigned long>(observedEmptyTransitions));
+    LogLine("audio-pump: ", value);
 }
 
 extern "C" void Mk64Diagnostics3DSAudioState(uint32_t resetStatus, uint32_t resetPreset,

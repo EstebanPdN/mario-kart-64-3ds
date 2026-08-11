@@ -98,6 +98,12 @@ if(MK64_3DS_BUILD_GAME_CORE)
     set(SPAGHETTIKART_MENU_ITEMS_SOURCE "${SPAGHETTIKART_ROOT}/src/menu_items.c")
     set(SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/menu_items_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_ROOT "${SPAGHETTIKART_MENU_ITEMS_SOURCE}")
+    set(SPAGHETTIKART_HUD_SOURCE "${SPAGHETTIKART_ROOT}/src/code_80057C60.c")
+    set(SPAGHETTIKART_3DS_HUD_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/code_80057C60_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_ROOT "${SPAGHETTIKART_HUD_SOURCE}")
+    set(SPAGHETTIKART_MAIN_SOURCE "${SPAGHETTIKART_ROOT}/src/main.c")
+    set(SPAGHETTIKART_3DS_MAIN_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/main_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_ROOT "${SPAGHETTIKART_MAIN_SOURCE}")
     set(SPAGHETTIKART_ENDING_SOURCE "${SPAGHETTIKART_ROOT}/src/ending/code_80280000.c")
     set(SPAGHETTIKART_3DS_ENDING_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/code_80280000_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_ENDING_SOURCE}")
@@ -389,8 +395,9 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
 
     # The initial player setup selects one exact 64x64 kart frame for each
     # racer, but upstream leaves those paths lazy until Fast3D decodes the first
-    # visible race frame. Generate a 3DS copy that warms at most eight unique
-    # current frames; animated successors remain demand-loaded.
+    # visible race frames. Generate a bounded 3DS copy that warms the first
+    # five frames and four wheel variants for each one-player racer (at most
+    # 160 small textures), moving their SD/decode stalls before the cup intro.
     file(READ "${SPAGHETTIKART_SPAWN_PLAYERS_SOURCE}" SPAGHETTIKART_SPAWN_PLAYERS_TEXT)
     set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_ORIGINAL
         "${SPAGHETTIKART_SPAWN_PLAYERS_TEXT}")
@@ -416,7 +423,11 @@ extern void Mk64Diagnostics3DSKartPrefetch(size_t, size_t, size_t, size_t, size_
         [=[Player* D_801653C0[8];
 
 #if defined(PLATFORM_3DS)
-#define MK64_3DS_INITIAL_KART_PREFETCH_LIMIT 8
+#define MK64_3DS_INITIAL_KART_PREFETCH_LIMIT 192
+#define MK64_3DS_INITIAL_KART_PREFETCH_FRAMES 5
+#define MK64_3DS_INITIAL_KART_GROUP_COUNT 9
+#define MK64_3DS_INITIAL_KART_WHEEL_COUNT 4
+extern u8**** gKartTextureTable0[];
 static uint64_t sInitialKartPrefetchKeys3DS[MK64_3DS_INITIAL_KART_PREFETCH_LIMIT];
 static size_t sInitialKartPrefetchAttempted3DS = 0;
 static size_t sInitialKartPrefetchLoaded3DS = 0;
@@ -489,6 +500,21 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
             ? (const char*)gEncodedKartTexture[0][screenId][playerId].unk_00
             : (const char*)gEncodedKartTexture[0][screenId - 2][playerId + 4].unk_00;
         mk64_3ds_prefetch_initial_kart(initialKartTexture);
+        const s32 initialKartGroup = player->animGroupSelector[screenId];
+        const s32 initialKartFrame = player->animFrameSelector[screenId];
+        if (player->characterId < NUM_PLAYERS && initialKartGroup >= 0 &&
+            initialKartGroup < MK64_3DS_INITIAL_KART_GROUP_COUNT &&
+            initialKartFrame >= 0 && initialKartFrame < 35) {
+            for (s32 frameOffset = 0;
+                 frameOffset < MK64_3DS_INITIAL_KART_PREFETCH_FRAMES; ++frameOffset) {
+                const s32 frame = initialKartFrame + frameOffset;
+                if (frame >= 35) break;
+                for (s32 wheel = 0; wheel < MK64_3DS_INITIAL_KART_WHEEL_COUNT; ++wheel) {
+                    mk64_3ds_prefetch_initial_kart((const char*)
+                        gKartTextureTable0[player->characterId][initialKartGroup][frame][wheel]);
+                }
+            }
+        }
 #endif
         gLastAnimFrameSelector[screenId][playerId] = player->animFrameSelector[screenId];]=]
         SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
@@ -585,9 +611,10 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         file(WRITE "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}" "${SPAGHETTIKART_3DS_SEQPLAYER_TEXT}")
     endif()
 
-    # The non-matching C menu renderer lost the stock dark overlay call for
-    # unselected character portraits. Generate a 3DS-only copy so a clean
-    # checkout contains the fix without modifying the pinned upstream gitlink.
+    # Generate a 3DS-only menu copy without modifying the pinned upstream
+    # gitlink. The stock unselected-portrait shade belongs here, but its wide
+    # desktop helper expands a 64 px portrait across neighboring cells at 5:3.
+    # Keep the shade and use the original fixed-width box on 3DS.
     file(READ "${SPAGHETTIKART_MENU_ITEMS_SOURCE}" SPAGHETTIKART_MENU_ITEMS_TEXT)
     string(REPLACE
         "                 func_800A12BC(arg0, D_800E7D54[arg0->type - CHARACTER_SELECT_MENU_MARIO]);\n                /* fallthrough */"
@@ -596,7 +623,117 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         "${SPAGHETTIKART_MENU_ITEMS_TEXT}"
     )
     if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL SPAGHETTIKART_MENU_ITEMS_TEXT)
-        message(FATAL_ERROR "The upstream character-portrait overlay insertion point changed")
+        message(FATAL_ERROR "The upstream character-portrait shade insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_PORTRAIT_CALL_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        "                gDisplayListHead = draw_box_wide(gDisplayListHead, arg0->column, arg0->row, arg0->column + 0x40,\n                                                 arg0->row + 0x4C, 0, 0, 0, 0x00000064);"
+        "                gDisplayListHead = draw_box(gDisplayListHead, arg0->column, arg0->row, arg0->column + 0x40,\n                                            arg0->row + 0x4C, 0, 0, 0, 0x00000064);"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MENU_ITEMS_PORTRAIT_CALL_TEXT)
+        message(FATAL_ERROR "The upstream static portrait shade box insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_STATIC_BOX_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        "                gDisplayListHead = draw_box_wide(gDisplayListHead, arg0->column + thing, arg0->row,\n                                                 (arg0->column - thing) + 0x40, arg0->row + 0x4C, 0, 0, 0, 0x00000064);"
+        "                gDisplayListHead = draw_box(gDisplayListHead, arg0->column + thing, arg0->row,\n                                            (arg0->column - thing) + 0x40, arg0->row + 0x4C, 0, 0, 0, 0x00000064);"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MENU_ITEMS_STATIC_BOX_TEXT)
+        message(FATAL_ERROR "The upstream animated portrait shade box insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_PORTRAIT_BOX_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        [=[                if (CVarGetInteger("gShowSpaghettiVersion", true)) {
+                    draw_version();
+                    draw_debug();
+                }]=]
+        [=[#if !defined(PLATFORM_3DS)
+                if (CVarGetInteger("gShowSpaghettiVersion", true)) {
+                    draw_version();
+                    draw_debug();
+                }
+#endif]=]
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MENU_ITEMS_PORTRAIT_BOX_TEXT)
+        message(FATAL_ERROR "The upstream Game Select version render point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_VERSION_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        [=[            case MAIN_MENU_OPTION_GFX:
+            case MAIN_MENU_DATA_GFX:
+                var_a1 = arg0->type - MENU_ITEM_UI_OK;]=]
+        [=[            case MAIN_MENU_OPTION_GFX:
+            case MAIN_MENU_DATA_GFX:
+#if defined(PLATFORM_3DS)
+                break;
+#endif
+                var_a1 = arg0->type - MENU_ITEM_UI_OK;]=]
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MENU_ITEMS_VERSION_TEXT)
+        message(FATAL_ERROR "The upstream Game Select Option/Data render point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_GAME_SELECT_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        "void render_pause_menu(MenuItem* arg0) {\n    if (gIsGamePaused != 0) {"
+        [=[#if defined(PLATFORM_3DS)
+static void mk64_3ds_render_pause_title(void) {
+    const char* courseName = CM_GetProps() != NULL ? CM_GetProps()->Name : "";
+    gDisplayListHead = draw_box_wide(gDisplayListHead, 0, 0, 0x13F, 0xEF,
+                                     0, 0, 0, 0x8C);
+    set_text_color(TEXT_YELLOW);
+    if (gModeSelection == GRAND_PRIX) {
+        const f32 cupHalf = (get_string_width(gCupNames[GetCupIndex()]) + 10.0f) * 0.5f;
+        const f32 ccHalf = (get_string_width(D_800E76CC[gCCSelection]) + 10.0f) * 0.5f;
+        print_text1_center_mode_1((s32)(160.0f - ccHalf), 90,
+                                  gCupNames[GetCupIndex()], 0, 1.0f, 1.0f);
+        print_text1_center_mode_1((s32)(160.0f + cupHalf), 90,
+                                  D_800E76CC[gCCSelection], 0, 1.0f, 1.0f);
+    }
+    print_text1_center_mode_1(160, 112, courseName, 0, 1.0f, 1.0f);
+}
+#endif
+
+void render_pause_menu(MenuItem* arg0) {
+    if (gIsGamePaused != 0) {
+#if defined(PLATFORM_3DS)
+        mk64_3ds_render_pause_title();
+        return;
+#endif]=]
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MENU_ITEMS_GAME_SELECT_TEXT)
+        message(FATAL_ERROR "The upstream pause-menu dispatch point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MENU_ITEMS_PAUSE_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        "void func_800A54EC(void) {\n    Unk_D_800E70A0 sp50;"
+        "void func_800A54EC(void) {\n#if defined(PLATFORM_3DS)\n    return;\n#endif\n    Unk_D_800E70A0 sp50;"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT
+        "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MENU_ITEMS_PAUSE_TEXT)
+        message(FATAL_ERROR "The upstream pause cursor render point changed")
     endif()
     set(SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING "")
     if(EXISTS "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}")
@@ -604,6 +741,118 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
     endif()
     if(NOT SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING STREQUAL SPAGHETTIKART_3DS_MENU_ITEMS_TEXT)
         file(WRITE "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}" "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    endif()
+
+    # The stock global HUD pass is outside render_hud(), so gDrawHUD alone
+    # cannot hide its ranking, place, minimap or lap-progress elements. Build
+    # a 3DS-only copy that keeps viewport restoration/debug work while routing
+    # visible top HUD elements through the explicit FULL/NONE/LAP/SPEED mode.
+    file(READ "${SPAGHETTIKART_HUD_SOURCE}" SPAGHETTIKART_HUD_TEXT)
+    set(SPAGHETTIKART_3DS_HUD_ORIGINAL "${SPAGHETTIKART_HUD_TEXT}")
+    string(REPLACE
+        "#include \"code_80057C60.h\""
+        [=[#include "code_80057C60.h"
+#if defined(PLATFORM_3DS)
+extern int Mk64GameState3DSGetTopHudRenderMode(void);
+#define MK64_TOP_HUD_RENDER_FULL (-1)
+#define MK64_TOP_HUD_RENDER_NONE 0
+#define MK64_TOP_HUD_RENDER_LAP_PROGRESS 1
+#define MK64_TOP_HUD_RENDER_SPEEDOMETER 2
+#endif]=]
+        SPAGHETTIKART_3DS_HUD_TEXT
+        "${SPAGHETTIKART_HUD_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_HUD_TEXT STREQUAL SPAGHETTIKART_3DS_HUD_ORIGINAL)
+        message(FATAL_ERROR "The upstream global HUD include point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_HUD_INCLUDE_TEXT "${SPAGHETTIKART_3DS_HUD_TEXT}")
+    string(REPLACE
+        "void func_800591B4(void) {\n\n    if ((gHUDDisable == 0) && (D_800DC5B8 != 0)) {"
+        "void func_800591B4(void) {\n#if defined(PLATFORM_3DS)\n    const int mk64TopHudMode = Mk64GameState3DSGetTopHudRenderMode();\n#endif\n\n    if ((gHUDDisable == 0) && (D_800DC5B8 != 0)) {"
+        SPAGHETTIKART_3DS_HUD_TEXT
+        "${SPAGHETTIKART_3DS_HUD_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_HUD_TEXT STREQUAL SPAGHETTIKART_3DS_HUD_INCLUDE_TEXT)
+        message(FATAL_ERROR "The upstream global HUD entry point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_HUD_ENTRY_TEXT "${SPAGHETTIKART_3DS_HUD_TEXT}")
+    string(REPLACE
+        "        if (gIsHUDVisible != 0) {\n            if (D_801657D8 == 0) {"
+        [=[        if ((gIsHUDVisible != 0)
+#if defined(PLATFORM_3DS)
+            && (mk64TopHudMode == MK64_TOP_HUD_RENDER_FULL)
+#endif
+        ) {
+            if (D_801657D8 == 0) {]=]
+        SPAGHETTIKART_3DS_HUD_TEXT
+        "${SPAGHETTIKART_3DS_HUD_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_HUD_TEXT STREQUAL SPAGHETTIKART_3DS_HUD_ENTRY_TEXT)
+        message(FATAL_ERROR "The upstream global HUD visibility point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_HUD_FULL_TEXT "${SPAGHETTIKART_3DS_HUD_TEXT}")
+    string(REPLACE
+        "            func_800590D4();\n        }\n        func_8005902C();"
+        [=[            func_800590D4();
+        }
+#if defined(PLATFORM_3DS)
+        if ((gIsHUDVisible != 0) && (D_801657D8 == 0)) {
+            if (mk64TopHudMode == MK64_TOP_HUD_RENDER_LAP_PROGRESS) {
+                func_800514BC();
+            } else if (mk64TopHudMode == MK64_TOP_HUD_RENDER_SPEEDOMETER) {
+                set_matrix_hud_screen();
+                render_speedometer(PLAYER_ONE);
+            }
+        }
+#endif
+        func_8005902C();]=]
+        SPAGHETTIKART_3DS_HUD_TEXT
+        "${SPAGHETTIKART_3DS_HUD_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_HUD_TEXT STREQUAL SPAGHETTIKART_3DS_HUD_FULL_TEXT)
+        message(FATAL_ERROR "The upstream selective HUD insertion point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_HUD_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_HUD_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_HUD_SOURCE}" SPAGHETTIKART_3DS_HUD_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_HUD_EXISTING STREQUAL SPAGHETTIKART_3DS_HUD_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_HUD_SOURCE}" "${SPAGHETTIKART_3DS_HUD_TEXT}")
+    endif()
+
+    # The Citro3D backend cannot read a rendered framebuffer back into the
+    # N64 CPU buffer: its current implementation returns zero-filled pixels.
+    # Avoid building two off-screen targets and a 320x240 readback command
+    # stream every race frame when the only consumers would receive black.
+    # Luigi Raceway and Wario Stadium keep their static billboard textures in
+    # the 3DS engine copies below.
+    file(READ "${SPAGHETTIKART_MAIN_SOURCE}" SPAGHETTIKART_3DS_MAIN_TEXT)
+    set(SPAGHETTIKART_3DS_MAIN_ORIGINAL "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    string(REPLACE
+        "    FB_WriteFramebufferSliceToCPU(&gDisplayListHead, gPortFramebuffers[sRenderingFramebuffer], true);"
+        "    /* PLATFORM_3DS: dynamic jumbotron readback is unsupported and intentionally omitted. */"
+        SPAGHETTIKART_3DS_MAIN_TEXT
+        "${SPAGHETTIKART_3DS_MAIN_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MAIN_TEXT STREQUAL SPAGHETTIKART_3DS_MAIN_ORIGINAL)
+        message(FATAL_ERROR "The upstream race framebuffer-readback call changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MAIN_READBACK_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    string(REPLACE
+        "    FB_CreateFramebuffers();"
+        "    /* PLATFORM_3DS: no CPU framebuffer consumer requires off-screen targets. */"
+        SPAGHETTIKART_3DS_MAIN_TEXT
+        "${SPAGHETTIKART_3DS_MAIN_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MAIN_TEXT STREQUAL SPAGHETTIKART_3DS_MAIN_READBACK_TEXT)
+        message(FATAL_ERROR "The upstream per-frame framebuffer creation call changed")
+    endif()
+    set(SPAGHETTIKART_3DS_MAIN_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_MAIN_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_MAIN_SOURCE}" SPAGHETTIKART_3DS_MAIN_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_MAIN_EXISTING STREQUAL SPAGHETTIKART_3DS_MAIN_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_MAIN_SOURCE}" "${SPAGHETTIKART_3DS_MAIN_TEXT}")
     endif()
 
     # The podium ceremony rebuilds collision data independently of Track::Init.
@@ -663,6 +912,8 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}"
         "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}"
         "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}"
+        "${SPAGHETTIKART_3DS_HUD_SOURCE}"
+        "${SPAGHETTIKART_3DS_MAIN_SOURCE}"
         "${SPAGHETTIKART_3DS_ENDING_SOURCE}"
     )
     target_include_directories(mk64-3ds-game-core PRIVATE
@@ -765,6 +1016,9 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
     list(FILTER SPAGHETTIKART_ENGINE_ROOT EXCLUDE REGEX ".*/HM_Intro\\.cpp$")
     list(FILTER SPAGHETTIKART_ENGINE_ROOT EXCLUDE REGEX ".*/TrackBrowser\\.cpp$")
     list(FILTER SPAGHETTIKART_ENGINE_ROOT EXCLUDE REGEX ".*/wasm\\.cpp$")
+    set(SPAGHETTIKART_WORLD_SOURCE "${SPAGHETTIKART_ROOT}/src/engine/World.cpp")
+    set(SPAGHETTIKART_3DS_WORLD_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/World_3ds.cpp")
+    list(REMOVE_ITEM SPAGHETTIKART_ENGINE_ROOT "${SPAGHETTIKART_WORLD_SOURCE}")
     file(GLOB SPAGHETTIKART_ENGINE_ACTORS CONFIGURE_DEPENDS
         "${SPAGHETTIKART_ROOT}/src/engine/actors/*.cpp"
     )
@@ -785,6 +1039,96 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/src/engine/tracks/*.cpp"
     )
     list(FILTER SPAGHETTIKART_ENGINE_TRACKS EXCLUDE REGEX ".*/(CustomTrack|Harbour|TestTrack)\\.cpp$")
+    set(SPAGHETTIKART_TOADS_TURNPIKE_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/engine/tracks/ToadsTurnpike.cpp")
+    set(SPAGHETTIKART_3DS_TOADS_TURNPIKE_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/ToadsTurnpike_3ds.cpp")
+    set(SPAGHETTIKART_LUIGI_RACEWAY_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/engine/tracks/LuigiRaceway.cpp")
+    set(SPAGHETTIKART_3DS_LUIGI_RACEWAY_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/LuigiRaceway_3ds.cpp")
+    set(SPAGHETTIKART_WARIO_STADIUM_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/engine/tracks/WarioStadium.cpp")
+    set(SPAGHETTIKART_3DS_WARIO_STADIUM_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/WarioStadium_3ds.cpp")
+    list(REMOVE_ITEM SPAGHETTIKART_ENGINE_TRACKS
+        "${SPAGHETTIKART_TOADS_TURNPIKE_SOURCE}"
+        "${SPAGHETTIKART_LUIGI_RACEWAY_SOURCE}"
+        "${SPAGHETTIKART_WARIO_STADIUM_SOURCE}"
+    )
+
+    # SpaghettiKart advances two 60 Hz logic ticks for every 30 Hz key frame,
+    # but its replacement Toad's Turnpike traffic currently performs the full
+    # path/trigonometry update on both ticks and compensates by halving speed.
+    # Preserve the original every-other-tick vehicle cadence on 3DS so the 28
+    # traffic actors do half the path-update work at the intended cadence.
+    file(READ "${SPAGHETTIKART_WORLD_SOURCE}" SPAGHETTIKART_3DS_WORLD_TEXT)
+    set(SPAGHETTIKART_3DS_WORLD_ORIGINAL "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+    string(REPLACE
+        "#include <memory>"
+        "#include <memory>\n#include <cstring>"
+        SPAGHETTIKART_3DS_WORLD_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_WORLD_TEXT STREQUAL SPAGHETTIKART_3DS_WORLD_ORIGINAL)
+        message(FATAL_ERROR "The upstream World include point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_WORLD_INCLUDE_TEXT "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+    string(REPLACE
+        [=[void World::TickActors() {
+    // This only ticks modded actors
+    for (auto& actor : Actors) {
+        if (actor->IsMod()) {
+            actor->Tick();
+        }
+    }
+}]=]
+        [=[void World::TickActors() {
+    static bool trafficTickPhase3DS = false;
+    trafficTickPhase3DS = !trafficTickPhase3DS;
+
+    // This only ticks modded actors. The four built-in Turnpike traffic
+    // classes follow the original game's one-in-two logic cadence.
+    for (auto& actor : Actors) {
+        if (!actor->IsMod()) {
+            continue;
+        }
+        const char* resourceName = actor->ResourceName;
+        if (!trafficTickPhase3DS && gCurrentCourseId == TRACK_TOADS_TURNPIKE &&
+            resourceName != nullptr &&
+            (std::strcmp(resourceName, "mk:car") == 0 ||
+             std::strcmp(resourceName, "mk:bus") == 0 ||
+             std::strcmp(resourceName, "mk:truck") == 0 ||
+             std::strcmp(resourceName, "mk:tanker_truck") == 0)) {
+            continue;
+        }
+        actor->Tick();
+    }
+}]=]
+        SPAGHETTIKART_3DS_WORLD_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_WORLD_TEXT STREQUAL SPAGHETTIKART_3DS_WORLD_INCLUDE_TEXT)
+        message(FATAL_ERROR "The upstream World actor tick loop changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_WORLD_SOURCE}" "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+
+    file(READ "${SPAGHETTIKART_TOADS_TURNPIKE_SOURCE}" SPAGHETTIKART_3DS_TOADS_TURNPIKE_TEXT)
+    set(SPAGHETTIKART_3DS_TOADS_TURNPIKE_ORIGINAL
+        "${SPAGHETTIKART_3DS_TOADS_TURNPIKE_TEXT}")
+    string(REPLACE
+        "        a /= 2; // Normally vehicle logic is only ran every 2 frames. This slows the vehicles down to match.\n        b /= 2;"
+        "        // PLATFORM_3DS restores the original every-other-tick cadence in World::TickActors."
+        SPAGHETTIKART_3DS_TOADS_TURNPIKE_TEXT
+        "${SPAGHETTIKART_3DS_TOADS_TURNPIKE_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_TOADS_TURNPIKE_TEXT STREQUAL
+       SPAGHETTIKART_3DS_TOADS_TURNPIKE_ORIGINAL)
+        message(FATAL_ERROR "The upstream Toad's Turnpike traffic speed compensation changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_TOADS_TURNPIKE_SOURCE}"
+         "${SPAGHETTIKART_3DS_TOADS_TURNPIKE_TEXT}")
+
     set(SPAGHETTIKART_TRACK_SOURCE "${SPAGHETTIKART_ROOT}/src/engine/tracks/Track.cpp")
     set(SPAGHETTIKART_3DS_TRACK_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/Track_3ds.cpp")
     list(REMOVE_ITEM SPAGHETTIKART_ENGINE_TRACKS "${SPAGHETTIKART_TRACK_SOURCE}")
@@ -810,6 +1154,75 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
     endif()
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
     file(WRITE "${SPAGHETTIKART_3DS_TRACK_SOURCE}" "${SPAGHETTIKART_3DS_TRACK_TEXT}")
+
+    # Citro3D's framebuffer readback is intentionally absent, so copying its
+    # zero-filled CPU buffer into six billboard textures and invalidating all
+    # six GPU cache entries every frame only creates stalls. Keep the original
+    # static course textures on 3DS; desktop source and behavior remain intact.
+    set(MK64_3DS_JUMBOTRON_INVALIDATION_BLOCK [=[    // Invalidate Jumbotron textures so they update each frame
+    // This could be more efficient if we exposed the non-opcode based invalidation to be called
+    // inside copy_framebuffers_port
+    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture68272C);
+    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682928);
+    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682B24);
+    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682D20);
+    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682F1C);
+    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture683118);
+]=])
+
+    file(READ "${SPAGHETTIKART_LUIGI_RACEWAY_SOURCE}"
+         SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT)
+    set(SPAGHETTIKART_3DS_LUIGI_RACEWAY_ORIGINAL
+        "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
+    string(REPLACE "${MK64_3DS_JUMBOTRON_INVALIDATION_BLOCK}" ""
+        SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT
+        "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
+    if(SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT STREQUAL
+       SPAGHETTIKART_3DS_LUIGI_RACEWAY_ORIGINAL)
+        message(FATAL_ERROR "The upstream Luigi Raceway jumbotron invalidation block changed")
+    endif()
+    set(SPAGHETTIKART_3DS_LUIGI_RACEWAY_INVALIDATION_TEXT
+        "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
+    string(REPLACE
+        [=[        CopyJumbotron(D_800DC5DC, D_800DC5E0, currentScreenSection,
+                                            (u16*) gPortFramebuffers[prevFrame]);]=]
+        "        /* PLATFORM_3DS: retain the static billboard texture. */"
+        SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT
+        "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT STREQUAL
+       SPAGHETTIKART_3DS_LUIGI_RACEWAY_INVALIDATION_TEXT)
+        message(FATAL_ERROR "The upstream Luigi Raceway jumbotron copy call changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_SOURCE}"
+         "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
+
+    file(READ "${SPAGHETTIKART_WARIO_STADIUM_SOURCE}"
+         SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT)
+    set(SPAGHETTIKART_3DS_WARIO_STADIUM_ORIGINAL
+        "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}")
+    string(REPLACE "${MK64_3DS_JUMBOTRON_INVALIDATION_BLOCK}" ""
+        SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT
+        "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}")
+    if(SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT STREQUAL
+       SPAGHETTIKART_3DS_WARIO_STADIUM_ORIGINAL)
+        message(FATAL_ERROR "The upstream Wario Stadium jumbotron invalidation block changed")
+    endif()
+    set(SPAGHETTIKART_3DS_WARIO_STADIUM_INVALIDATION_TEXT
+        "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}")
+    string(REPLACE
+        "        CopyJumbotron(D_800DC5DC, D_800DC5E0, currentScreenSection, (u16*) gPortFramebuffers[prevFrame]);"
+        "        /* PLATFORM_3DS: retain the static billboard texture. */"
+        SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT
+        "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT STREQUAL
+       SPAGHETTIKART_3DS_WARIO_STADIUM_INVALIDATION_TEXT)
+        message(FATAL_ERROR "The upstream Wario Stadium jumbotron copy call changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_WARIO_STADIUM_SOURCE}"
+         "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}")
+
     file(GLOB SPAGHETTIKART_ENGINE_VEHICLES CONFIGURE_DEPENDS
         "${SPAGHETTIKART_ROOT}/src/engine/vehicles/*.cpp"
     )
@@ -844,7 +1257,11 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         ${SPAGHETTIKART_ENGINE_PARTICLES}
         ${SPAGHETTIKART_ENGINE_SKY}
         ${SPAGHETTIKART_ENGINE_TRACKS}
+        "${SPAGHETTIKART_3DS_WORLD_SOURCE}"
         "${SPAGHETTIKART_3DS_TRACK_SOURCE}"
+        "${SPAGHETTIKART_3DS_TOADS_TURNPIKE_SOURCE}"
+        "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_SOURCE}"
+        "${SPAGHETTIKART_3DS_WARIO_STADIUM_SOURCE}"
         ${SPAGHETTIKART_ENGINE_VEHICLES}
         ${SPAGHETTIKART_ENGINE_REGISTRY}
     )
@@ -855,6 +1272,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/include"
         "${SPAGHETTIKART_ROOT}/include/assets"
         "${SPAGHETTIKART_ROOT}/src"
+        "${SPAGHETTIKART_ROOT}/src/engine"
         "${SPAGHETTIKART_ROOT}/src/engine/tracks"
         "${SPAGHETTIKART_ROOT}/libultraship/include"
         "${SPAGHETTIKART_ROOT}/libultraship/include/libultraship"

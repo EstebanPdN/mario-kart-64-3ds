@@ -45,7 +45,6 @@ constexpr size_t kFontGlyphCount = 42;
 constexpr float kOptionsTabY = 36.0f;
 constexpr float kOptionsRowY = 70.0f;
 constexpr float kOptionsRowStep = 39.0f;
-constexpr const char* kOptionLogoResource = "__OTR__textures/texture_tkmk00/texture_option";
 constexpr const char* kGameSelectOptionResource = "__OTR__textures/texture_tkmk00/texture_l_option";
 constexpr const char* kGameSelectDataResource = "__OTR__textures/texture_tkmk00/texture_r_data";
 constexpr const char* kSelectionTriangleResource =
@@ -135,6 +134,7 @@ struct RaceHudTextures {
     UiTexture timerDigits;
     std::array<UiTexture, 8> places = {};
     std::array<UiTexture, 8> portraits = {};
+    UiTexture questionPortrait;
     UiTexture portraitBorder;
     std::array<UiTexture, 8> standingRanks = {};
     std::array<UiTexture, 16> items = {};
@@ -154,7 +154,6 @@ struct BottomUiState {
     UiTexture menuBackground;
     UiTexture coursePreview;
     UiTexture minimap;
-    UiTexture optionLogo;
     UiTexture gameSelectOption;
     UiTexture gameSelectData;
     UiTexture selectionTriangle;
@@ -268,6 +267,11 @@ constexpr std::array<const char*, 8> kPortraitPaletteResources = {
     "__OTR__textures/common_data/common_tlut_portrait_peach",
     "__OTR__textures/common_data/common_tlut_portrait_bowser",
 };
+
+constexpr const char* kQuestionPortraitResource =
+    "__OTR__textures/common_data/common_texture_portrait_question_mark";
+constexpr const char* kQuestionPortraitPaletteResource =
+    "__OTR__textures/common_data/common_tlut_portrait_bomb_kart_and_question_mark";
 
 constexpr std::array<const char*, 16> kItemResources = {
     "__OTR__textures/common_data/common_texture_item_window_none",
@@ -832,6 +836,8 @@ void LoadRaceHudTextures() {
                     kStandingRankPaletteResource);
         LoadTexture(kMinimapKartResources[index], hud.minimapKarts[index]);
     }
+    LoadTexture(kQuestionPortraitResource, hud.questionPortrait,
+                kQuestionPortraitPaletteResource);
     LoadTexture(kPortraitBorderResource, hud.portraitBorder);
     for (size_t index = 0; index < hud.items.size(); ++index) {
         LoadTexture(kItemResources[index], hud.items[index], kItemPaletteResources[index]);
@@ -847,6 +853,7 @@ void DeleteRaceHudTextures() {
     DeleteTexture(hud.timerDigits);
     DeleteTextures(hud.places);
     DeleteTextures(hud.portraits);
+    DeleteTexture(hud.questionPortrait);
     DeleteTexture(hud.portraitBorder);
     DeleteTextures(hud.standingRanks);
     DeleteTextures(hud.items);
@@ -930,7 +937,7 @@ void SaveChangedSetting(const char* successText) {
 
 uint8_t RowCount(OptionsTab tab) {
     switch (tab) {
-        case OptionsTab::Game: return 1;
+        case OptionsTab::Game: return sUi.modalOpenedFromPause ? 2 : 1;
         case OptionsTab::Screen: return 3;
         case OptionsTab::Gameplay: return 2;
         case OptionsTab::Developer: return 3;
@@ -952,6 +959,7 @@ void CloseOptions() {
         Mk64Settings3DSSave();
     }
     sUi.modalOpen = false;
+    sUi.modalOpenedFromPause = false;
     sUi.selectedRow = 0;
     sUi.bottomDirty = true;
 }
@@ -966,6 +974,13 @@ void ActivateSelectedRow(int direction) {
     const int step = direction < 0 ? -1 : 1;
     switch (sUi.tab) {
         case OptionsTab::Game:
+            if (sUi.modalOpenedFromPause) {
+                const Mk64PauseAction3DS action = sUi.selectedRow == 0
+                                                       ? MK64_PAUSE_ACTION_CONTINUE
+                                                       : MK64_PAUSE_ACTION_QUIT;
+                if (Mk64GameState3DSPerformPauseAction(action)) CloseOptions();
+                return;
+            }
             CloseOptions();
             return;
         case OptionsTab::Screen:
@@ -1077,7 +1092,14 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
             return;
         }
     }
-    if (PointInside(x, y, 84, 207, 152, 30)) CloseOptions();
+    if (PointInside(x, y, 84, 207, 152, 30)) {
+        if (sUi.modalOpenedFromPause) {
+            sUi.selectedRow = 0;
+            ActivateSelectedRow(1);
+        } else {
+            CloseOptions();
+        }
+    }
 }
 
 void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
@@ -1091,8 +1113,13 @@ void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
         return;
     }
 
-    if ((input.downMask & KEY_B) != 0) {
-        CloseOptions();
+    if ((input.downMask & (KEY_B | KEY_START)) != 0) {
+        if (sUi.modalOpenedFromPause) {
+            sUi.selectedRow = 0;
+            ActivateSelectedRow(1);
+        } else {
+            CloseOptions();
+        }
         return;
     }
     if ((input.downMask & KEY_L) != 0) {
@@ -1112,7 +1139,12 @@ void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
         sUi.selectedRow = static_cast<uint8_t>((sUi.selectedRow + 1U) % rows);
         sUi.bottomDirty = true;
     }
-    if ((input.downMask & KEY_DLEFT) != 0) {
+    if (sUi.tab == OptionsTab::Game) {
+        // Continue and Quit are actions, not adjustable values. Requiring A
+        // prevents an ordinary left/right navigation press on QUIT from
+        // ending the race accidentally.
+        if ((input.downMask & KEY_A) != 0) ActivateSelectedRow(1);
+    } else if ((input.downMask & KEY_DLEFT) != 0) {
         ActivateSelectedRow(-1);
     } else if ((input.downMask & (KEY_DRIGHT | KEY_A)) != 0) {
         ActivateSelectedRow(1);
@@ -1165,12 +1197,13 @@ void DrawGameSelect() {
         DrawText("R DATA", 232.0f, 111.0f, 0.8f, C2D_Color32(255, 255, 255, 255),
                  C2D_AlignCenter, 0.7f, true);
     }
+    DrawText(kBuildVersion, 314.0f, 222.0f, 0.46f,
+             C2D_Color32(155, 255, 171, 255), C2D_AlignRight, 0.76f, true);
 }
 
 void DrawTimerDigits(float x, float y, float scale) {
     if (!sUi.raceHud.timerDigits.initialized) return;
-    int hundredthsTotal = std::clamp(static_cast<int>(sUi.game.courseTimerSeconds * 100.0f),
-                                     0, 599999);
+    int hundredthsTotal = std::clamp<int>(sUi.game.courseTimerCentiseconds, 0, 599999);
     const int minutes = hundredthsTotal / 6000;
     hundredthsTotal %= 6000;
     const int seconds = hundredthsTotal / 100;
@@ -1241,53 +1274,75 @@ void DrawMinimap() {
 void DrawRaceHud() {
     DrawRaceBackground(204.0f);
 
-    const int item = std::clamp<int>(sUi.game.currentItem, 0,
-                                     static_cast<int>(sUi.raceHud.items.size()) - 1);
-    DrawTexture(sUi.raceHud.items[static_cast<size_t>(item)], 6.0f, 5.0f, 40.0f, 32.0f, 0.7f);
-    DrawTexture(sUi.raceHud.timeLabel, 52.0f, 13.0f, 32.0f, 16.0f, 0.7f);
-    DrawTimerDigits(84.0f, 13.0f, 1.0f);
+    // Preserve the original 320x240 HUD scale: lap at upper left, the live
+    // item-window/roulette state in the center, and time at upper right.
     if (sUi.game.gameMode != 3) {
-        DrawTexture(sUi.raceHud.lapLabel, 154.0f, 17.0f, 32.0f, 8.0f, 0.7f);
+        DrawTexture(sUi.raceHud.lapLabel, 8.0f, 17.0f, 32.0f, 8.0f, 0.7f);
         const int lap = std::clamp<int>(sUi.game.currentLap, 1, 3) - 1;
         DrawTexture(sUi.raceHud.lapCounts[static_cast<size_t>(lap)],
-                    182.0f, 13.0f, 32.0f, 16.0f, 0.7f);
+                    36.0f, 13.0f, 32.0f, 16.0f, 0.7f);
     }
+    if (sUi.game.itemWindowVisible) {
+        const int item = std::clamp<int>(sUi.game.itemTextureIndex, 0,
+                                         static_cast<int>(sUi.raceHud.items.size()) - 1);
+        DrawTexture(sUi.raceHud.items[static_cast<size_t>(item)],
+                    140.0f, 5.0f, 40.0f, 32.0f, 0.7f);
+    }
+    DrawTexture(sUi.raceHud.timeLabel, 202.0f, 13.0f, 32.0f, 16.0f, 0.7f);
+    DrawTimerDigits(236.0f, 13.0f, 1.0f);
 
-    constexpr size_t kVisibleStandings = 5;
-    for (size_t rank = 0; rank < kVisibleStandings && rank < sUi.game.standingCount; ++rank) {
+    for (size_t rank = 0; rank < sUi.game.standingCount; ++rank) {
         const int character = sUi.game.standingCharacterIds[rank];
-        if (character < 0 || character >= 8) continue;
-        const float y = 43.0f + rank * 27.0f;
-        C2D_DrawRectSolid(7.0f, y, 0.48f, 26.0f, 26.0f, C2D_Color32(0, 0, 0, 220));
-        DrawTexture(sUi.raceHud.portraits[static_cast<size_t>(character)],
-                    7.0f, y, 26.0f, 26.0f, 0.6f);
-        DrawTexture(sUi.raceHud.portraitBorder, 7.0f, y, 26.0f, 26.0f, 0.64f);
-        DrawTexture(sUi.raceHud.standingRanks[rank], 37.0f, y + 6.0f,
-                    14.0f, 14.0f, 0.66f);
-        if (sUi.game.standingPlayerIds[rank] == 0 && sUi.selectionTriangle.initialized) {
-            DrawTexture(sUi.selectionTriangle, 54.0f, y + 10.0f, 10.0f, 6.0f, 0.67f);
+        if (character < 0 || character >= 8 || sUi.game.standingNativeY[rank] < 0.0f) continue;
+        // Native X/Y and direction are the same animated values consumed by
+        // func_80050320. Only shift Y below the new top row.
+        const float centerX = sUi.game.standingNativeX[rank];
+        const float centerY = sUi.game.standingNativeY[rank] + 24.0f;
+        const float x = centerX - 16.0f;
+        const float y = centerY - 16.0f;
+        const bool isPlayer = sUi.game.standingPlayerIds[rank] == 0;
+        const bool unknown = sUi.game.standingUnknown[rank];
+        const uint8_t portraitAlpha = unknown ? sUi.game.standingAlpha
+                                              : (isPlayer ? 255 : sUi.game.standingAlpha);
+        C2D_DrawRectSolid(x, y, 0.48f, 32.0f, 32.0f,
+                          C2D_Color32(0, 0, 0, portraitAlpha));
+        C2D_ImageTint portraitTint = {};
+        C2D_PlainImageTint(&portraitTint, C2D_Color32(255, 255, 255, portraitAlpha), 1.0f);
+        UiTexture& portrait = unknown ? sUi.raceHud.questionPortrait
+                                      : sUi.raceHud.portraits[static_cast<size_t>(character)];
+        DrawTexture(portrait,
+                    x, y, 32.0f, 32.0f, 0.6f, &portraitTint);
+        if (unknown) continue;
+        if (isPlayer) {
+            C2D_ImageTint borderTint = {};
+            C2D_PlainImageTint(&borderTint,
+                               C2D_Color32(sUi.game.playerBorderRed,
+                                           sUi.game.playerBorderGreen,
+                                           sUi.game.playerBorderBlue, 255), 1.0f);
+            DrawTexture(sUi.raceHud.portraitBorder, x, y, 32.0f, 32.0f, 0.64f,
+                        &borderTint);
         }
+        const float rankX = sUi.game.standingNativeDirection[rank] < 0.0f
+                                ? centerX + 9.0f : centerX - 9.0f;
+        DrawTexture(sUi.raceHud.standingRanks[rank], rankX - 8.0f, centerY - 1.0f,
+                    16.0f, 16.0f, 0.66f, &portraitTint);
     }
 
-    if (sUi.game.gameMode != 3) {
-        int rank = sUi.game.racers[0].rank;
-        if (rank < 0 || rank >= 8) rank = 0;
+    if (sUi.game.gameMode != 3 && sUi.game.currentPlaceVisible) {
+        const size_t place = std::min<size_t>(sUi.game.currentPlaceIndex,
+                                              sUi.raceHud.places.size() - 1U);
+        const float scale = std::clamp(sUi.game.currentPlaceScale, 0.25f, 1.0f);
+        const float width = 128.0f * scale;
+        const float height = 64.0f * scale;
         C2D_ImageTint placeTint = {};
-        C2D_PlainImageTint(&placeTint, C2D_Color32(255, 218, 65, 255), 1.0f);
-        DrawTexture(sUi.raceHud.places[static_cast<size_t>(rank)], 43.0f, 181.0f,
-                    112.0f, 56.0f, 0.68f, &placeTint);
+        C2D_PlainImageTint(&placeTint,
+                           C2D_Color32(255, sUi.game.currentPlaceGreen, 0, 255), 1.0f);
+        DrawTexture(sUi.raceHud.places[place],
+                    sUi.game.currentPlaceNativeX - width * 0.5f,
+                    sUi.game.currentPlaceNativeY - height * 0.5f,
+                    width, height, 0.68f, &placeTint);
     }
     DrawMinimap();
-}
-
-void DrawPausedPrompt() {
-    DrawRaceBackground(204.0f);
-    if (sUi.gameSelectOption.initialized) {
-        DrawTexture(sUi.gameSelectOption, 116.5f, 105.0f, 87.0f, 28.5f, 0.7f);
-    } else {
-        DrawText("L OPTION", 160.0f, 110.0f, 0.8f, C2D_Color32(255, 255, 255, 255),
-                 C2D_AlignCenter, 0.7f, true);
-    }
 }
 
 const char* TabName(OptionsTab tab) {
@@ -1305,8 +1360,12 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
     value[0] = '\0';
     switch (tab) {
         case OptionsTab::Game:
-            *label = sUi.modalOpenedFromPause ? "RETURN TO PAUSE" : "CLOSE OPTIONS";
-            std::snprintf(value, valueSize, "A OR TOUCH");
+            if (sUi.modalOpenedFromPause) {
+                *label = row == 0 ? "CONTINUE GAME" : "QUIT";
+            } else {
+                *label = "CLOSE OPTIONS";
+                std::snprintf(value, valueSize, "A OR TOUCH");
+            }
             break;
         case OptionsTab::Screen:
             if (row == 0) {
@@ -1363,12 +1422,6 @@ void DrawOptions() {
     if (sUi.game.racing) DrawRaceBackground(205.0f); else DrawDimMenuBackground();
     C2D_DrawRectSolid(0.0f, 0.0f, 0.25f, kBottomWidth, kBottomHeight,
                       C2D_Color32(0, 0, 0, 82));
-    if (sUi.optionLogo.initialized) {
-        DrawTexture(sUi.optionLogo, 95.0f, 2.0f, 130.0f, 32.0f, 0.67f);
-    } else {
-        DrawText("OPTION", 160.0f, 7.0f, 0.95f, C2D_Color32(255, 225, 75, 255),
-                 C2D_AlignCenter, 0.67f, true);
-    }
     for (int index = 0; index < static_cast<int>(OptionsTab::Count); ++index) {
         const bool selected = index == static_cast<int>(sUi.tab);
         DrawText(TabName(static_cast<OptionsTab>(index)), index * 80.0f + 40.0f,
@@ -1404,7 +1457,8 @@ void DrawOptions() {
         C2D_DrawRectSolid(22.0f, y + 29.0f, 0.44f, 282.0f, 1.0f,
                           C2D_Color32(255, 255, 255, selected ? 75 : 35));
     }
-    DrawText("B BACK", 160.0f, 214.0f, 0.68f, C2D_Color32(235, 238, 225, 255),
+    DrawText(sUi.modalOpenedFromPause ? "START OR B  CONTINUE" : "B BACK",
+             160.0f, 214.0f, 0.68f, C2D_Color32(235, 238, 225, 255),
              C2D_AlignCenter, 0.74f, true);
     DrawStatus();
 }
@@ -1517,7 +1571,7 @@ void DrawBottom() {
         switch (sUi.view) {
             case BaseView::GameSelect: DrawGameSelect(); break;
             case BaseView::RaceHud: DrawRaceHud(); break;
-            case BaseView::Paused: DrawPausedPrompt(); break;
+            case BaseView::Paused: DrawRaceBackground(204.0f); break;
             case BaseView::Background:
             default: DrawDimMenuBackground(); break;
         }
@@ -1591,7 +1645,6 @@ extern "C" bool Mk64BottomUI3DSInit() {
     Mk64GameState3DSGetBottomUISnapshot(&sUi.game);
     sUi.view = GetBaseView(sUi.game);
     LoadTexture(sUi.game.mainBackgroundTexture, sUi.menuBackground);
-    LoadTexture(kOptionLogoResource, sUi.optionLogo);
     LoadTexture(kGameSelectOptionResource, sUi.gameSelectOption);
     LoadTexture(kGameSelectDataResource, sUi.gameSelectData);
     LoadTexture(kSelectionTriangleResource, sUi.selectionTriangle);
@@ -1613,7 +1666,6 @@ extern "C" void Mk64BottomUI3DSShutdown() {
     // frame is active drains Citro3D's GPU queue; FrameSync alone only waits
     // for VBlank and is not a resource-lifetime fence.
     if (sUi.bottomTarget != nullptr) C3D_RenderTargetDetachOutput(sUi.bottomTarget);
-    C3D_FrameSync();
     Mk64GameState3DSApplyTurbo(false, 1);
     DrainRetiredTextures();
     DeleteRaceHudTextures();
@@ -1622,7 +1674,6 @@ extern "C" void Mk64BottomUI3DSShutdown() {
     DeleteTexture(sUi.menuBackground);
     DeleteTexture(sUi.gameSelectData);
     DeleteTexture(sUi.gameSelectOption);
-    DeleteTexture(sUi.optionLogo);
     DeleteTexture(sUi.selectionTriangle);
     DeleteFontAtlas();
     if (sUi.bottomTarget != nullptr) C3D_RenderTargetDelete(sUi.bottomTarget);
@@ -1695,8 +1746,8 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
     if (!sUi.modalOpen && !Mk64Settings3DSGetOverlayEnabled()) {
         if (!wasPaused && sUi.game.paused) {
             // Pause replaces the race HUD with the same lower-screen Options
-            // panel used from Game Select. It opens once on the pause edge so
-            // B can close it and leave START available to resume the race.
+            // panel used from Game Select. It opens once on the pause edge;
+            // B or START now invokes the single native Continue action.
             OpenOptions(true);
             openedThisFrame = true;
         } else if (sUi.game.gameSelectVisible && (input.downMask & KEY_L) != 0) {
@@ -1753,12 +1804,25 @@ extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
     // work is complete, so textures replaced during PrepareFrame are now safe
     // to release before issuing any new Citro2D commands.
     DrainRetiredTextures();
-    UpdateFpsCounter();
+    Mk64BottomUI3DSRecordPresentation();
     const bool drawTopFps = existingTopTarget != nullptr && Mk64Settings3DSGetShowFpsEnabled();
     if (!sUi.bottomDirty && !drawTopFps) return;
     if (sUi.bottomDirty) {
         DrawBottomBatch();
         sUi.bottomDirty = false;
+    }
+    DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
+}
+
+extern "C" void Mk64BottomUI3DSRecordPresentation() {
+    if (!sUi.initialized) return;
+    UpdateFpsCounter();
+}
+
+extern "C" void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget) {
+    if (!sUi.initialized || existingTopTarget == nullptr ||
+        !Mk64Settings3DSGetShowFpsEnabled()) {
+        return;
     }
     DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
 }

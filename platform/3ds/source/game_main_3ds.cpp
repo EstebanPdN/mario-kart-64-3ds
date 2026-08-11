@@ -41,6 +41,7 @@ uint32_t __ctru_linear_heap_size = 28 * 1024 * 1024;
 
 namespace {
 constexpr int32_t kLogoIntroMenu = 8;
+constexpr uint64_t kSimulationRate = 30;
 
 [[noreturn]] void ExitWithError(const char* message) {
     gfxInitDefault();
@@ -138,6 +139,8 @@ int main() {
     thread5_game_loop();
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-ready");
 
+    uint64_t nextSimulationDeadline = svcGetSystemTick();
+    uint64_t deadlineRemainder = 0;
     while (WindowIsRunning()) {
         if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
             continue;
@@ -150,16 +153,44 @@ int main() {
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
         Mk64BottomUI3DSPrepareFrame();
         thread5_iteration();
+        // HandleEvents() runs inside the display-list iteration and is where
+        // aptMainLoop() observes HOME -> Close Software. Do not enter the
+        // audio worker wait or frame pacer after that close request.
+        if (!WindowIsRunning()) break;
         Mk64Diagnostics3DSSetStage("game-loop-audio");
         Mk64GameAudio3DSPump();
+
+        // Midpoint presentation is adaptive, but gameplay remains a stable
+        // 30 Hz clock. When a pressured frame omits the optional midpoint,
+        // wait outside Citro3D rather than submitting a dummy GPU frame. The
+        // remainder accumulator keeps the 30 Hz deadline exact over time.
+        nextSimulationDeadline += SYSCLOCK_ARM11 / kSimulationRate;
+        deadlineRemainder += SYSCLOCK_ARM11 % kSimulationRate;
+        if (deadlineRemainder >= kSimulationRate) {
+            ++nextSimulationDeadline;
+            deadlineRemainder -= kSimulationRate;
+        }
+        const uint64_t now = svcGetSystemTick();
+        if (now < nextSimulationDeadline) {
+            const uint64_t remainingTicks = nextSimulationDeadline - now;
+            const int64_t remainingNanoseconds = static_cast<int64_t>(
+                remainingTicks * 1000000000ULL / SYSCLOCK_ARM11);
+            if (remainingNanoseconds > 0) svcSleepThread(remainingNanoseconds);
+        } else {
+            // Never compress the next logic interval after a slow resource or
+            // upload frame. Resume the 30 Hz clock from the time actually
+            // reached instead of attempting even one catch-up tick.
+            nextSimulationDeadline = now;
+            deadlineRemainder = 0;
+        }
     }
 
-    Mk64Diagnostics3DSCheckpoint("shutdown");
-    Mk64GameAudio3DSShutdown();
-    Mk64Settings3DSSave();
-    Mk64BottomUI3DSShutdown();
-    Mk64Graphics3DSShutdown();
-    Mk64Resource3DSShutdown();
-    Mk64Diagnostics3DSStop();
+    // WindowIsRunning becomes false after aptMainLoop reports the HOME-menu
+    // close request. Do not run GPU/DSP service teardown in that APT
+    // transition: Citro3D has disabled its VBlank callbacks and any unbounded
+    // service wait can prevent the process from acknowledging closure.
+    // Settings are persisted on every change.
+    Mk64GameAudio3DSAbortForProcessExit();
+    Mk64Diagnostics3DSAbortForProcessExit();
     std::_Exit(0);
 }

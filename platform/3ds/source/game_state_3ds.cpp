@@ -1,4 +1,5 @@
 #include "game_state_3ds.h"
+#include "input_policy_3ds.hpp"
 
 #include "engine/AllTracks.h"
 #include "engine/Cup.h"
@@ -14,10 +15,18 @@
 #include <libultraship/bridge/consolevariablebridge.h>
 
 extern "C" {
+#include "audio/external.h"
 #include "code_80005FD0.h"
+#include "code_80057C60.h"
 #include "main.h"
+#include "menu_items.h"
 #include "menus.h"
+#include "objects.h"
+#include "racing/race_logic.h"
 #include "save.h"
+#include "sounds.h"
+
+extern const int8_t D_800F0B54[];
 }
 
 #include <array>
@@ -85,9 +94,14 @@ const std::array<VanillaTrack, 20> kTracks = {{
     { "mk:big_donut", "big donut", "doughnut", "", minimap_big_donut,
       gTextureCoursePreviewBigDonut, SelectBigDonut },
 }};
+constexpr std::array<uint8_t, 8> kNativePlaceGreen = {
+    255, 237, 215, 191, 162, 130, 97, 58,
+};
 
 size_t sTrackIndex = 0;
 int8_t sLastTopHudEnabled = -1;
+Mk64TopHudRenderMode3DS sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
+bool sWasRacing = false;
 
 void RegisterVanillaTracks() {
     gTrackRegistry.Clear();
@@ -124,6 +138,8 @@ void SelectIndex(size_t index) {
 
 extern "C" bool Mk64GameState3DSInit() {
     sLastTopHudEnabled = -1;
+    sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
+    sWasRacing = false;
     gSky = std::make_unique<Sky>();
     RegisterVanillaTracks();
 
@@ -207,9 +223,20 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
         gMenuSelection == MAIN_MENU && gMainMenuSelection == MAIN_MENU_PLAYER_SELECT;
     snapshot->racing = gGamestate == RACING;
     snapshot->paused = snapshot->racing && gIsGamePaused != 0;
+    if (snapshot->racing && !sWasRacing) sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
+    if (!snapshot->racing) sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
+    sWasRacing = snapshot->racing;
     snapshot->mirrorMode = gIsMirrorMode != 0;
-    snapshot->courseTimerSeconds = gCourseTimer;
+    snapshot->courseTimerCentiseconds = playerHUD[0].someTimer;
+    snapshot->courseTimerSeconds = static_cast<float>(snapshot->courseTimerCentiseconds) / 100.0f;
     snapshot->currentItem = gPlayers[0].currentItemCopy;
+    const int itemWindowObject = gItemWindowObjectByPlayerId[0];
+    if (itemWindowObject >= 0 && itemWindowObject < OBJECT_LIST_SIZE) {
+        const Object& itemObject = gObjectList[itemWindowObject];
+        snapshot->itemWindowVisible = itemObject.state >= 2;
+        snapshot->itemTextureIndex = static_cast<uint8_t>(
+            std::clamp<int>(itemObject.textureListIndex, 0, 15));
+    }
     snapshot->totalLaps = 3;
     const int lap = std::clamp(gLapCountByPlayerId[0] + 1, 1, 3);
     snapshot->currentLap = static_cast<int8_t>(lap);
@@ -252,6 +279,11 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
                 static_cast<int8_t>(playerId);
             snapshot->standingCharacterIds[snapshot->standingCount] =
                 snapshot->racers[playerId].characterId;
+            snapshot->standingLapCounts[snapshot->standingCount] = 0;
+            snapshot->standingNativeX[snapshot->standingCount] = 40.0f;
+            snapshot->standingNativeY[snapshot->standingCount] =
+                35.0f + 32.0f * snapshot->standingCount;
+            snapshot->standingNativeDirection[snapshot->standingCount] = 0.0f;
             ++snapshot->standingCount;
         }
     } else {
@@ -262,11 +294,35 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
                 continue;
             }
             snapshot->standingPlayerIds[snapshot->standingCount] = static_cast<int8_t>(playerId);
-            snapshot->standingCharacterIds[snapshot->standingCount] =
-                snapshot->racers[playerId].characterId;
+            snapshot->standingCharacterIds[snapshot->standingCount] = static_cast<int8_t>(
+                std::clamp<int>(gGPCurrentRaceCharacterIdByRank[rank], 0, 7));
+            snapshot->standingLapCounts[snapshot->standingCount] =
+                static_cast<int8_t>(gLapCountByPlayerId[playerId]);
+            snapshot->standingUnknown[snapshot->standingCount] =
+                IsYoshiValley() && gLapCountByPlayerId[playerId] < 3;
+            snapshot->standingNativeX[snapshot->standingCount] = D_8018D028[rank];
+            snapshot->standingNativeY[snapshot->standingCount] = D_8018D050[rank];
+            snapshot->standingNativeDirection[snapshot->standingCount] = D_8018D078[rank];
             ++snapshot->standingCount;
         }
     }
+
+    snapshot->standingAlpha = static_cast<uint8_t>(std::clamp<int>(D_8018D3E0, 0, 255));
+    snapshot->playerBorderRed = static_cast<uint8_t>(std::clamp<int>(D_8018D3E4, 0, 255));
+    snapshot->playerBorderGreen = static_cast<uint8_t>(std::clamp<int>(D_8018D3E8, 0, 255));
+    snapshot->playerBorderBlue = static_cast<uint8_t>(std::clamp<int>(D_8018D3EC, 0, 255));
+    snapshot->currentPlaceVisible = playerHUD[0].unk_81 != 0;
+    snapshot->currentPlaceIndex = static_cast<uint8_t>(
+        std::clamp<int>(playerHUD[0].lapCount == 3 ? gGPCurrentRaceRankByPlayerId[0]
+                                                   : D_8018CF98[0],
+                        0, 7));
+    const int placeColorIndex = playerHUD[0].lapCount == 3
+                                    ? std::clamp<int>(D_80165594, 0, 7)
+                                    : snapshot->currentPlaceIndex;
+    snapshot->currentPlaceGreen = kNativePlaceGreen[placeColorIndex];
+    snapshot->currentPlaceScale = playerHUD[0].rankScaling;
+    snapshot->currentPlaceNativeX = playerHUD[0].rankX + playerHUD[0].slideRankX;
+    snapshot->currentPlaceNativeY = playerHUD[0].rankY + playerHUD[0].slideRankY;
 
     Properties* properties = CM_GetProps();
     if (properties == nullptr) return;
@@ -289,7 +345,48 @@ extern "C" void Mk64GameState3DSSetTopHudEnabled(bool enabled) {
     const int8_t value = enabled ? 1 : 0;
     if (sLastTopHudEnabled == value) return;
     sLastTopHudEnabled = value;
+    sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
     CVarSetInteger("gDrawHUD", enabled ? 1 : 0);
+}
+
+extern "C" bool Mk64GameState3DSRaceControlsActive() {
+    return gGamestate == RACING && gIsGamePaused == 0;
+}
+
+extern "C" bool Mk64GameState3DSCycleHiddenTopHud() {
+    if (!Mk64GameState3DSRaceControlsActive() || CVarGetInteger("gDrawHUD", true) != 0) {
+        return false;
+    }
+    sHiddenTopHudMode = mk64_3ds::NextHiddenTopHudMode(sHiddenTopHudMode);
+    return true;
+}
+
+extern "C" int Mk64GameState3DSGetTopHudRenderMode() {
+    if (gGamestate != RACING || gIsGamePaused != 0) return MK64_TOP_HUD_RENDER_NONE;
+    if (CVarGetInteger("gDrawHUD", true) != 0) return MK64_TOP_HUD_RENDER_FULL;
+    return static_cast<int>(sHiddenTopHudMode);
+}
+
+extern "C" bool Mk64GameState3DSPerformPauseAction(Mk64PauseAction3DS action) {
+    if (gGamestate != RACING || gIsGamePaused == 0) return false;
+    MenuItem* pauseItem = find_menu_items(MENU_ITEM_PAUSE);
+    if (pauseItem == nullptr) return false;
+    if (action == MK64_PAUSE_ACTION_CONTINUE) {
+        pauseItem->state = 0;
+        gIsGamePaused = 0;
+        func_8028DF38();
+        func_800C9F90(0);
+        return true;
+    }
+    if (action == MK64_PAUSE_ACTION_QUIT) {
+        const int mode = std::clamp<int>(gModeSelection, 0, 3);
+        pauseItem->state = D_800F0B54[mode];
+        func_8009DFE0(30);
+        play_sound2(SOUND_ACTION_CONTINUE_UNKNOWN);
+        func_800CA330(60);
+        return true;
+    }
+    return false;
 }
 
 extern "C" void Mk64GameState3DSApplyTurbo(bool active, uint8_t multiplier) {

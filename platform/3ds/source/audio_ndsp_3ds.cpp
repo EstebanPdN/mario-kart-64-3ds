@@ -10,7 +10,9 @@
 namespace {
 
 constexpr int kChannel = 0;
-constexpr size_t kBufferCount = 4;
+// Six waves match the proven 3DS ports' safety margin and let the producer
+// absorb course-start SD/GPU stalls without immediately starving NDSP.
+constexpr size_t kBufferCount = 6;
 constexpr size_t kFramesPerBuffer = 2048;
 constexpr size_t kChannels = 2;
 
@@ -152,6 +154,15 @@ extern "C" uint32_t Mk64Audio3DSQueuedCount(void) {
 
 extern "C" uint32_t Mk64Audio3DSDroppedCount(void) {
     return sDroppedBuffers.load(std::memory_order_relaxed);
+}
+
+extern "C" bool Mk64Audio3DSHasReusableBuffer(void) {
+    if (!sInitialized) return false;
+    BufferLockGuard lock;
+    return std::any_of(sBuffers.begin(), sBuffers.end(),
+                       [](const AudioBuffer& candidate) {
+                           return IsReusable(candidate.wave);
+                       });
 }
 
 extern "C" bool Mk64Audio3DSQueueStereoS16(const int16_t* samples, size_t frameCount) {

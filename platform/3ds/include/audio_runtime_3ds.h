@@ -11,6 +11,7 @@ void Mk64GameAudio3DSSetPaused(bool paused);
 void Mk64GameAudio3DSBeginFrame(void);
 void Mk64GameAudio3DSPump(void);
 void Mk64GameAudio3DSShutdown(void);
+void Mk64GameAudio3DSAbortForProcessExit(void);
 
 #ifdef __cplusplus
 }

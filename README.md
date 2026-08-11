@@ -18,33 +18,38 @@ The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O
 interface, 3DS input, NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game
 remains a work in progress and is not yet a stable release.
 
-The v0.19 pre-release rebuilds the native bottom-screen interface with the game's own font and HUD textures. Game
+The v0.20 pre-release rebuilds the native bottom-screen interface with the game's own font and HUD textures. Game
 Select shows only the smaller stock `L Option` and `R Data` entries over a correctly oriented, aspect-filled menu
 background at roughly 20% visibility. Options captures controller and touch input without changing the top-screen
 selection and provides Game, Screen, Gameplay, and Developer tabs without the earlier blue frames. During a race, the
-bottom screen uses the selected course preview as a correctly oriented crop at roughly 20% visibility and reproduces
-the stock item, time, lap, leading-five ranking, current-place, and minimap elements. The duplicate top HUD is off by
-default and remains selectable. Pausing automatically replaces the race HUD with Options. Settings are stored locally
-in `sd:/3ds/MK64/mk64-3ds.cfg`.
+bottom screen uses the selected course preview as a correctly oriented crop at roughly 20% visibility. Its upper row
+contains lap, the live item roulette, and time; the animated leading-four ranking, current place, and minimap use the
+same live state and assets as the original HUD. With Top HUD off, `Y` cycles only no top overlay, lap progress, and the
+speedometer. Pausing now opens one lower-screen interface with Continue Game and Quit while the top screen retains only
+the centered cup/class/course title. Settings are stored locally in `sd:/3ds/MK64/mk64-3ds.cfg`.
 
-The renderer now preserves the red, green, and blue-purple filters used by Game Select, Player Select, and Course
+The renderer preserves the red, green, and blue-purple filters used by Game Select, Player Select, and Course
 Select even when an N64 combiner leaves too few PICA200 stages for the exact grayscale pass. A clean 3DS build also
-restores the stock dark treatment behind unselected character portraits. The FPS counter uses the same native font,
+uses fixed-width stock shading behind unselected character portraits without covering adjacent cells. The FPS counter uses the same native font,
 has no black backing box, and keeps fixed storage so race frames cannot corrupt its text.
 
-Mario Kart 64's simulation remains 30 Hz. At the default 400-pixel setting on New Nintendo 3DS, v0.19 can present a
+Mario Kart 64's simulation remains 30 Hz. At the default 400-pixel setting on New Nintendo 3DS, v0.20 can present a
 bounded matrix-interpolated midpoint between simulation key frames. The adaptive presenter skips that extra decode and
-uses a retained image when frame time, texture uploads, resource loading, Citro3D, or the audio safety margin indicates
-pressure; the mandatory key frame is never skipped. Old Nintendo 3DS and the 800-pixel quality mode present key frames
-at a 30 Hz target. These are implementation targets, not measured guarantees: sustained 60 FPS and 30 FPS are not
-claimed without representative physical-hardware captures.
+presentation when frame time, texture uploads, resource loading, Citro3D, or the audio safety margin indicates pressure;
+the mandatory key frame is never skipped, and a monotonic 30 Hz deadline prevents an omitted midpoint from speeding up
+the simulation. Old Nintendo 3DS and the 800-pixel quality mode present key frames at a 30 Hz target. These are
+implementation targets, not measured guarantees: sustained 60 FPS and 30 FPS are not claimed without representative
+physical-hardware captures.
 
-Race setup now preloads only display-list texture dependencies within fixed 1 MiB/2,048-entry limits and at most the
-eight current kart frames. Indexed O2R reads, constant-time prefetch deduplication, buffered diagnostics, and aggregate
+Race setup preloads display-list texture dependencies within fixed 1 MiB/2,048-entry limits and a bounded five-frame,
+four-wheel kart window for each one-player racer. The unsupported per-frame CPU framebuffer readback and zero-filled
+jumbotron upload path is omitted on 3DS, recovering roughly 450 KiB of static memory and substantial race-frame work.
+Toad's Turnpike traffic restores its original every-other-logic-tick cadence instead of evaluating all 28 traffic paths
+twice per key frame. Indexed O2R reads, constant-time prefetch deduplication, buffered diagnostics, and aggregate
 telemetry remove repeated name scans and hot-path SD logging. Audio synthesis uses an auxiliary ARM11 core when the
-model permits it, with a safe synchronous fallback. Its approximately 2.54 MiB sound graph is resolved once before
-graphics start, and NDSP queue access and remaining-sample accounting are synchronized so rendering cannot race the
-mixer or mistake a nearly consumed buffer for a full one.
+model permits it, with a safe synchronous fallback. Six NDSP waves and a bounded two-block refill target absorb short
+stalls without advancing audio when no output wave is reusable. Runtime telemetry records simulation pumps, synthesis
+blocks, catch-up pumps, queue failures, and observed empty-buffer transitions separately.
 
 These choices were informed by a source-level review of
 [Super Mario 64 3DS Port Ultimate](https://github.com/Epic0522/Super-Mario-64-3ds-port---Ultimate): New-3DS CPU/L2
@@ -63,14 +68,15 @@ central-directory spools are removed before a retry, legacy v0.18 partial quaran
 quarantine now keeps only the newest rejected archive of each class instead of growing without a bound.
 
 During extraction, lid-close sleep and HOME suspension are disabled so the console can continue unattended; display
-refreshes stop while the lid is closed. After the generated archive passes validation and is moved into place, the app
-requests a persistent blue notification LED and restores the previous sleep policy. The LED is best-effort on 3DSX
-environments that do not grant the MCU service. Keep the console charged for a long first-run extraction. These changes
-compile successfully, but complete extraction, lid behavior, and the notification LED still require physical Nintendo
-3DS testing.
+refreshes stop while the lid is closed, and a lightweight shell-state watcher restores the latest framebuffer when the
+lid opens. The progress bar assigns ROM search and SHA-1 verification only 1–8%, preparation 9–15%, O2R generation
+16–88%, complete payload/CRC readback 89–99%, and 100% only after the validated temporary archive is atomically moved
+into place. The app then requests a persistent blue notification LED and restores the previous sleep policy. The LED is
+best-effort on 3DSX environments that do not grant the MCU service. Keep the console charged for a long first-run
+extraction. Complete extraction, lid behavior, and the notification LED still require physical Nintendo 3DS testing.
 
-Known incomplete effects include framebuffer-copy/readback features used by course video screens. Old Nintendo
-3DS and New Nintendo 3DS performance still require real-hardware profiling.
+Dynamic course video-screen readback is unsupported by the Citro3D backend, so those billboards retain their static
+course textures. Old Nintendo 3DS and New Nintendo 3DS performance still require real-hardware profiling.
 
 ## Build
 
@@ -90,8 +96,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.19.3dsx
-build-3ds/game/mk64-3ds-v0.19.cia
+build-3ds/game/mk64-3ds-game-v0.20.3dsx
+build-3ds/game/mk64-3ds-v0.20.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -157,11 +163,12 @@ Install the CIA with your normal homebrew installer, or place the 3DSX in a Home
 | Circle Pad | Control Stick |
 | A / B | A / B |
 | R | R (hop/drift) |
-| L | L; opens bottom Options from Game Select or pause |
+| L | Use item during a race; open bottom Options from Game Select |
 | Select | Save a diagnostic dump (not passed to the game) |
 | D-Pad | D-Pad |
-| X / Y | C-Up / C-Left |
-| ZL / ZR | C-Down / C-Right |
+| X | C-Up / camera distance |
+| Y | Cycle the top HUD during a race; C-Left outside races |
+| ZL / ZR | C-Down / C-Right outside races |
 | C Stick | Hold for the selected Turbo Speed during a race |
 | Touch screen | Open and navigate bottom-screen controls |
 | Start | Start |

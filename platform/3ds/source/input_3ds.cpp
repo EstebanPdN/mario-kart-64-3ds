@@ -1,5 +1,6 @@
 #include "input_3ds.h"
 #include "diagnostics_3ds.h"
+#include "input_policy_3ds.hpp"
 
 #include <3ds.h>
 
@@ -10,13 +11,16 @@ extern "C" bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS*) __attribut
 extern "C" uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t) __attribute__((weak));
 extern "C" bool Mk64BottomUI3DSConsumesCStick(void) __attribute__((weak));
 extern "C" bool Mk64BottomUI3DSIsModalOpen(void) __attribute__((weak));
+extern "C" bool Mk64GameState3DSRaceControlsActive(void) __attribute__((weak));
+extern "C" bool Mk64GameState3DSCycleHiddenTopHud(void) __attribute__((weak));
+extern "C" int Mk64GameState3DSGetTopHudRenderMode(void) __attribute__((weak));
 
 namespace {
 
 constexpr int kCirclePadRange = 156;
 constexpr int kN64StickRange = 80;
 constexpr int kCircleDeadzone = 12;
-constexpr int kCStickButtonThreshold = 70;
+u32 sPreviousFilteredKeys = 0;
 
 int8_t ScaleStickAxis(int value) {
     value = std::clamp(value, -kCirclePadRange, kCirclePadRange);
@@ -29,6 +33,7 @@ int8_t ScaleStickAxis(int value) {
 } // namespace
 
 extern "C" void Mk64Input3DSInit(void) {
+    sPreviousFilteredKeys = 0;
     if (Mk64Diagnostics3DSOwnsHid == nullptr || !Mk64Diagnostics3DSOwnsHid()) {
         hidScanInput();
     }
@@ -48,40 +53,36 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     if (Mk64BottomUI3DSFilterGameKeys != nullptr) {
         keys = Mk64BottomUI3DSFilterGameKeys(keys);
     }
+    const u32 pressedKeys = keys & ~sPreviousFilteredKeys;
+    sPreviousFilteredKeys = keys;
+    const bool raceControls = Mk64GameState3DSRaceControlsActive != nullptr &&
+                              Mk64GameState3DSRaceControlsActive();
 
-    if ((keys & KEY_A) != 0) {
-        pad->buttons |= MK64_N64_A;
+    const bool yHeld = (keys & KEY_Y) != 0;
+    const bool yPressed = (pressedKeys & KEY_Y) != 0;
+    if (mk64_3ds::ShouldCycleHiddenTopHud(raceControls, yHeld, yPressed) &&
+        Mk64GameState3DSCycleHiddenTopHud != nullptr) {
+        Mk64GameState3DSCycleHiddenTopHud();
     }
-    if ((keys & KEY_B) != 0) {
-        pad->buttons |= MK64_N64_B;
-    }
-    if ((keys & KEY_X) != 0) {
-        pad->buttons |= MK64_N64_CUP;
-    }
-    if ((keys & KEY_Y) != 0) {
-        pad->buttons |= MK64_N64_CLEFT;
-    }
-    if ((keys & KEY_START) != 0) {
-        pad->buttons |= MK64_N64_START;
-    }
-    if ((keys & KEY_L) != 0) {
-        pad->buttons |= MK64_N64_L;
-    }
-    if ((keys & KEY_R) != 0) {
-        pad->buttons |= MK64_N64_R;
-    }
-    if ((keys & KEY_DUP) != 0) {
-        pad->buttons |= MK64_N64_DUP;
-    }
-    if ((keys & KEY_DDOWN) != 0) {
-        pad->buttons |= MK64_N64_DDOWN;
-    }
-    if ((keys & KEY_DLEFT) != 0) {
-        pad->buttons |= MK64_N64_DLEFT;
-    }
-    if ((keys & KEY_DRIGHT) != 0) {
-        pad->buttons |= MK64_N64_DRIGHT;
-    }
+    const int topHudMode = raceControls && yHeld &&
+                                   Mk64GameState3DSGetTopHudRenderMode != nullptr
+                               ? Mk64GameState3DSGetTopHudRenderMode()
+                               : MK64_TOP_HUD_RENDER_FULL;
+    mk64_3ds::PrimaryInputPolicy3DS primaryInput;
+    primaryInput.a = (keys & KEY_A) != 0;
+    primaryInput.b = (keys & KEY_B) != 0;
+    primaryInput.x = (keys & KEY_X) != 0;
+    primaryInput.y = yHeld;
+    primaryInput.start = (keys & KEY_START) != 0;
+    primaryInput.l = (keys & KEY_L) != 0;
+    primaryInput.r = (keys & KEY_R) != 0;
+    primaryInput.dUp = (keys & KEY_DUP) != 0;
+    primaryInput.dDown = (keys & KEY_DDOWN) != 0;
+    primaryInput.dLeft = (keys & KEY_DLEFT) != 0;
+    primaryInput.dRight = (keys & KEY_DRIGHT) != 0;
+    primaryInput.raceControls = raceControls;
+    primaryInput.topHudRenderMode = topHudMode;
+    pad->buttons |= mk64_3ds::MapPrimaryInput(primaryInput);
 
     circlePosition circle = {};
     if (diagnosticReady) {
@@ -113,16 +114,11 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     pad->rightStickX = ScaleStickAxis(cstick.dx);
     pad->rightStickY = ScaleStickAxis(cstick.dy);
 
-    if ((keys & KEY_ZL) != 0 || cstick.dy < -kCStickButtonThreshold) {
-        pad->buttons |= MK64_N64_CDOWN;
-    }
-    if ((keys & KEY_ZR) != 0 || cstick.dx > kCStickButtonThreshold) {
-        pad->buttons |= MK64_N64_CRIGHT;
-    }
-    if (cstick.dy > kCStickButtonThreshold) {
-        pad->buttons |= MK64_N64_CUP;
-    }
-    if (cstick.dx < -kCStickButtonThreshold) {
-        pad->buttons |= MK64_N64_CLEFT;
-    }
+    mk64_3ds::LegacyCInputPolicy3DS legacyCInput;
+    legacyCInput.zl = (keys & KEY_ZL) != 0;
+    legacyCInput.zr = (keys & KEY_ZR) != 0;
+    legacyCInput.cstickX = cstick.dx;
+    legacyCInput.cstickY = cstick.dy;
+    legacyCInput.raceControls = raceControls;
+    pad->buttons |= mk64_3ds::MapLegacyCInput(legacyCInput);
 }

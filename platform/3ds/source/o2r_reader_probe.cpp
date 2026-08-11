@@ -10,6 +10,29 @@
 
 namespace {
 
+struct ValidationProgressState {
+    std::size_t previousCompleted = 0;
+    std::size_t totalEntries = 0;
+    std::size_t callbackCount = 0;
+    bool regressed = false;
+    bool totalChanged = false;
+};
+
+void RecordValidationProgress(std::size_t completedEntries, std::size_t totalEntries,
+                              void* userData) {
+    auto* state = static_cast<ValidationProgressState*>(userData);
+    if (state == nullptr) return;
+    if (state->callbackCount != 0 && completedEntries < state->previousCompleted) {
+        state->regressed = true;
+    }
+    if (state->callbackCount != 0 && totalEntries != state->totalEntries) {
+        state->totalChanged = true;
+    }
+    state->previousCompleted = completedEntries;
+    state->totalEntries = totalEntries;
+    ++state->callbackCount;
+}
+
 uint32_t ReadU32(const std::uint8_t* bytes, bool bigEndian) {
     if (bigEndian) {
         return (static_cast<uint32_t>(bytes[0]) << 24) | (static_cast<uint32_t>(bytes[1]) << 16) |
@@ -58,8 +81,12 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    ValidationProgressState validationProgress{};
     const mk64_3ds::Mk64O2rValidationResult validation =
-        mk64_3ds::ValidateMk64O2rArchive(argv[1], verifyAllEntries);
+        mk64_3ds::ValidateMk64O2rArchive(
+            argv[1], verifyAllEntries,
+            verifyAllEntries ? RecordValidationProgress : nullptr,
+            verifyAllEntries ? &validationProgress : nullptr);
     if (!validation.IsValid()) {
         if (validation.component != nullptr) {
             std::fprintf(stderr, "archive validation failed: %s (%s)\n",
@@ -68,6 +95,19 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "archive validation failed: %s\n",
                          mk64_3ds::Mk64O2rValidationMessage(validation.error));
         }
+        return 1;
+    }
+    if (verifyAllEntries &&
+        (validationProgress.callbackCount < 2 || validationProgress.regressed ||
+         validationProgress.totalChanged ||
+         validationProgress.previousCompleted != validation.entryCount ||
+         validationProgress.totalEntries != validation.entryCount)) {
+        std::fprintf(stderr,
+                     "full-validation progress callback contract failed "
+                     "(calls=%zu completed=%zu total=%zu entries=%zu)\n",
+                     validationProgress.callbackCount,
+                     validationProgress.previousCompleted,
+                     validationProgress.totalEntries, validation.entryCount);
         return 1;
     }
 
