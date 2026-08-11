@@ -1,5 +1,6 @@
 # Mario Kart 64 for Nintendo 3DS
 
+<img width="1672" height="941" alt="mariokart" src="https://github.com/user-attachments/assets/6c721335-87c8-4429-b278-bd600cf32bd8" />
 
 
 Native Nintendo 3DS port of Mario Kart 64, based on
