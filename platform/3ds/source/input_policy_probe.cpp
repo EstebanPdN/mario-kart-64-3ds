@@ -8,8 +8,10 @@ namespace {
 using mk64_3ds::LegacyCInputPolicy3DS;
 using mk64_3ds::MapLegacyCInput;
 using mk64_3ds::MapPrimaryInput;
+using mk64_3ds::ModalDismissAction3DS;
 using mk64_3ds::NextHiddenTopHudMode;
 using mk64_3ds::PrimaryInputPolicy3DS;
+using mk64_3ds::ResolveModalDismissAction;
 using mk64_3ds::ShouldCycleHiddenTopHud;
 
 void CheckMenuAndFilteredInput() {
@@ -125,6 +127,25 @@ void CheckLegacyCButtons() {
     assert(MapLegacyCInput(legacy) == 0);
 }
 
+void CheckModalDismissPolicy() {
+    assert(ResolveModalDismissAction(false, false) == ModalDismissAction3DS::None);
+    assert(ResolveModalDismissAction(false, true) == ModalDismissAction3DS::None);
+    assert(ResolveModalDismissAction(true, false) == ModalDismissAction3DS::Close);
+    assert(ResolveModalDismissAction(true, true) == ModalDismissAction3DS::Continue);
+
+    // The action intentionally has no tab or row input. B/START and the
+    // footer can therefore never activate MEMORY DUMP (or any other row)
+    // merely because Developer happened to be selected.
+    for (int tab = 0; tab < 4; ++tab) {
+        for (int row = 0; row < 3; ++row) {
+            (void) tab;
+            (void) row;
+            assert(ResolveModalDismissAction(true, true) ==
+                   ModalDismissAction3DS::Continue);
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -132,6 +153,7 @@ int main() {
     CheckRaceControls();
     CheckHudPolicy();
     CheckLegacyCButtons();
+    CheckModalDismissPolicy();
     std::puts("3DS input policy: ok");
     return 0;
 }

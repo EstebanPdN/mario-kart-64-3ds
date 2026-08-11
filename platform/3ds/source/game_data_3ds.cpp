@@ -6,6 +6,7 @@
 
 #include <3ds.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -46,6 +47,18 @@ constexpr const char* kExpectedSha1 = "579c48e211ae952530ffc8738709f078d5dd215e"
 // spools its central directory alongside the bundled extractor metadata.
 // Keep enough margin for FAT allocation granularity and installer logs.
 constexpr uint64_t kMinimumExtractionFreeBytes = 96ULL * 1024ULL * 1024ULL;
+constexpr long kInstallerFontLetterRomOffset = 0x7F2094;
+constexpr long kInstallerFontDotRomOffset = 0x7F1534;
+constexpr int kInstallerFontGlyphWidth = 26;
+constexpr int kInstallerFontGlyphHeight = 16;
+constexpr size_t kInstallerFontGlyphBytes =
+    static_cast<size_t>(kInstallerFontGlyphWidth * kInstallerFontGlyphHeight) / 2U;
+constexpr int kInstallerFontScaleNumerator = 3;
+constexpr int kInstallerFontScaleDenominator = 4;
+constexpr std::array<uint8_t, 26> kInstallerFontLetterAdvances = {
+    12, 13, 11, 11, 10, 11, 11, 13, 7, 10, 12, 10, 18,
+    13, 12, 12, 12, 12, 11, 13, 12, 12, 18, 13, 12, 12,
+};
 constexpr std::array<const char*, 3> kRomPaths = {
     "sdmc:/3ds/MK64/Mario Kart 64.z64",
     "sdmc:/3ds/MK64/mk64.z64",
@@ -63,6 +76,12 @@ struct CopyStats {
     uint64_t byteCount = 0;
 };
 
+struct InstallerNativeFont {
+    bool loaded = false;
+    std::array<uint8_t, 26 * kInstallerFontGlyphBytes> letters{};
+    std::array<uint8_t, kInstallerFontGlyphBytes> dot{};
+};
+
 PrintConsole gBottomConsole{};
 std::array<std::array<char, 76>, 22> gInstallConsoleLines{};
 uint32_t gInstallConsoleLineCount = 0;
@@ -74,6 +93,7 @@ Thread gInstallLidWatcherThread = nullptr;
 std::atomic<bool> gInstallLidWatcherRunning{false};
 std::atomic<bool> gInstallLidClosed{false};
 bool gInstallLidPollingFallback = false;
+InstallerNativeFont gInstallerNativeFont{};
 
 class InstallDisplayLockGuard {
 public:
@@ -137,64 +157,129 @@ void DrawTopPixel(uint16_t* frameBuffer, int x, int y, uint16_t color) {
     frameBuffer[static_cast<size_t>(x) * 240 + static_cast<size_t>(239 - y)] = color;
 }
 
-void DrawTopRect(uint16_t* frameBuffer, int x, int y, int width, int height, uint16_t color) {
-    for (int py = y; py < y + height; ++py) {
-        for (int px = x; px < x + width; ++px) {
-            DrawTopPixel(frameBuffer, px, py, color);
-        }
-    }
+constexpr char NormalizeInstallerFontCharacter(char character) {
+    return character >= 'a' && character <= 'z'
+               ? static_cast<char>(character - 'a' + 'A')
+               : character;
 }
 
-std::array<uint8_t, 7> LoadingGlyphRows(char glyph) {
-    switch (glyph) {
-        case 'A': return { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
-        case 'E': return { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F };
-        case 'F': return { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 };
-        case 'H': return { 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 };
-        case 'I': return { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F };
-        case 'K': return { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 };
-        case 'L': return { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F };
-        case 'M': return { 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 };
-        case 'O': return { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E };
-        case 'R': return { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 };
-        case 'S': return { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E };
-        case 'T': return { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 };
-        case 'V': return { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 };
-        case 'W': return { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A };
-        case '.': return { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C };
-        default: return { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+constexpr int InstallerFontAdvance(char character) {
+    character = NormalizeInstallerFontCharacter(character);
+    if (character >= 'A' && character <= 'Z') {
+        return kInstallerFontLetterAdvances[static_cast<size_t>(character - 'A')];
     }
+    if (character == '.') return 6;
+    return character == ' ' ? 7 : 0;
 }
 
-int LoadingTextWidth(const char* text, int scale) {
-    int width = 0;
+constexpr int InstallerFontTextWidth(const char* text) {
+    int unscaledWidth = 0;
     for (const char* cursor = text; cursor != nullptr && *cursor != '\0'; ++cursor) {
-        width += (*cursor == ' ') ? 4 * scale : 6 * scale;
+        unscaledWidth += InstallerFontAdvance(*cursor);
     }
-    return width == 0 ? 0 : width - scale;
+    return (unscaledWidth * kInstallerFontScaleNumerator +
+            kInstallerFontScaleDenominator - 1) /
+           kInstallerFontScaleDenominator;
 }
 
-void DrawLoadingGlyph(uint16_t* frameBuffer, char glyph, int x, int y, int scale, uint16_t color) {
-    const std::array<uint8_t, 7> rows = LoadingGlyphRows(glyph);
-    for (int row = 0; row < 7; ++row) {
-        for (int column = 0; column < 5; ++column) {
-            if ((rows[static_cast<size_t>(row)] & (1U << (4 - column))) == 0) continue;
-            DrawTopRect(frameBuffer, x + column * scale, y + row * scale, scale, scale, color);
+static_assert(kInstallerFontGlyphBytes == 208);
+static_assert(InstallerFontTextWidth("THIS WILL TAKE FOREVER...") > 0);
+static_assert(InstallerFontTextWidth("THIS WILL TAKE FOREVER...") < 400);
+static_assert(InstallerFontTextWidth("ALMOST THERE") < 400);
+
+bool ReadInstallerFontBytes(FILE* rom, long offset, void* destination, size_t byteCount) {
+    return rom != nullptr && destination != nullptr && std::fseek(rom, offset, SEEK_SET) == 0 &&
+           std::fread(destination, 1, byteCount, rom) == byteCount;
+}
+
+bool LoadInstallerNativeFont(const char* romPath) {
+    gInstallerNativeFont = {};
+    if (romPath == nullptr || romPath[0] == '\0') return false;
+
+    FILE* rom = std::fopen(romPath, "rb");
+    if (rom == nullptr) return false;
+    const bool loaded =
+        ReadInstallerFontBytes(rom, kInstallerFontLetterRomOffset,
+                               gInstallerNativeFont.letters.data(),
+                               gInstallerNativeFont.letters.size()) &&
+        ReadInstallerFontBytes(rom, kInstallerFontDotRomOffset,
+                               gInstallerNativeFont.dot.data(),
+                               gInstallerNativeFont.dot.size());
+    std::fclose(rom);
+    gInstallerNativeFont.loaded = loaded;
+    return loaded;
+}
+
+const uint8_t* InstallerFontGlyph(char character) {
+    if (!gInstallerNativeFont.loaded) return nullptr;
+    character = NormalizeInstallerFontCharacter(character);
+    if (character >= 'A' && character <= 'Z') {
+        return gInstallerNativeFont.letters.data() +
+               static_cast<size_t>(character - 'A') * kInstallerFontGlyphBytes;
+    }
+    return character == '.' ? gInstallerNativeFont.dot.data() : nullptr;
+}
+
+uint8_t InstallerFontIntensity(const uint8_t* glyph, int x, int y) {
+    const size_t pixel = static_cast<size_t>(y * kInstallerFontGlyphWidth + x);
+    const uint8_t packed = glyph[pixel / 2U];
+    return (pixel & 1U) == 0 ? packed >> 4U : packed & 0x0FU;
+}
+
+void DrawTopBlendedPixel(uint16_t* frameBuffer, int x, int y, uint8_t red,
+                         uint8_t green, uint8_t blue, uint8_t alpha) {
+    if (frameBuffer == nullptr || x < 0 || x >= 400 || y < 0 || y >= 240 || alpha == 0) return;
+    const size_t pixel = static_cast<size_t>(x) * 240U + static_cast<size_t>(239 - y);
+    frameBuffer[pixel] = BlendRgb565(frameBuffer[pixel], red, green, blue, alpha);
+}
+
+void DrawInstallerFontGlyphPass(uint16_t* frameBuffer, const uint8_t* glyph,
+                                int x, int y, uint8_t red, uint8_t green,
+                                uint8_t blue, uint8_t opacity) {
+    if (glyph == nullptr) return;
+    constexpr int drawWidth =
+        (kInstallerFontGlyphWidth * kInstallerFontScaleNumerator +
+         kInstallerFontScaleDenominator - 1) /
+        kInstallerFontScaleDenominator;
+    constexpr int drawHeight =
+        (kInstallerFontGlyphHeight * kInstallerFontScaleNumerator +
+         kInstallerFontScaleDenominator - 1) /
+        kInstallerFontScaleDenominator;
+    for (int drawY = 0; drawY < drawHeight; ++drawY) {
+        const int sourceY = std::min(
+            kInstallerFontGlyphHeight - 1,
+            (drawY * kInstallerFontGlyphHeight + drawHeight / 2) / drawHeight);
+        for (int drawX = 0; drawX < drawWidth; ++drawX) {
+            const int sourceX = std::min(
+                kInstallerFontGlyphWidth - 1,
+                (drawX * kInstallerFontGlyphWidth + drawWidth / 2) / drawWidth);
+            const uint8_t intensity = InstallerFontIntensity(glyph, sourceX, sourceY);
+            const uint8_t alpha = static_cast<uint8_t>(
+                (static_cast<unsigned>(intensity) * 17U * opacity) / 255U);
+            DrawTopBlendedPixel(frameBuffer, x + drawX, y + drawY,
+                                red, green, blue, alpha);
         }
     }
 }
 
-void DrawLoadingText(uint16_t* frameBuffer, const char* text, int centerX, int y,
-                     int scale, uint16_t color) {
-    const int width = LoadingTextWidth(text, scale);
-    int x = centerX - width / 2;
-    for (const char* cursor = text; cursor != nullptr && *cursor != '\0'; ++cursor) {
-        if (*cursor != ' ') {
-            DrawLoadingGlyph(frameBuffer, *cursor, x + scale, y + scale, scale, PackRgb565(0, 0, 0));
-            DrawLoadingGlyph(frameBuffer, *cursor, x, y, scale, color);
+void DrawInstallerNativeText(uint16_t* frameBuffer, const char* text, int centerX, int y) {
+    if (!gInstallerNativeFont.loaded || text == nullptr) return;
+    const int originX = centerX - InstallerFontTextWidth(text) / 2;
+    const auto drawPass = [&](int offsetX, int offsetY, uint8_t red, uint8_t green,
+                              uint8_t blue, uint8_t opacity) {
+        int cursorUnits = 0;
+        for (const char* character = text; *character != '\0'; ++character) {
+            const int x = originX + cursorUnits / kInstallerFontScaleDenominator;
+            DrawInstallerFontGlyphPass(frameBuffer, InstallerFontGlyph(*character),
+                                       x + offsetX, y + offsetY,
+                                       red, green, blue, opacity);
+            cursorUnits += InstallerFontAdvance(*character) * kInstallerFontScaleNumerator;
         }
-        x += (*cursor == ' ') ? 4 * scale : 6 * scale;
-    }
+    };
+    drawPass(1, 1, 0, 0, 0, 210);
+    // Match the native-font status color and one-pixel shadow used by the
+    // lower-screen Options interface.
+    drawPass(0, 0, 255, 230, 92, 255);
 }
 
 void DrawTopBlendedRect(uint16_t* frameBuffer, int x, int y, int width, int height, uint8_t r, uint8_t g, uint8_t b,
@@ -237,8 +322,10 @@ void DrawLoadingTopScreen(int percent) {
     DrawTopBlendedRect(frameBuffer, barX, barY, barW, barH, 20, 27, 42, 155);
     DrawTopBlendedRect(frameBuffer, barX, barY, (barW * clampedPercent) / 100, barH, 38, 235, 95, 205);
     DrawTopBlendedRect(frameBuffer, barX, barY, barW, 2, 150, 255, 185, 150);
-    DrawLoadingText(frameBuffer, clampedPercent >= 90 ? "ALMOST THERE" : "THIS WILL TAKE FOREVER...",
-                    200, 181, 2, PackRgb565(255, 240, 48));
+    DrawInstallerNativeText(frameBuffer,
+                            clampedPercent >= 90 ? "ALMOST THERE"
+                                                 : "THIS WILL TAKE FOREVER...",
+                            200, 183);
 }
 
 void PrepareInstallScreensLocked() {
@@ -1290,6 +1377,7 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
     gInstallDisplayLockReady = true;
     gInstallConsoleLineCount = 0;
     gInstallProgressPercent.store(0, std::memory_order_relaxed);
+    gInstallerNativeFont = {};
     Mk64InstallLogSetCallback(OnInstallLogLine);
     Mk64InstallLogWrite("Bottom-screen installer console opened; subsequent screen lines are mirrored here.");
     LogInstallerMemory("installer console startup");
@@ -1305,6 +1393,15 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
         SetResult(&result, MK64_GAME_DATA_MISSING_ROM, nullptr,
                   "Place your legally owned Mario Kart 64 USA ROM in sd:/3ds/MK64/.");
         return result;
+    }
+
+    // The runtime O2R does not exist yet. Read only the 27 required I4 glyphs
+    // from the owner's ROM so the installer uses exactly the same native font
+    // as version, FPS, status and Options text without packaging game assets.
+    if (LoadInstallerNativeFont(romPath)) {
+        Mk64InstallLogWrite("Native installer font loaded from the owner-supplied ROM.");
+    } else {
+        Mk64InstallLogWrite("Native installer font could not be read; continuing without the optional status phrase.");
     }
 
     char sha1[41];

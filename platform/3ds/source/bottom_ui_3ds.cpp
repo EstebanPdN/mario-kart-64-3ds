@@ -2,6 +2,7 @@
 
 #include "diagnostics_3ds.h"
 #include "game_state_3ds.h"
+#include "input_policy_3ds.hpp"
 #include "resource_runtime_3ds.h"
 #include "settings_3ds.h"
 
@@ -441,8 +442,7 @@ uint32_t DecodeRgba16(const uint8_t* pixel) {
 }
 
 uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixelIndex,
-                            const Mk64TextureResource3DS* palette = nullptr,
-                            bool forceOpaque = false) {
+                            const Mk64TextureResource3DS* palette = nullptr) {
     uint8_t red = 0;
     uint8_t green = 0;
     uint8_t blue = 0;
@@ -465,9 +465,7 @@ uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixel
             const uint8_t paletteIndex = resource.type == TexturePalette4
                 ? Palette4Index(resource.data[pixelIndex / 2U], pixelIndex)
                 : resource.data[pixelIndex];
-            uint32_t color = DecodeRgba16(palette->data + static_cast<size_t>(paletteIndex) * 2U);
-            if (forceOpaque) color |= 0xFF000000U;
-            return color;
+            return DecodeRgba16(palette->data + static_cast<size_t>(paletteIndex) * 2U);
         }
         case TextureI4: {
             const uint8_t packed = resource.data[pixelIndex / 2U];
@@ -499,8 +497,7 @@ uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixel
             break;
     }
     return static_cast<uint32_t>(red) | (static_cast<uint32_t>(green) << 8U) |
-           (static_cast<uint32_t>(blue) << 16U) |
-           (static_cast<uint32_t>(forceOpaque ? 255U : alpha) << 24U);
+           (static_cast<uint32_t>(blue) << 16U) | (static_cast<uint32_t>(alpha) << 24U);
 }
 
 void RememberMissingTexture(const char* resourceName, const char* paletteName,
@@ -513,8 +510,7 @@ void RememberMissingTexture(const char* resourceName, const char* paletteName,
     ReplaceTexture(destination, missing);
 }
 
-bool LoadTexture(const char* resourceName, UiTexture& destination, const char* paletteName = nullptr,
-                 bool forceOpaque = false) {
+bool LoadTexture(const char* resourceName, UiTexture& destination, const char* paletteName = nullptr) {
     if (resourceName == nullptr || resourceName[0] == '\0') return false;
     const char* normalizedPaletteName = paletteName == nullptr ? "" : paletteName;
     if (std::strcmp(destination.resourceName, resourceName) == 0 &&
@@ -579,8 +575,7 @@ bool LoadTexture(const char* resourceName, UiTexture& destination, const char* p
                     const size_t sourceIndex = static_cast<size_t>(sourceY) * resource.width + sourceX;
                     tile[MortonOffset8x8(column, row)] =
                         __builtin_bswap32(DecodeTexturePixel(
-                            resource, sourceIndex, paletteRequired ? &palette : nullptr,
-                            forceOpaque));
+                            resource, sourceIndex, paletteRequired ? &palette : nullptr));
                 }
             }
         }
@@ -837,13 +832,13 @@ void LoadRaceHudTextures() {
     for (size_t index = 0; index < hud.places.size(); ++index) {
         LoadTexture(kPlaceResources[index], hud.places[index]);
         LoadTexture(kPortraitResources[index], hud.portraits[index],
-                    kPortraitPaletteResources[index], true);
+                    kPortraitPaletteResources[index]);
         LoadTexture(kStandingRankResources[index], hud.standingRanks[index],
                     kStandingRankPaletteResource);
         LoadTexture(kMinimapKartResources[index], hud.minimapKarts[index]);
     }
     LoadTexture(kQuestionPortraitResource, hud.questionPortrait,
-                kQuestionPortraitPaletteResource, true);
+                kQuestionPortraitPaletteResource);
     LoadTexture(kPortraitBorderResource, hud.portraitBorder);
     for (size_t index = 0; index < hud.items.size(); ++index) {
         LoadTexture(kItemResources[index], hud.items[index], kItemPaletteResources[index]);
@@ -968,6 +963,22 @@ void CloseOptions() {
     sUi.modalOpenedFromPause = false;
     sUi.selectedRow = 0;
     sUi.bottomDirty = true;
+}
+
+void DismissOptions(mk64_3ds::ModalDismissAction3DS action) {
+    switch (action) {
+        case mk64_3ds::ModalDismissAction3DS::Continue:
+            if (Mk64GameState3DSPerformPauseAction(MK64_PAUSE_ACTION_CONTINUE)) {
+                CloseOptions();
+            }
+            break;
+        case mk64_3ds::ModalDismissAction3DS::Close:
+            CloseOptions();
+            break;
+        case mk64_3ds::ModalDismissAction3DS::None:
+        default:
+            break;
+    }
 }
 
 void SetTab(OptionsTab tab) {
@@ -1099,32 +1110,27 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
         }
     }
     if (PointInside(x, y, 84, 207, 152, 30)) {
-        if (sUi.modalOpenedFromPause) {
-            sUi.selectedRow = 0;
-            ActivateSelectedRow(1);
-        } else {
-            CloseOptions();
-        }
+        DismissOptions(mk64_3ds::ResolveModalDismissAction(true,
+                                                          sUi.modalOpenedFromPause));
     }
 }
 
 void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
-    if (Mk64Settings3DSGetOverlayEnabled()) {
-        if ((input.downMask & KEY_B) != 0) {
-            Mk64Settings3DSSetOverlayEnabled(false);
-            SaveChangedSetting("BACK TO DEVELOPER OPTIONS");
-        } else if ((input.downMask & KEY_TOUCH) != 0) {
-            HandleOptionsTouch(input.touchX, input.touchY);
-        }
+    const mk64_3ds::ModalDismissAction3DS dismissAction =
+        mk64_3ds::ResolveModalDismissAction(
+            (input.downMask & (KEY_B | KEY_START)) != 0,
+            sUi.modalOpenedFromPause);
+    if (dismissAction != mk64_3ds::ModalDismissAction3DS::None) {
+        // Back/Continue is independent of the selected tab and row. Routing it
+        // through ActivateSelectedRow used to turn B into MEMORY DUMP whenever
+        // Developer row zero happened to be selected.
+        DismissOptions(dismissAction);
         return;
     }
 
-    if ((input.downMask & (KEY_B | KEY_START)) != 0) {
-        if (sUi.modalOpenedFromPause) {
-            sUi.selectedRow = 0;
-            ActivateSelectedRow(1);
-        } else {
-            CloseOptions();
+    if (Mk64Settings3DSGetOverlayEnabled()) {
+        if ((input.downMask & KEY_TOUCH) != 0) {
+            HandleOptionsTouch(input.touchX, input.touchY);
         }
         return;
     }
@@ -1313,7 +1319,11 @@ void DrawRaceHud() {
         C2D_DrawRectSolid(x, y, 0.48f, 32.0f, 32.0f,
                           C2D_Color32(0, 0, 0, portraitAlpha));
         C2D_ImageTint portraitTint = {};
-        C2D_PlainImageTint(&portraitTint, C2D_Color32(255, 255, 255, portraitAlpha), 1.0f);
+        // Preserve the native CI8/TLUT RGB and apply only the ranking fade.
+        // A solid white tint at blend=1 replaces the complete image color and
+        // was the reason these slots appeared as white/gray boxes in hardware
+        // dumps even though the correct portrait textures were loaded.
+        C2D_AlphaImageTint(&portraitTint, static_cast<float>(portraitAlpha) / 255.0f);
         UiTexture& portrait = unknown ? sUi.raceHud.questionPortrait
                                       : sUi.raceHud.portraits[static_cast<size_t>(character)];
         DrawTexture(portrait,
