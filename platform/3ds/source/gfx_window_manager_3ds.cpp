@@ -112,7 +112,7 @@ Ship::WindowRect GfxWindowBackend3DS::GetPrimaryMonitorRect() {
 }
 
 void GfxWindowBackend3DS::HandleEvents() {
-    // The diagnostics worker owns HID while the game is running so L+R+A can
+    // The diagnostics worker owns HID while the game is running so SELECT can
     // still be observed if the main thread is blocked in the renderer.
     if (Mk64Diagnostics3DSOwnsHid == nullptr || !Mk64Diagnostics3DSOwnsHid()) {
         hidScanInput();
