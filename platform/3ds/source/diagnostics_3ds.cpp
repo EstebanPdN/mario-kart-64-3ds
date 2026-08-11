@@ -24,10 +24,15 @@ std::atomic<bool> sInputReady{ false };
 std::atomic<bool> sDumpPaused{ false };
 std::atomic<unsigned> sDumpRequest{ 0 };
 std::atomic<uint32_t> sKeysHeld{ 0 };
+std::atomic<uint32_t> sKeysDownLatched{ 0 };
+std::atomic<uint32_t> sKeysUpLatched{ 0 };
 std::atomic<int> sCircleX{ 0 };
 std::atomic<int> sCircleY{ 0 };
 std::atomic<int> sCstickX{ 0 };
 std::atomic<int> sCstickY{ 0 };
+std::atomic<unsigned> sTouchX{ 0 };
+std::atomic<unsigned> sTouchY{ 0 };
+std::atomic<bool> sTouchHeld{ false };
 std::atomic<uint32_t> sFrame{ 0 };
 std::atomic<unsigned> sPresentation{ 0 };
 std::atomic<size_t> sArchiveEntries{ 0 };
@@ -47,6 +52,8 @@ char sLastResource[256] = "none";
 Thread sThread = nullptr;
 FILE* sLog = nullptr;
 bool sIsNew3DS = false;
+bool sSystemModelKnown = false;
+u8 sSystemModel = 0xff;
 uint64_t sStartTime = 0;
 
 extern "C" void Mk64GameAudio3DSSetPaused(bool paused) __attribute__((weak));
@@ -55,12 +62,14 @@ enum DumpRequest : unsigned {
     kDumpRequestNone = 0,
     kDumpRequestSelect = 1,
     kDumpRequestCombo = 2,
+    kDumpRequestBottomUi = 3,
 };
 
 const char* DumpTriggerName(unsigned request) {
     switch (request) {
         case kDumpRequestSelect: return "SELECT";
         case kDumpRequestCombo: return "L + R + A";
+        case kDumpRequestBottomUi: return "BOTTOM UI";
         default: return "unknown";
     }
 }
@@ -140,6 +149,7 @@ void WriteU32(FILE* file, uint32_t value) {
 const uint8_t* ReadFramebufferPixel(const uint8_t* framebuffer, uint16_t framebufferWidth,
                                     uint16_t framebufferHeight, uint16_t x, uint16_t y,
                                     bool rotate3dsPhysical) {
+    (void) framebufferHeight;
     if (rotate3dsPhysical) {
         const uint16_t sourceX = static_cast<uint16_t>(framebufferWidth - 1u - y);
         const uint16_t sourceY = x;
@@ -162,8 +172,8 @@ bool WriteFramebufferBmp(const char* path, const uint8_t* framebuffer, uint16_t 
         return false;
     }
 
-    const bool rotate3dsPhysical =
-        framebufferWidth == 240u && (framebufferHeight == 400u || framebufferHeight == 320u);
+    const bool rotate3dsPhysical = framebufferWidth == 240u &&
+        (framebufferHeight == 800u || framebufferHeight == 400u || framebufferHeight == 320u);
     const uint16_t outputWidth = rotate3dsPhysical ? framebufferHeight : framebufferWidth;
     const uint16_t outputHeight = rotate3dsPhysical ? framebufferWidth : framebufferHeight;
     const uint32_t rowBytes = static_cast<uint32_t>(outputWidth) * 3u;
@@ -215,8 +225,8 @@ bool WriteFramebufferBmp(const char* path, const uint8_t* framebuffer, uint16_t 
 
 void DrawFramebufferRect(uint8_t* framebuffer, uint16_t framebufferWidth, uint16_t framebufferHeight,
                          int x, int y, int width, int height, uint8_t shade) {
-    const bool rotate3dsPhysical =
-        framebufferWidth == 240u && (framebufferHeight == 400u || framebufferHeight == 320u);
+    const bool rotate3dsPhysical = framebufferWidth == 240u &&
+        (framebufferHeight == 800u || framebufferHeight == 400u || framebufferHeight == 320u);
     const int outputWidth = rotate3dsPhysical ? framebufferHeight : framebufferWidth;
     const int outputHeight = rotate3dsPhysical ? framebufferWidth : framebufferHeight;
     const int x0 = std::max(0, x);
@@ -316,7 +326,7 @@ void WriteScreenCapture(FILE* manifest, const char* directory, gfxScreen_t scree
     const bool bmpOk = WriteFramebufferBmp(path, framebuffer, width, height);
 
     if (manifest != nullptr) {
-        const bool rotated = width == 240u && (height == 400u || height == 320u);
+        const bool rotated = width == 240u && (height == 800u || height == 400u || height == 320u);
         std::fprintf(manifest,
                      "%s: framebuffer=%ux%u rgb8/bgr8 bytes=%lu raw=%s bmp=%s bmpLogical=%ux%u\n",
                      name, width, height, static_cast<unsigned long>(rawBytes),
@@ -332,7 +342,7 @@ void WriteScreenCaptures(const char* directory) {
     if (manifest != nullptr) {
         std::fprintf(manifest, "Physical 3DS framebuffer capture\n");
         std::fprintf(manifest, "Source: gfxGetFramebuffer, not renderer readback\n");
-        std::fprintf(manifest, "Raw files preserve framebuffer memory exactly; BMP files rotate the native 3DS 240x400/240x320 layout into visible screen orientation.\n\n");
+        std::fprintf(manifest, "Raw files preserve framebuffer memory exactly; BMP files rotate the native 3DS 240x800/240x400/240x320 layout into visible screen orientation.\n\n");
     }
 
     WriteScreenCapture(manifest, directory, GFX_TOP, GFX_LEFT, "top");
@@ -500,15 +510,32 @@ void DiagnosticThread(void*) {
     while (sRunning.load(std::memory_order_acquire)) {
         hidScanInput();
         const uint32_t keys = hidKeysHeld();
+        const uint32_t pressedKeys = hidKeysDown();
+        const uint32_t releasedKeys = hidKeysUp();
         const uint32_t gameKeys = keys & ~static_cast<uint32_t>(KEY_SELECT);
+        const uint32_t gameKeysDown = pressedKeys & ~static_cast<uint32_t>(KEY_SELECT);
+        const uint32_t gameKeysUp = releasedKeys & ~static_cast<uint32_t>(KEY_SELECT);
         circlePosition circle = {};
         circlePosition cstick = {};
         hidCircleRead(&circle);
         if (sIsNew3DS) hidCstickRead(&cstick);
+        if ((keys & KEY_TOUCH) != 0 || (pressedKeys & KEY_TOUCH) != 0) {
+            touchPosition touch = {};
+            hidTouchRead(&touch);
+            sTouchX.store(touch.px, std::memory_order_relaxed);
+            sTouchY.store(touch.py, std::memory_order_relaxed);
+        }
         sCircleX.store(circle.dx, std::memory_order_relaxed);
         sCircleY.store(circle.dy, std::memory_order_relaxed);
         sCstickX.store(cstick.dx, std::memory_order_relaxed);
         sCstickY.store(cstick.dy, std::memory_order_relaxed);
+        sTouchHeld.store((keys & KEY_TOUCH) != 0, std::memory_order_relaxed);
+        if (gameKeysDown != 0) {
+            sKeysDownLatched.fetch_or(gameKeysDown, std::memory_order_release);
+        }
+        if (gameKeysUp != 0) {
+            sKeysUpLatched.fetch_or(gameKeysUp, std::memory_order_release);
+        }
         sKeysHeld.store(gameKeys, std::memory_order_release);
         sInputReady.store(true, std::memory_order_release);
 
@@ -529,15 +556,57 @@ void DiagnosticThread(void*) {
     }
 }
 
+bool ReadInputSnapshot(Mk64DiagnosticsInput3DS* input, bool consumeEdges) {
+    if (input == nullptr || !sInputReady.load(std::memory_order_acquire)) return false;
+    input->heldMask = sKeysHeld.load(std::memory_order_acquire);
+    input->downMask = consumeEdges
+                          ? sKeysDownLatched.exchange(0, std::memory_order_acq_rel)
+                          : sKeysDownLatched.load(std::memory_order_acquire);
+    input->upMask = consumeEdges
+                        ? sKeysUpLatched.exchange(0, std::memory_order_acq_rel)
+                        : sKeysUpLatched.load(std::memory_order_acquire);
+    input->circleX = static_cast<int16_t>(sCircleX.load(std::memory_order_relaxed));
+    input->circleY = static_cast<int16_t>(sCircleY.load(std::memory_order_relaxed));
+    input->cstickX = static_cast<int16_t>(sCstickX.load(std::memory_order_relaxed));
+    input->cstickY = static_cast<int16_t>(sCstickY.load(std::memory_order_relaxed));
+    input->touchX = static_cast<uint16_t>(sTouchX.load(std::memory_order_relaxed));
+    input->touchY = static_cast<uint16_t>(sTouchY.load(std::memory_order_relaxed));
+    input->touchHeld = sTouchHeld.load(std::memory_order_relaxed);
+    return true;
+}
+
 } // namespace
 
 extern "C" bool Mk64Diagnostics3DSStart() {
     if (sRunning.load(std::memory_order_acquire)) return true;
     LightLock_Init(&sTextLock);
+    sInputReady.store(false, std::memory_order_relaxed);
+    sKeysHeld.store(0, std::memory_order_relaxed);
+    sKeysDownLatched.store(0, std::memory_order_relaxed);
+    sKeysUpLatched.store(0, std::memory_order_relaxed);
+    sTouchX.store(0, std::memory_order_relaxed);
+    sTouchY.store(0, std::memory_order_relaxed);
+    sTouchHeld.store(false, std::memory_order_relaxed);
     EnsureDirectory(kGameDirectory);
     EnsureDirectory(kDumpDirectory);
     sStartTime = osGetTime();
-    APT_CheckNew3DS(&sIsNew3DS);
+    sSystemModelKnown = false;
+    sSystemModel = 0xff;
+    if (R_SUCCEEDED(cfguInit())) {
+        sSystemModelKnown = R_SUCCEEDED(CFGU_GetSystemModel(&sSystemModel));
+        cfguExit();
+    }
+
+    sIsNew3DS = false;
+    if (R_FAILED(APT_CheckNew3DS(&sIsNew3DS))) {
+        // If APT cannot answer, a successful CFGU model query still lets us
+        // distinguish the New family. Otherwise unknown hardware remains on
+        // the conservative Old/400 px path.
+        sIsNew3DS = sSystemModelKnown &&
+                    (sSystemModel == CFG_MODEL_N3DS ||
+                     sSystemModel == CFG_MODEL_N3DSXL ||
+                     sSystemModel == CFG_MODEL_N2DSXL);
+    }
     sLog = std::fopen(kRuntimeLog, "wb");
     if (sLog != nullptr) setvbuf(sLog, nullptr, _IOLBF, 0);
     sRunning.store(true, std::memory_order_release);
@@ -598,13 +667,44 @@ extern "C" bool Mk64Diagnostics3DSServiceDumpIfRequested() {
 }
 
 extern "C" bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input) {
-    if (input == nullptr || !sInputReady.load(std::memory_order_acquire)) return false;
-    input->heldMask = sKeysHeld.load(std::memory_order_acquire);
-    input->circleX = static_cast<int16_t>(sCircleX.load(std::memory_order_relaxed));
-    input->circleY = static_cast<int16_t>(sCircleY.load(std::memory_order_relaxed));
-    input->cstickX = static_cast<int16_t>(sCstickX.load(std::memory_order_relaxed));
-    input->cstickY = static_cast<int16_t>(sCstickY.load(std::memory_order_relaxed));
+    return ReadInputSnapshot(input, false);
+}
+
+extern "C" bool Mk64Diagnostics3DSConsumeInput(Mk64DiagnosticsInput3DS* input) {
+    return ReadInputSnapshot(input, true);
+}
+
+extern "C" bool Mk64Diagnostics3DSRequestDump() {
+    unsigned expected = kDumpRequestNone;
+    if (!sDumpRequest.compare_exchange_strong(expected, kDumpRequestBottomUi,
+                                               std::memory_order_acq_rel)) {
+        return false;
+    }
+    LogLine("dump requested: ", DumpTriggerName(kDumpRequestBottomUi));
     return true;
+}
+
+extern "C" bool Mk64Diagnostics3DSIsNewModel() {
+    return sIsNew3DS;
+}
+
+extern "C" bool Mk64Diagnostics3DSSupportsWideMode() {
+    // libctru documents gfxSetWide as unsupported only on the Old 2DS. Keep
+    // an unknown model at 400 px instead of risking an invalid display mode.
+    return sSystemModelKnown && sSystemModel != CFG_MODEL_2DS;
+}
+
+extern "C" const char* Mk64Diagnostics3DSGetSystemModelName() {
+    if (!sSystemModelKnown) return "UNKNOWN 3DS";
+    switch (sSystemModel) {
+        case CFG_MODEL_3DS: return "NINTENDO 3DS";
+        case CFG_MODEL_3DSXL: return "NINTENDO 3DS XL";
+        case CFG_MODEL_N3DS: return "NEW NINTENDO 3DS";
+        case CFG_MODEL_2DS: return "NINTENDO 2DS";
+        case CFG_MODEL_N3DSXL: return "NEW NINTENDO 3DS XL";
+        case CFG_MODEL_N2DSXL: return "NEW NINTENDO 2DS XL";
+        default: return "UNKNOWN 3DS";
+    }
 }
 
 extern "C" void Mk64Diagnostics3DSCheckpoint(const char* stage) {

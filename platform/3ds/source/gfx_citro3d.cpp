@@ -13,10 +13,19 @@
 
 #include "fast3d_passthrough_shbin.h"
 
+extern "C" uint16_t Mk64Settings3DSGetResolutionWidth(void) __attribute__((weak));
+extern "C" int Mk64Settings3DSGetAspectRatio(void) __attribute__((weak));
+extern "C" bool Mk64Diagnostics3DSIsNewModel(void) __attribute__((weak));
+extern "C" bool Mk64Diagnostics3DSSupportsWideMode(void) __attribute__((weak));
+extern "C" bool Mk64Graphics3DSResolvedNewModel(void) __attribute__((weak));
+extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth(void) __attribute__((weak));
+extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation(void) __attribute__((weak));
+
 namespace Fast {
 namespace {
 
-constexpr uint32_t kTopWidth = 400;
+constexpr uint32_t kTopLogicalWidth = 400;
+constexpr uint32_t kTopWideWidth = 800;
 constexpr uint32_t kTopHeight = 240;
 constexpr uint32_t kNativeWidth = 320;
 constexpr uint32_t kNativeHeight = 240;
@@ -25,6 +34,7 @@ constexpr uint32_t kMaxSourceVertices = 256 * 3;
 constexpr uint32_t kMaxDrawVertices = 256 * 6;
 constexpr uint32_t kVertexBufferCapacity = 32 * 1024;
 constexpr uint32_t kPackedVertexFloats = 12;
+constexpr size_t kPresentedTimestampCapacity = 1024;
 // The largest dimension in the vanilla MK64 O2R texture set is 320 pixels.
 // Advertising that real source limit reduces Fast3D's square RGBA conversion
 // buffer from 1 MiB to 400 KiB; the Citro3D backing allocation can still round
@@ -32,7 +42,7 @@ constexpr uint32_t kPackedVertexFloats = 12;
 constexpr uint32_t kMaxTextureSize = 320;
 constexpr float kClipWEpsilon = 1.0e-4f;
 constexpr float kFullscreenBoundsEpsilon = 0.03f;
-constexpr float kFullscreenCoverScale = static_cast<float>(kTopWidth) / kNativeWidth;
+constexpr float kFullscreenCoverScale = static_cast<float>(kTopLogicalWidth) / kNativeWidth;
 constexpr size_t kMaxVertexStrideFloats = 64;
 
 constexpr uint32_t kDisplayTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
@@ -160,7 +170,7 @@ bool IsNativeFullscreenQuad(const float* vertices, size_t vertexCount, size_t st
     // Fast3D preserves the original 4:3 frame in the 5:3 top screen, so a
     // native full-screen rectangle reaches +/-0.8 horizontally and +/-1.0
     // vertically in clip space.
-    const float nativeHalfWidth = static_cast<float>(kNativeWidth) / kTopWidth;
+    const float nativeHalfWidth = static_cast<float>(kNativeWidth) / kTopLogicalWidth;
     return std::fabs(minX + nativeHalfWidth) <= kFullscreenBoundsEpsilon &&
            std::fabs(maxX - nativeHalfWidth) <= kFullscreenBoundsEpsilon &&
            std::fabs(minY + 1.0f) <= kFullscreenBoundsEpsilon &&
@@ -281,6 +291,12 @@ void ConfigureOperands(C3D_TexEnv* environment, const ChannelOperation& rgbOpera
     (void) alphaOperation;
 }
 
+void ConfigureAlphaPass(C3D_TexEnv* environment) {
+    C3D_TexEnvSrc(environment, C3D_Alpha, GPU_PREVIOUS);
+    C3D_TexEnvOpAlpha(environment, GPU_TEVOP_A_SRC_ALPHA);
+    C3D_TexEnvFunc(environment, C3D_Alpha, GPU_REPLACE);
+}
+
 } // namespace
 
 struct GfxRenderingAPICitro3D::Impl {
@@ -309,6 +325,8 @@ struct GfxRenderingAPICitro3D::Impl {
     bool initialized = false;
     bool ready = false;
     bool frameActive = false;
+    bool newModel = false;
+    uint32_t outputWidth = kTopLogicalWidth;
     bool useAlpha = false;
     bool depthTest = false;
     bool depthWrite = true;
@@ -321,6 +339,8 @@ struct GfxRenderingAPICitro3D::Impl {
     C3D_RenderTarget* activeTarget = nullptr;
     float* packedVertices = nullptr;
     size_t packedVertexCount = 0;
+    size_t dirtyVertexBegin = 0;
+    size_t dirtyVertexEnd = 0;
     std::vector<float> clipScratch;
     ShaderProgram* currentProgram = nullptr;
     std::unordered_map<uint64_t, std::unique_ptr<ShaderProgram>> shaderPrograms;
@@ -335,13 +355,23 @@ struct GfxRenderingAPICitro3D::Impl {
     int selectedTextureUnit = 0;
     int viewportX = 0;
     int viewportY = 0;
-    int viewportWidth = static_cast<int>(kTopWidth);
+    int viewportWidth = static_cast<int>(kTopLogicalWidth);
     int viewportHeight = static_cast<int>(kTopHeight);
     int scissorX = 0;
     int scissorY = 0;
-    int scissorWidth = static_cast<int>(kTopWidth);
+    int scissorWidth = static_cast<int>(kTopLogicalWidth);
     int scissorHeight = static_cast<int>(kTopHeight);
     bool scissorEnabled = false;
+    std::array<uint64_t, kPresentedTimestampCapacity> presentedTimestamps = {};
+    size_t presentedTimestampHead = 0;
+    size_t presentedTimestampCount = 0;
+    uint64_t firstPresentedTimestamp = 0;
+    uint64_t drawCallCount = 0;
+    uint64_t triangleCount = 0;
+    uint64_t textureCacheUploadCount = 0;
+    uint64_t textureCacheUploadBytes = 0;
+    uint64_t vertexUploadCount = 0;
+    uint64_t vertexUploadBytes = 0;
 
     ~Impl() {
         for (auto& slot : framebuffers) {
@@ -420,6 +450,7 @@ ShaderProgram* GfxRenderingAPICitro3D::CreateAndLoadNewShader(uint64_t shaderId0
     program->shaderId1 = shaderId1;
     program->alpha = HasOption(shaderId1, OptionAlpha);
     program->fog = HasOption(shaderId1, OptionFog);
+    program->grayscale = HasOption(shaderId1, OptionGrayscale);
     program->textureEdge = HasOption(shaderId1, OptionTextureEdge);
     program->alphaThreshold = HasOption(shaderId1, OptionAlphaThreshold);
     program->invisible = HasOption(shaderId1, OptionInvisible);
@@ -469,7 +500,8 @@ ShaderProgram* GfxRenderingAPICitro3D::CreateAndLoadNewShader(uint64_t shaderId0
         program->fogOffset = offset;
         offset += 4;
     }
-    if (HasOption(shaderId1, OptionGrayscale)) {
+    if (program->grayscale) {
+        program->grayscaleOffset = offset;
         offset += 4;
     }
     for (uint8_t input = 0; input < program->numInputs; ++input) {
@@ -598,6 +630,8 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     slot.hasTransparency = combinedAlpha != 0xFF;
 
     C3D_TexFlush(&slot.texture);
+    ++mImpl->textureCacheUploadCount;
+    mImpl->textureCacheUploadBytes += slot.allocatedBytes;
     C3D_TexSetFilter(&slot.texture, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&slot.texture, GPU_REPEAT, GPU_REPEAT);
     C3D_TexBind(mImpl->selectedTextureUnit, &slot.texture);
@@ -645,6 +679,10 @@ void GfxRenderingAPICitro3D::SetZmodeDecal(bool decal) {
 }
 
 void GfxRenderingAPICitro3D::SetViewport(int x, int y, int width, int height) {
+    if (mImpl->activeTarget == mImpl->topTarget && mImpl->outputWidth == kTopWideWidth) {
+        x *= 2;
+        width *= 2;
+    }
     mImpl->viewportX = x;
     mImpl->viewportY = y;
     mImpl->viewportWidth = width;
@@ -654,6 +692,10 @@ void GfxRenderingAPICitro3D::SetViewport(int x, int y, int width, int height) {
 }
 
 void GfxRenderingAPICitro3D::SetScissor(int x, int y, int width, int height) {
+    if (mImpl->activeTarget == mImpl->topTarget && mImpl->outputWidth == kTopWideWidth) {
+        x *= 2;
+        width *= 2;
+    }
     mImpl->scissorX = x;
     mImpl->scissorY = y;
     mImpl->scissorWidth = width;
@@ -723,7 +765,10 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     const size_t firstVertex = mImpl->packedVertexCount;
 
     bool coverNativeFullscreenTexture = false;
+    const bool originalAspect = Mk64Settings3DSGetAspectRatio != nullptr &&
+                                Mk64Settings3DSGetAspectRatio() != 0;
     if (mImpl->activeTarget == mImpl->topTarget &&
+        !originalAspect &&
         IsNativeFullscreenQuad(drawVertices, vertexCount, program->strideFloats)) {
         for (int texture = 0; texture < 2; ++texture) {
             if (!program->usedTextures[texture] || mImpl->selectedFramebuffers[texture] != 0) {
@@ -762,28 +807,6 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         }
         if (!constant && varyingInput < 0) {
             varyingInput = input;
-        }
-    }
-
-    bool useTextureAlpha = false;
-    if (!program->alpha) {
-        const int cycleCount = program->twoCycle ? 2 : 1;
-        for (int cycle = 0; cycle < cycleCount && !useTextureAlpha; ++cycle) {
-            for (int term = 0; term < 4 && !useTextureAlpha; ++term) {
-                const int source = program->combiner[cycle][1][term];
-                int texture = -1;
-                if (source == SourceTexel0 || source == SourceTexel0Alpha) {
-                    texture = cycle == 0 ? 0 : 1;
-                } else if (source == SourceTexel1 || source == SourceTexel1Alpha) {
-                    texture = cycle == 0 ? 1 : 0;
-                }
-                if (texture >= 0) {
-                    const uint32_t textureId = mImpl->selectedTextures[texture];
-                    useTextureAlpha = textureId < mImpl->textures.size() &&
-                                      mImpl->textures[textureId].initialized &&
-                                      mImpl->textures[textureId].hasTransparency;
-                }
-            }
         }
     }
 
@@ -847,13 +870,23 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         }
     }
 
+    std::array<float, 4> grayscaleColor = { 1.0f, 1.0f, 1.0f, 0.0f };
+    if (program->grayscale) {
+        const float* color = drawVertices + program->grayscaleOffset;
+        std::copy_n(color, grayscaleColor.size(), grayscaleColor.begin());
+    }
+
+    // The previous-buffer update mask is persistent Citro3D state. Reset it
+    // for every draw so a grayscale program cannot leak into the next one.
+    C3D_TexEnvBufUpdate(C3D_Both, 0);
+    C3D_TexEnvBufColor(0xFFFFFFFF);
+
     int stage = 0;
     const int cycleCount = program->twoCycle ? 2 : 1;
     for (int cycle = 0; cycle < cycleCount && stage < 6; ++cycle) {
         const ChannelPlan rgbPlan = BuildChannelPlan(program->combiner[cycle][0]);
-        const ChannelPlan alphaPlan = program->alpha || useTextureAlpha
-                                          ? BuildChannelPlan(program->combiner[cycle][1])
-                                          : SingleOperationPlan(PassPrevious());
+        const ChannelPlan alphaPlan = program->alpha ? BuildChannelPlan(program->combiner[cycle][1])
+                                                      : SingleOperationPlan(PassPrevious());
         const size_t operationCount = std::max(rgbPlan.size(), alphaPlan.size());
         for (size_t operationIndex = 0; operationIndex < operationCount && stage < 6; ++operationIndex, ++stage) {
             const ChannelOperation rgbOperation =
@@ -885,6 +918,58 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
             C3D_TexEnvColor(environment, PackColor(environmentColor));
         }
     }
+
+    // Fast3D's grayscale option is: mix(original, tint * average(rgb),
+    // tint.a). PICA has no programmable fragment shader, but its previous
+    // buffer and per-source R/G/B replication make the average exact (apart
+    // from the normal 8-bit TEV quantization): accumulate r/3, g/3, and b/3
+    // while applying the tint. The buffer update becomes readable one stage
+    // later, so the R stage reads GPU_PREVIOUS directly; the G/B stages and
+    // optional final mix read the preserved base RGB from the buffer.
+    const float grayscaleMix = std::clamp(grayscaleColor[3], 0.0f, 1.0f);
+    const bool needsGrayscaleMix = grayscaleMix < 1.0f - (0.5f / 255.0f);
+    const int grayscaleStages = needsGrayscaleMix ? 4 : 3;
+    if (program->grayscale && grayscaleMix > 0.5f / 255.0f && stage > 0 &&
+        stage + grayscaleStages <= 6 && stage - 1 < 4) {
+        C3D_TexEnvBufUpdate(C3D_RGB, 1 << (stage - 1));
+
+        const std::array<float, 4> scaledTint = {
+            std::clamp(grayscaleColor[0], 0.0f, 1.0f) / 3.0f,
+            std::clamp(grayscaleColor[1], 0.0f, 1.0f) / 3.0f,
+            std::clamp(grayscaleColor[2], 0.0f, 1.0f) / 3.0f,
+            grayscaleMix,
+        };
+        constexpr std::array<GPU_TEVOP_RGB, 3> channelOperands = {
+            GPU_TEVOP_RGB_SRC_R,
+            GPU_TEVOP_RGB_SRC_G,
+            GPU_TEVOP_RGB_SRC_B,
+        };
+        for (int channel = 0; channel < 3; ++channel, ++stage) {
+            C3D_TexEnv* environment = C3D_GetTexEnv(stage);
+            C3D_TexEnvInit(environment);
+            C3D_TexEnvSrc(environment, C3D_RGB,
+                          channel == 0 ? GPU_PREVIOUS : GPU_PREVIOUS_BUFFER, GPU_CONSTANT,
+                          GPU_PREVIOUS);
+            C3D_TexEnvOpRgb(environment, channelOperands[channel], GPU_TEVOP_RGB_SRC_COLOR,
+                            GPU_TEVOP_RGB_SRC_COLOR);
+            C3D_TexEnvFunc(environment, C3D_RGB,
+                           channel == 0 ? GPU_MODULATE : GPU_MULTIPLY_ADD);
+            ConfigureAlphaPass(environment);
+            C3D_TexEnvColor(environment, PackColor(scaledTint));
+        }
+
+        if (needsGrayscaleMix) {
+            C3D_TexEnv* environment = C3D_GetTexEnv(stage++);
+            C3D_TexEnvInit(environment);
+            C3D_TexEnvSrc(environment, C3D_RGB, GPU_PREVIOUS, GPU_PREVIOUS_BUFFER,
+                          GPU_CONSTANT);
+            C3D_TexEnvOpRgb(environment, GPU_TEVOP_RGB_SRC_COLOR,
+                            GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+            C3D_TexEnvFunc(environment, C3D_RGB, GPU_INTERPOLATE);
+            ConfigureAlphaPass(environment);
+            C3D_TexEnvColor(environment, PackColor({ 0.0f, 0.0f, 0.0f, grayscaleMix }));
+        }
+    }
     for (; stage < 6; ++stage) {
         C3D_TexEnv* environment = C3D_GetTexEnv(stage);
         C3D_TexEnvInit(environment);
@@ -894,21 +979,104 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                   0x08);
     C3D_DepthTest(mImpl->depthTest, mImpl->depthTest ? GPU_GREATER : GPU_ALWAYS,
                   static_cast<GPU_WRITEMASK>(GPU_WRITE_COLOR | (mImpl->depthWrite ? GPU_WRITE_DEPTH : 0)));
-    if (useTextureAlpha) {
-        if (program->textureEdge) {
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-        } else {
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
-                           GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+    if (mImpl->dirtyVertexBegin == mImpl->dirtyVertexEnd) {
+        mImpl->dirtyVertexBegin = firstVertex;
+    }
+    mImpl->dirtyVertexEnd = firstVertex + vertexCount;
+    C3D_DrawArrays(GPU_TRIANGLES, static_cast<int>(firstVertex), static_cast<int>(vertexCount));
+    ++mImpl->drawCallCount;
+    mImpl->triangleCount += vertexCount / 3;
+    mImpl->packedVertexCount += vertexCount;
+}
+
+void GfxRenderingAPICitro3D::FlushPackedVertices() {
+    if (mImpl->packedVertices == nullptr || mImpl->dirtyVertexBegin >= mImpl->dirtyVertexEnd) {
+        return;
+    }
+
+    const size_t vertexCount = mImpl->dirtyVertexEnd - mImpl->dirtyVertexBegin;
+    const size_t byteCount = vertexCount * kPackedVertexFloats * sizeof(float);
+    GSPGPU_FlushDataCache(mImpl->packedVertices + mImpl->dirtyVertexBegin * kPackedVertexFloats,
+                          byteCount);
+    ++mImpl->vertexUploadCount;
+    mImpl->vertexUploadBytes += byteCount;
+    mImpl->dirtyVertexBegin = mImpl->packedVertexCount;
+    mImpl->dirtyVertexEnd = mImpl->packedVertexCount;
+}
+
+void GfxRenderingAPICitro3D::RestoreFast3DState() {
+    C3D_BindProgram(&mImpl->shaderProgram);
+
+    C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
+    AttrInfo_Init(attributeInfo);
+    AttrInfo_AddLoader(attributeInfo, 0, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(attributeInfo, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(attributeInfo, 2, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(attributeInfo, 3, GPU_FLOAT, 4);
+    C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufferInfo);
+    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 4, 0x3210);
+
+    C3D_Mtx depthConversion;
+    Mtx_Identity(&depthConversion);
+    depthConversion.r[2].z = 0.4999f;
+    depthConversion.r[2].w = -0.5f;
+    C3D_Mtx tilt;
+    Mtx_Identity(&tilt);
+    tilt.r[0].x = 0.0f;
+    tilt.r[0].y = 1.0f;
+    tilt.r[1].x = -1.0f;
+    tilt.r[1].y = 0.0f;
+    C3D_Mtx projection;
+    Mtx_Multiply(&projection, &tilt, &depthConversion);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, mImpl->projectionUniform, &projection);
+
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_DepthMap(true, -1.0f, mImpl->decal ? -0.001f : 0.0f);
+    C3D_DepthTest(mImpl->depthTest, mImpl->depthTest ? GPU_GREATER : GPU_ALWAYS,
+                  static_cast<GPU_WRITEMASK>(GPU_WRITE_COLOR |
+                                             (mImpl->depthWrite ? GPU_WRITE_DEPTH : 0)));
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, mImpl->useAlpha ? GPU_SRC_ALPHA : GPU_ONE,
+                   mImpl->useAlpha ? GPU_ONE_MINUS_SRC_ALPHA : GPU_ZERO, GPU_ONE,
+                   GPU_ONE_MINUS_SRC_ALPHA);
+    const bool alphaTest = mImpl->currentProgram != nullptr &&
+                           (mImpl->currentProgram->textureEdge ||
+                            mImpl->currentProgram->alphaThreshold);
+    C3D_AlphaTest(alphaTest, GPU_GREATER, 0x08);
+
+    C3D_SetViewport(static_cast<uint32_t>(std::max(0, mImpl->viewportY)),
+                    static_cast<uint32_t>(std::max(0, mImpl->viewportX)),
+                    static_cast<uint32_t>(std::max(0, mImpl->viewportHeight)),
+                    static_cast<uint32_t>(std::max(0, mImpl->viewportWidth)));
+    if (mImpl->scissorEnabled) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, static_cast<uint32_t>(std::max(0, mImpl->scissorY)),
+                       static_cast<uint32_t>(std::max(0, mImpl->scissorX)),
+                       static_cast<uint32_t>(std::max(0, mImpl->scissorY + mImpl->scissorHeight)),
+                       static_cast<uint32_t>(std::max(0, mImpl->scissorX + mImpl->scissorWidth)));
+    } else {
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    }
+
+    C3D_TexEnvBufUpdate(C3D_Both, 0);
+    C3D_TexEnvBufColor(0xFFFFFFFF);
+    for (int stage = 0; stage < 6; ++stage) {
+        C3D_TexEnv* environment = C3D_GetTexEnv(stage);
+        C3D_TexEnvInit(environment);
+    }
+
+    for (int unit = 0; unit < 3; ++unit) {
+        const int framebufferId = mImpl->selectedFramebuffers[unit];
+        if (framebufferId > 0 && framebufferId < static_cast<int>(mImpl->framebuffers.size()) &&
+            mImpl->framebuffers[framebufferId] != nullptr &&
+            mImpl->framebuffers[framebufferId]->initialized) {
+            C3D_TexBind(unit, &mImpl->framebuffers[framebufferId]->texture);
+            continue;
+        }
+        const uint32_t textureId = mImpl->selectedTextures[unit];
+        if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
+            C3D_TexBind(unit, &mImpl->textures[textureId].texture);
         }
     }
-    GSPGPU_FlushDataCache(mImpl->packedVertices + firstVertex * kPackedVertexFloats,
-                          vertexCount * kPackedVertexFloats * sizeof(float));
-    C3D_DrawArrays(GPU_TRIANGLES, static_cast<int>(firstVertex), static_cast<int>(vertexCount));
-    if (useTextureAlpha) {
-        SetUseAlpha(mImpl->useAlpha);
-    }
-    mImpl->packedVertexCount += vertexCount;
 }
 
 void GfxRenderingAPICitro3D::Init() {
@@ -916,7 +1084,38 @@ void GfxRenderingAPICitro3D::Init() {
         return;
     }
     gfxInit(GSP_BGR8_OES, GSP_BGR8_OES, false);
+
+    bool useIntermediatePresentation = false;
+    if (Mk64Graphics3DSResolvedNewModel != nullptr &&
+        Mk64Graphics3DSResolvedOutputWidth != nullptr &&
+        Mk64Graphics3DSUsesIntermediatePresentation != nullptr) {
+        mImpl->newModel = Mk64Graphics3DSResolvedNewModel();
+        mImpl->outputWidth = Mk64Graphics3DSResolvedOutputWidth();
+        useIntermediatePresentation = Mk64Graphics3DSUsesIntermediatePresentation();
+    } else {
+        // Standalone renderer probes do not link the game runtime. Keep a
+        // conservative fallback for them without affecting the real build's
+        // single resolved configuration.
+        bool aptNewModel = false;
+        const bool aptModelKnown = R_SUCCEEDED(APT_CheckNew3DS(&aptNewModel));
+        const bool reportedNewModel = Mk64Diagnostics3DSIsNewModel != nullptr &&
+                                      Mk64Diagnostics3DSIsNewModel();
+        mImpl->newModel = reportedNewModel || (aptModelKnown && aptNewModel);
+        const uint32_t requestedWidth = Mk64Settings3DSGetResolutionWidth != nullptr
+                                            ? Mk64Settings3DSGetResolutionWidth()
+                                            : kTopLogicalWidth;
+        const bool supportsWide = Mk64Diagnostics3DSSupportsWideMode != nullptr
+                                      ? Mk64Diagnostics3DSSupportsWideMode()
+                                      : mImpl->newModel;
+        mImpl->outputWidth = requestedWidth == kTopWideWidth && supportsWide
+                                 ? kTopWideWidth
+                                 : kTopLogicalWidth;
+        useIntermediatePresentation = mImpl->newModel && mImpl->outputWidth == kTopLogicalWidth;
+    }
+    if (mImpl->outputWidth != kTopWideWidth) mImpl->outputWidth = kTopLogicalWidth;
+
     gfxSet3D(false);
+    gfxSetWide(mImpl->outputWidth == kTopWideWidth);
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
     uint16_t bottomWidth = 0;
     uint16_t bottomHeight = 0;
@@ -929,8 +1128,7 @@ void GfxRenderingAPICitro3D::Init() {
     aptSetHomeAllowed(true);
     aptSetSleepAllowed(true);
 
-    bool newModel = false;
-    if (R_SUCCEEDED(APT_CheckNew3DS(&newModel)) && newModel) {
+    if (mImpl->newModel) {
         osSetSpeedupEnable(true);
     }
 
@@ -939,7 +1137,8 @@ void GfxRenderingAPICitro3D::Init() {
         return;
     }
     mImpl->initialized = true;
-    mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, kTopWidth, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, mImpl->outputWidth, GPU_RB_RGBA8,
+                                               GPU_RB_DEPTH24_STENCIL8);
     if (mImpl->topTarget == nullptr) {
         return;
     }
@@ -970,7 +1169,7 @@ void GfxRenderingAPICitro3D::Init() {
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 4, 0x3210);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
-    C3D_FrameRate(60.0f);
+    C3D_FrameRate(useIntermediatePresentation ? 60.0f : 30.0f);
     SetUseAlpha(false);
     SetDepthTestAndMask(false, false);
     mImpl->ready = true;
@@ -989,32 +1188,38 @@ void GfxRenderingAPICitro3D::StartFrame() {
     mImpl->frameActive = true;
     mImpl->activeTarget = mImpl->topTarget;
     mImpl->packedVertexCount = 0;
+    mImpl->dirtyVertexBegin = 0;
+    mImpl->dirtyVertexEnd = 0;
+    mImpl->viewportX = 0;
+    mImpl->viewportY = 0;
+    mImpl->viewportWidth = static_cast<int>(mImpl->outputWidth);
+    mImpl->viewportHeight = static_cast<int>(kTopHeight);
+    mImpl->scissorEnabled = false;
     C3D_FrameDrawOn(mImpl->topTarget);
-    C3D_BindProgram(&mImpl->shaderProgram);
-    C3D_Mtx depthConversion;
-    Mtx_Identity(&depthConversion);
-    depthConversion.r[2].z = 0.4999f;
-    depthConversion.r[2].w = -0.5f;
-    C3D_Mtx tilt;
-    Mtx_Identity(&tilt);
-    tilt.r[0].x = 0.0f;
-    tilt.r[0].y = 1.0f;
-    tilt.r[1].x = -1.0f;
-    tilt.r[1].y = 0.0f;
-    C3D_Mtx projection;
-    Mtx_Multiply(&projection, &tilt, &depthConversion);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, mImpl->projectionUniform, &projection);
-    SetViewport(0, 0, kTopWidth, kTopHeight);
-    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    RestoreFast3DState();
 }
 
 void GfxRenderingAPICitro3D::EndFrame() {
     if (!mImpl->frameActive) {
         return;
     }
+    // Flush Fast3D's exact dirty range before Citro3D's frame-end hook submits
+    // any later Citro2D work. Keep flags at zero: Citro2D owns private dynamic
+    // vertex/index buffers and relies on Citro3D's final linear-heap flush.
+    FlushPackedVertices();
     C3D_FrameEnd(0);
     mImpl->frameActive = false;
     mImpl->activeTarget = nullptr;
+
+    const uint64_t timestamp = osGetTime();
+    if (mImpl->presentedTimestampCount == 0) {
+        mImpl->firstPresentedTimestamp = timestamp;
+    }
+    mImpl->presentedTimestamps[mImpl->presentedTimestampHead] = timestamp;
+    mImpl->presentedTimestampHead =
+        (mImpl->presentedTimestampHead + 1) % mImpl->presentedTimestamps.size();
+    mImpl->presentedTimestampCount =
+        std::min(mImpl->presentedTimestampCount + 1, mImpl->presentedTimestamps.size());
 }
 
 void GfxRenderingAPICitro3D::FinishRender() {
@@ -1086,7 +1291,8 @@ void GfxRenderingAPICitro3D::StartDrawToFramebuffer(int fbId, float noiseScale) 
         target = slot->target;
     }
     if (mImpl->frameActive && mImpl->activeTarget != target) {
-        C3D_FrameSplit(0);
+        FlushPackedVertices();
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }
     C3D_FrameDrawOn(target);
     mImpl->activeTarget = target;
@@ -1226,6 +1432,79 @@ void GfxRenderingAPICitro3D::GetDebugStats(size_t* textureSlots, size_t* initial
     if (clipScratchBytes != nullptr) {
         *clipScratchBytes = mImpl->clipScratch.capacity() * sizeof(float);
     }
+}
+
+float GfxRenderingAPICitro3D::GetPresentedFps(uint64_t windowMilliseconds) const {
+    if (windowMilliseconds == 0 || mImpl->presentedTimestampCount == 0) {
+        return 0.0f;
+    }
+
+    const uint64_t now = osGetTime();
+    const uint64_t cutoff = now > windowMilliseconds ? now - windowMilliseconds : 0;
+    size_t framesInWindow = 0;
+    for (size_t offset = 0; offset < mImpl->presentedTimestampCount; ++offset) {
+        const size_t index = (mImpl->presentedTimestampHead + mImpl->presentedTimestamps.size() - 1 - offset) %
+                             mImpl->presentedTimestamps.size();
+        if (mImpl->presentedTimestamps[index] <= cutoff) {
+            break;
+        }
+        ++framesInWindow;
+    }
+
+    const uint64_t lifetime = now >= mImpl->firstPresentedTimestamp
+                                  ? now - mImpl->firstPresentedTimestamp
+                                  : 0;
+    if (lifetime < windowMilliseconds) {
+        if (mImpl->presentedTimestampCount < 2 || lifetime == 0) {
+            return 0.0f;
+        }
+        return static_cast<float>(mImpl->presentedTimestampCount - 1) * 1000.0f /
+               static_cast<float>(lifetime);
+    }
+    return static_cast<float>(framesInWindow) * 1000.0f /
+           static_cast<float>(windowMilliseconds);
+}
+
+float GfxRenderingAPICitro3D::GetPresentedFps2Seconds() const {
+    return GetPresentedFps(2000);
+}
+
+float GfxRenderingAPICitro3D::GetPresentedFps10Seconds() const {
+    return GetPresentedFps(10000);
+}
+
+uint64_t GfxRenderingAPICitro3D::GetDrawCallCount() const {
+    return mImpl->drawCallCount;
+}
+
+uint64_t GfxRenderingAPICitro3D::GetTriangleCount() const {
+    return mImpl->triangleCount;
+}
+
+uint64_t GfxRenderingAPICitro3D::GetTextureCacheUploadCount() const {
+    return mImpl->textureCacheUploadCount;
+}
+
+uint64_t GfxRenderingAPICitro3D::GetTextureCacheUploadBytes() const {
+    return mImpl->textureCacheUploadBytes;
+}
+
+uint64_t GfxRenderingAPICitro3D::GetVertexUploadCount() const {
+    return mImpl->vertexUploadCount;
+}
+
+uint64_t GfxRenderingAPICitro3D::GetVertexUploadBytes() const {
+    return mImpl->vertexUploadBytes;
+}
+
+void* GfxRenderingAPICitro3D::PrepareForExternalDraw() {
+    if (!mImpl->frameActive) {
+        return nullptr;
+    }
+    // Citro2D's target-clear helper performs an internal FrameSplit. Make the
+    // pending Fast3D VBO range coherent before handing the frame to it.
+    FlushPackedVertices();
+    return mImpl->topTarget;
 }
 
 } // namespace Fast

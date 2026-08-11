@@ -1,10 +1,12 @@
 #include "game_data_3ds.h"
 #include "audio_runtime_3ds.h"
+#include "bottom_ui_3ds.h"
 #include "diagnostics_3ds.h"
 #include "game_runtime_3ds.h"
 #include "game_state_3ds.h"
 #include "input_3ds.h"
 #include "resource_runtime_3ds.h"
+#include "settings_3ds.h"
 
 #include <3ds.h>
 
@@ -56,6 +58,7 @@ int main() {
         ExitWithError(data.message);
     }
     Mk64Diagnostics3DSCheckpoint("game-data-ready");
+    Mk64Settings3DSLoad();
 
     // First-run extraction needs the regular heap for Torch's ROM buffer and
     // per-file YAML data. Reserve the vanilla arena only after mk64.o2r is
@@ -110,6 +113,17 @@ int main() {
         ExitWithError("DSP audio could not start. Dump DSP firmware with a current homebrew setup, then try again.");
     }
 
+    Mk64Diagnostics3DSCheckpoint("bottom-ui-init");
+    if (!Mk64BottomUI3DSInit()) {
+        Mk64Diagnostics3DSCheckpoint("bottom-ui-init-failed");
+        Mk64GameAudio3DSShutdown();
+        Mk64Graphics3DSShutdown();
+        Mk64Resource3DSShutdown();
+        Mk64Diagnostics3DSStop();
+        ExitWithError("The bottom-screen interface could not be initialized.");
+    }
+    Mk64Diagnostics3DSCheckpoint("bottom-ui-ready");
+
     // Skip the desktop-only Harbour Masters splash and enter the stock logo.
     gMenuSelection = kLogoIntroMenu;
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-init");
@@ -126,6 +140,7 @@ int main() {
             continue;
         }
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
+        Mk64BottomUI3DSPrepareFrame();
         thread5_iteration();
         Mk64Diagnostics3DSSetStage("game-loop-audio");
         Mk64GameAudio3DSPump();
@@ -133,6 +148,8 @@ int main() {
 
     Mk64Diagnostics3DSCheckpoint("shutdown");
     Mk64GameAudio3DSShutdown();
+    Mk64Settings3DSSave();
+    Mk64BottomUI3DSShutdown();
     Mk64Graphics3DSShutdown();
     Mk64Resource3DSShutdown();
     Mk64Diagnostics3DSStop();

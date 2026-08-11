@@ -3,8 +3,10 @@
 ![Mario Kart 64 for Nintendo 3DS](platform/3ds/assets/banner.png)
 
 An experimental native Nintendo 3DS port of the vanilla Mario Kart 64 game code, based on
-[SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart). The port targets the top screen at its native
-400x240 resolution with a 5:3 viewport; the bottom screen is intentionally black.
+[SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart). The top screen supports a Wide 5:3 viewport and a
+centered Original 4:3 viewport. The default mode renders at 400x240; every model except the original Nintendo 2DS can
+also select an 800-pixel horizontal rendering mode after restarting. The bottom screen provides a dimmed game backdrop,
+touch-enabled options and diagnostics, and an automatic race HUD.
 
 This repository contains no ROM, extracted game data, or copyrighted Nintendo assets. Put your legally owned
 Mario Kart 64 USA ROM in `sd:/3ds/MK64/`. The 3DS app creates and uses that folder as the local game-data
@@ -12,18 +14,27 @@ workspace.
 
 ## Current status
 
-The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O2R resource runtime, 3DS input,
-NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game remains a work in
-progress and is not yet a stable release. The original game simulation remains tied to the vanilla loop while
-the 3DS presentation path now targets the top LCD's 60 Hz refresh.
-The unbounded desktop matrix-recording interpolation path used by v0.11 is disabled because it terminated the
-Old 3DS build during startup. A bounded 3DS-specific 60 Hz path remains future work; sustained 60 FPS is not claimed.
+The native ARM11 executable, on-device O2R generator, Citro3D Fast3D renderer, O2R resource runtime, bottom-screen
+interface, 3DS input, NDSP audio output, and 3DSX/CIA packaging pipeline compile successfully. The vanilla game
+remains a work in progress and is not yet a stable release.
 
-The v0.17 pre-release corrects the common non-power-of-two texture upload path that vertically wrapped menu labels,
-course names, HUD graphics, Lakitu, and other sprites. Opaque 320x240 menu backdrops now use a centered aspect-fill
-presentation on the 400x240 top screen. The renderer also avoids per-draw combiner allocations, redundant full-screen
-clears, repeated resource-cache bookkeeping on hot hits, per-command weak-pointer locking, and unused display-list
-directory string allocations.
+The v0.18 pre-release adds a native bottom-screen interface using textures loaded from the owner-generated local O2R
+archive. Game Select mirrors the `L Option` and `R Data` actions. Options captures controller and touch input without
+changing the top-screen selection and provides Game, Screen, Gameplay, and Developer tabs. During a race, the bottom
+screen uses the selected course preview as a cropped background and displays time, lap, current item, the leading five
+racers, and the minimap. Pausing automatically replaces that race HUD with Options. Settings are stored locally in
+`sd:/3ds/MK64/mk64-3ds.cfg`.
+
+The renderer now implements the grayscale-tint state used by Game Select, Player Select, and Course Select, and it
+restores the opaque black tiles behind character portraits. It batches packed-vertex cache flushes, avoids duplicate
+texture-resource lookups and wrapper allocations on hot hits, and expands the bounded texture cache for animated kart
+frames. New 3DS midpoint interpolation uses fixed-capacity recording and lookup tables instead of the unbounded desktop
+recorder or per-matrix map allocations.
+
+Mario Kart 64's simulation remains 30 Hz. At 400 pixels on New Nintendo 3DS, v0.18 can present a bounded
+matrix-interpolated midpoint between simulation key frames. Old Nintendo 3DS and the 800-pixel quality mode present
+key frames at a 30 Hz target. These are implementation targets, not measured guarantees: sustained 60 FPS and 30 FPS
+are not claimed without representative physical-hardware captures.
 
 First-run extraction now leaves the 8 MiB game arena unreserved until game data is ready and avoids duplicating
 read-only Torch input buffers. The SD-card installer log mirrors progress and multi-line extractor diagnostics, adds
@@ -52,8 +63,8 @@ git submodule update --init --recursive
 The CLI writes the game package to:
 
 ```text
-build-3ds/game/mk64-3ds-game-v0.17.3dsx
-build-3ds/game/mk64-3ds-v0.17.cia
+build-3ds/game/mk64-3ds-game-v0.18.3dsx
+build-3ds/game/mk64-3ds-v0.18.cia
 ```
 
 If `makerom` and `bannertool` are not on `PATH`, set `MK64_3DS_TOOLS_ROOT` to a private directory containing their
@@ -114,12 +125,27 @@ Install the CIA with your normal homebrew installer, or place the 3DSX in a Home
 | Circle Pad | Control Stick |
 | A / B | A / B |
 | R | R (hop/drift) |
-| L | L |
+| L | L; opens bottom Options from Game Select or pause |
 | Select | Save a diagnostic dump (not passed to the game) |
 | D-Pad | D-Pad |
 | X / Y | C-Up / C-Left |
 | ZL / ZR | C-Down / C-Right |
+| C Stick | Hold for the selected Turbo Speed during a race |
+| Touch screen | Open and navigate bottom-screen controls |
 | Start | Start |
+
+## Bottom-screen options
+
+Open Options with `L` from Game Select. The same panel opens automatically when a race is paused. Use the D-Pad and
+`A`/`B`, switch tabs with `L`/`R`, or tap the touch screen. While the panel is open, its input is captured and does not
+change the top-screen menu.
+
+- **Screen:** Wide or Original 4:3 aspect ratio, top HUD on/off, and 400/800-pixel rendering. The 800-pixel mode is
+  unavailable on the original Nintendo 2DS, requires a restart, and uses a 30 Hz presentation target. The default
+  400-pixel mode is recommended on Old Nintendo 3DS for performance.
+- **Gameplay:** C-Stick Turbo Speed from x1 through x5 and saturating master volume at 25, 50, 75, 100, 150, or 200%.
+- **Developer:** request a local memory dump, show a two-second FPS value on the top screen, or open a diagnostic
+  overlay with version, console model, two- and ten-second FPS, memory, renderer, audio, state, and course data.
 
 ## Runtime diagnostics
 

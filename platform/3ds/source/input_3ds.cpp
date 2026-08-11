@@ -7,6 +7,9 @@
 
 extern "C" bool Mk64Diagnostics3DSOwnsHid(void) __attribute__((weak));
 extern "C" bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS*) __attribute__((weak));
+extern "C" uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t) __attribute__((weak));
+extern "C" bool Mk64BottomUI3DSConsumesCStick(void) __attribute__((weak));
+extern "C" bool Mk64BottomUI3DSIsModalOpen(void) __attribute__((weak));
 
 namespace {
 
@@ -41,7 +44,10 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     const bool diagnosticReady = Mk64Diagnostics3DSReadInput != nullptr &&
                                  Mk64Diagnostics3DSReadInput(&diagnosticInput);
     if (!diagnosticReady) hidScanInput();
-    const u32 keys = diagnosticReady ? diagnosticInput.heldMask : hidKeysHeld();
+    u32 keys = diagnosticReady ? diagnosticInput.heldMask : hidKeysHeld();
+    if (Mk64BottomUI3DSFilterGameKeys != nullptr) {
+        keys = Mk64BottomUI3DSFilterGameKeys(keys);
+    }
 
     if ((keys & KEY_A) != 0) {
         pad->buttons |= MK64_N64_A;
@@ -84,6 +90,11 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     } else {
         hidCircleRead(&circle);
     }
+    const bool modalInputCapture = Mk64BottomUI3DSIsModalOpen != nullptr &&
+                                   Mk64BottomUI3DSIsModalOpen();
+    if (modalInputCapture) {
+        circle = {};
+    }
     pad->stickX = ScaleStickAxis(circle.dx);
     pad->stickY = ScaleStickAxis(circle.dy);
 
@@ -93,6 +104,11 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
         cstick.dy = diagnosticInput.cstickY;
     } else {
         hidCstickRead(&cstick);
+    }
+    const bool consumeCStick = modalInputCapture ||
+        (Mk64BottomUI3DSConsumesCStick != nullptr && Mk64BottomUI3DSConsumesCStick());
+    if (consumeCStick) {
+        cstick = {};
     }
     pad->rightStickX = ScaleStickAxis(cstick.dx);
     pad->rightStickY = ScaleStickAxis(cstick.dy);

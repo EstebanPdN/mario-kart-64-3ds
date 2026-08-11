@@ -832,6 +832,24 @@ extern "C" size_t Mk64Resource3DSLoadedCount(void) {
     return sCache.size();
 }
 
+extern "C" bool Mk64Resource3DSGetTexture(const char* name, Mk64TextureResource3DS* outTexture) {
+    if (outTexture == nullptr) {
+        return false;
+    }
+    *outTexture = {};
+    LoadedResource* resource = LoadByPath(NormalizePath(name));
+    if (resource == nullptr || resource->type != kTypeTexture || resource->pointer == nullptr ||
+        resource->pointerSize == 0 || resource->textureWidth == 0 || resource->textureHeight == 0) {
+        return false;
+    }
+    outTexture->data = static_cast<const uint8_t*>(resource->pointer);
+    outTexture->size = resource->pointerSize;
+    outTexture->width = resource->textureWidth;
+    outTexture->height = resource->textureHeight;
+    outTexture->type = resource->textureType;
+    return true;
+}
+
 extern "C" uint64_t ResourceGetCrcByName(const char* name) {
     const std::string_view path = NormalizePath(name);
     return path.empty() ? 0 : PathCrc(path);

@@ -501,6 +501,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/gbi_middleware_3ds.cpp
         platform/3ds/source/install_log_3ds.cpp
         platform/3ds/source/loading_image_3ds.cpp
+        platform/3ds/source/settings_3ds.cpp
         platform/3ds/source/torch_o2r_3ds.cpp
         platform/3ds/source/vanilla_stubs_3ds.cpp
         "${SPAGHETTIKART_ROOT}/src/engine/editor/GameObject.cpp"
@@ -700,6 +701,12 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
         string(REPLACE
+            "#include \"fast/types.h\""
+            "#include \"fast/types.h\"\n\nextern \"C\" bool Mk64FrameInterpolation3DSLookup(const Mtx*, MtxF*) __attribute__((weak));"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
             "    while (!g_exec_stack.cmd_stack.empty()) {\n        auto cmd = g_exec_stack.cmd_stack.top();"
             "    size_t commandCount = 0;\n    constexpr size_t kMaxCommandsPerFrame = 250000;\n    constexpr size_t kMaxDisplayListDepth = 512;\n    while (!g_exec_stack.cmd_stack.empty()) {\n        auto cmd = g_exec_stack.cmd_stack.top();\n        if (++commandCount > kMaxCommandsPerFrame || g_exec_stack.cmd_stack.size() > kMaxDisplayListDepth) {\n            if (Mk64Diagnostics3DSGfxWatchdog != nullptr && cmd != nullptr) {\n                Mk64Diagnostics3DSGfxWatchdog(cmd, cmd->words.w0, cmd->words.w1, commandCount);\n            }\n            g_exec_stack.stop();\n            break;\n        }"
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
@@ -734,14 +741,45 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
             message(FATAL_ERROR "The upstream Fast3D texture pointer guard insertion point changed")
         endif()
         set(SPAGHETTIKART_3DS_TEXTURE_CACHE_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        # A 96-entry cache recycled animated 64x64 kart frames continuously in
+        # eight-racer scenes. Private hardware dumps retained more than 20 MiB
+        # of linear memory during races; 256 entries give the common RGBA8 kart
+        # working set roughly 4 MiB without restoring desktop's 1024-entry cap.
         string(REPLACE
             "#define TEXTURE_CACHE_MAX_SIZE 1024"
-            "#define TEXTURE_CACHE_MAX_SIZE 96"
+            "#define TEXTURE_CACHE_MAX_SIZE 256"
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_CACHE_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D texture cache limit insertion point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_MATRIX_LOOKUP_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
+    float matrix[4][4];
+
+    if (auto it = mCurMtxReplacements->find((Mtx*)addr); it != mCurMtxReplacements->end()) {
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                float v = it->second.mf[i][j];]=]
+            [=[void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
+    float matrix[4][4];
+
+    MtxF replacement3DS = {};
+    const bool hasReplacement3DS = Mk64FrameInterpolation3DSLookup != nullptr &&
+                                   Mk64FrameInterpolation3DSLookup((Mtx*)addr, &replacement3DS);
+    auto replacementIt = mCurMtxReplacements->find((Mtx*)addr);
+    if (hasReplacement3DS || replacementIt != mCurMtxReplacements->end()) {
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                float v = hasReplacement3DS ? replacement3DS.mf[i][j]
+                                            : replacementIt->second.mf[i][j];]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_MATRIX_LOOKUP_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D matrix lookup insertion point changed")
         endif()
         set(SPAGHETTIKART_3DS_INTERPRETER_INSTANCE_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
@@ -965,6 +1003,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
     )
 
     add_executable(mk64-3ds-game
+        platform/3ds/source/bottom_ui_3ds.cpp
         platform/3ds/source/diagnostics_3ds.cpp
         platform/3ds/source/game_main_3ds.cpp
     )
@@ -985,6 +1024,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         F3DEX_GBI=1
         PLATFORM_3DS=1
         NON_MATCHING=1
+        MK64_3DS_VERSION="${MK64_3DS_VERSION}"
     )
     target_compile_options(mk64-3ds-game PRIVATE
         -O3
@@ -1007,6 +1047,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         mk64-3ds-o2r-reader
         -Wl,--end-group
         nlohmann_json::nlohmann_json
+        citro2d
         citro3d
         ctru
         m

@@ -2,6 +2,7 @@
 
 #include "audio_ndsp_3ds.h"
 #include "diagnostics_3ds.h"
+#include "settings_3ds.h"
 
 #include "audio/data.h"
 #include "audio/heap.h"
@@ -26,6 +27,44 @@ constexpr uint32_t kStereoSamplesPerGameFrame = kStereoFramesPerGameFrame * 2;
 bool sReady = false;
 uint32_t sPumpCount = 0;
 bool sLoggedFirstSignal = false;
+
+template <int32_t Numerator, int32_t Denominator>
+void ApplyGain(std::array<int16_t, kStereoSamplesPerGameFrame>& samples) {
+    for (int16_t& sample : samples) {
+        int32_t scaled = static_cast<int32_t>(sample) * Numerator / Denominator;
+        if (scaled > INT16_MAX) {
+            scaled = INT16_MAX;
+        } else if (scaled < INT16_MIN) {
+            scaled = INT16_MIN;
+        }
+        sample = static_cast<int16_t>(scaled);
+    }
+}
+
+void ApplyMasterVolume(std::array<int16_t, kStereoSamplesPerGameFrame>& samples) {
+    // Select once per buffer so the inner loop uses only constant power-of-two
+    // divisions; ARM11 does not have a hardware integer divide instruction.
+    switch (Mk64Settings3DSGetMasterVolumePercent()) {
+        case 25:
+            ApplyGain<1, 4>(samples);
+            break;
+        case 50:
+            ApplyGain<1, 2>(samples);
+            break;
+        case 75:
+            ApplyGain<3, 4>(samples);
+            break;
+        case 150:
+            ApplyGain<3, 2>(samples);
+            break;
+        case 200:
+            ApplyGain<2, 1>(samples);
+            break;
+        case 100:
+        default:
+            break;
+    }
+}
 
 void LogAudioState() {
     uint32_t activePlayers = 0;
@@ -70,6 +109,7 @@ extern "C" void Mk64GameAudio3DSPump() {
     create_next_audio_buffer(samples.data(), kSamplesPerSynthesisFrame);
     create_next_audio_buffer(samples.data() + kSamplesPerSynthesisFrame * 2,
                              kSamplesPerSynthesisFrame);
+    ApplyMasterVolume(samples);
     ++sPumpCount;
     // Inspect frequently enough to diagnose startup, but do not synchronously
     // flush an SD log every game tick while the intro is intentionally silent.

@@ -6,9 +6,10 @@ extern "C" bool Mk64Diagnostics3DSOwnsHid(void) __attribute__((weak));
 
 namespace Fast {
 
-void GfxWindowBackend3DS::Init(const char*, const char*, bool, uint32_t, uint32_t, int32_t, int32_t) {
-    mWidth = 400;
-    mHeight = 240;
+void GfxWindowBackend3DS::Init(const char*, const char*, bool, uint32_t width, uint32_t height,
+                              int32_t, int32_t) {
+    mWidth = width == 800 ? 800 : 400;
+    mHeight = height == 0 ? 240 : height;
     mFullScreen = true;
     mIsRunning = true;
     mTargetFps = 60;
@@ -101,13 +102,13 @@ void GfxWindowBackend3DS::GetDimensions(uint32_t* width, uint32_t* height, int32
     }
 }
 
-void GfxWindowBackend3DS::SetDimensions(uint32_t, uint32_t, int32_t, int32_t) {
-    mWidth = 400;
-    mHeight = 240;
+void GfxWindowBackend3DS::SetDimensions(uint32_t width, uint32_t height, int32_t, int32_t) {
+    mWidth = width == 800 ? 800 : 400;
+    mHeight = height == 0 ? 240 : height;
 }
 
 Ship::WindowRect GfxWindowBackend3DS::GetPrimaryMonitorRect() {
-    return { 0, 0, 400, 240 };
+    return { 0, 0, static_cast<int32_t>(mWidth), static_cast<int32_t>(mHeight) };
 }
 
 void GfxWindowBackend3DS::HandleEvents() {
