@@ -43,6 +43,11 @@ Place your USA Mario Kart 64 ROM inside that folder.
 Name it:
 
 ```text
+mk64.z64
+```
+OR
+
+```text
 Mario Kart 64.z64
 ```
 
