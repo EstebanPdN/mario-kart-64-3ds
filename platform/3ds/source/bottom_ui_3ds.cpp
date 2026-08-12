@@ -939,7 +939,7 @@ void SaveChangedSetting(const char* successText) {
 uint8_t RowCount(OptionsTab tab) {
     switch (tab) {
         case OptionsTab::Game: return sUi.modalOpenedFromPause ? 2 : 1;
-        case OptionsTab::Screen: return 3;
+        case OptionsTab::Screen: return 2;
         case OptionsTab::Gameplay: return 2;
         case OptionsTab::Developer: return 3;
         default: return 1;
@@ -1017,17 +1017,6 @@ void ActivateSelectedRow(int direction) {
                     Mk64Settings3DSSetTopHudEnabled(enabled);
                     Mk64GameState3DSSetTopHudEnabled(enabled);
                     SaveChangedSetting(enabled ? "TOP HUD ON" : "TOP HUD OFF");
-                    break;
-                }
-                case 2: {
-                    if (!Mk64Diagnostics3DSSupportsWideMode()) {
-                        Mk64Settings3DSSetResolutionWidth(400);
-                        SaveChangedSetting("800 PX UNAVAILABLE ON THIS MODEL");
-                        break;
-                    }
-                    const uint16_t width = Mk64Settings3DSGetResolutionWidth() == 800 ? 400 : 800;
-                    Mk64Settings3DSSetResolutionWidth(width);
-                    SaveChangedSetting("RESOLUTION SAVED - RESTART");
                     break;
                 }
             }
@@ -1392,20 +1381,6 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
             } else if (row == 1) {
                 *label = "TOP HUD";
                 std::snprintf(value, valueSize, "%s", Mk64Settings3DSGetTopHudEnabled() ? "ON" : "OFF");
-            } else {
-                *label = "RESOLUTION";
-                const bool supportsWide = Mk64Diagnostics3DSSupportsWideMode();
-                const uint16_t configured = supportsWide ? Mk64Settings3DSGetResolutionWidth() : 400;
-                const uint32_t active = Mk64Graphics3DSResolvedOutputWidth != nullptr
-                                            ? Mk64Graphics3DSResolvedOutputWidth()
-                                            : configured;
-                if (!supportsWide) {
-                    std::snprintf(value, valueSize, "400 PX  MODEL LIMIT");
-                } else if (configured != active) {
-                    std::snprintf(value, valueSize, "%u PX  RESTART", configured);
-                } else {
-                    std::snprintf(value, valueSize, "%u PX  ACTIVE", configured);
-                }
             }
             break;
         case OptionsTab::Gameplay:
