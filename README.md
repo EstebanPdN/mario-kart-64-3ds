@@ -40,12 +40,15 @@ sd:/3ds/MK64/
 
 Place your USA Mario Kart 64 ROM inside that folder.
 
-Recommended filenames:
+Name it:
 
 ```text
 Mario Kart 64.z64
+```
+or
+
+```text
 mk64.z64
-baserom.us.z64
 ```
 
 ### Option 1 — Automatic Extraction
