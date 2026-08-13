@@ -1,4 +1,5 @@
 #include "audio_runtime_3ds.h"
+#include "game_runtime_3ds.h"
 
 #include "audio_ndsp_3ds.h"
 #include "diagnostics_3ds.h"
@@ -230,8 +231,8 @@ void RestoreCpuLimit() {
 }
 
 bool StartAudioWorker() {
-    bool isNewModel = false;
-    APT_CheckNew3DS(&isNewModel);
+    const bool isNewModel = Mk64Graphics3DSResolvedPerformanceProfile() ==
+                            MK64_PERFORMANCE_PROFILE_NEW_3DS;
     sWorkerCore = isNewModel ? 2 : -1;
 
     if (!isNewModel) {

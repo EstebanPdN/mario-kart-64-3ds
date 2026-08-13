@@ -186,11 +186,11 @@ int main() {
     }
 
     // WindowIsRunning becomes false after aptMainLoop reports the HOME-menu
-    // close request. Do not run GPU/DSP service teardown in that APT
-    // transition: Citro3D has disabled its VBlank callbacks and any unbounded
-    // service wait can prevent the process from acknowledging closure.
-    // Settings are persisted on every change.
-    Mk64GameAudio3DSAbortForProcessExit();
-    Mk64Diagnostics3DSAbortForProcessExit();
+    // close request. Settings are persisted on every change. Join the audio
+    // and diagnostics workers while NDSP/HID and their stacks are still mapped,
+    // then keep the immediate exit that avoids GPU/resource teardown after
+    // Citro3D has disabled its VBlank callbacks during the APT transition.
+    Mk64GameAudio3DSShutdown();
+    Mk64Diagnostics3DSStop();
     std::_Exit(0);
 }

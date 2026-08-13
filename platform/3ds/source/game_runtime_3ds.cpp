@@ -180,6 +180,8 @@ extern "C" bool Mk64Graphics3DSInit() {
     // Every graphics component consumes this same conservative answer so a
     // failed APT query cannot produce mismatched target sizes/frame rates.
     sResolvedNewModel = Mk64Diagnostics3DSIsNewModel();
+    Mk64Diagnostics3DSCheckpoint(sResolvedNewModel ? "performance-profile-new-3ds"
+                                                   : "performance-profile-old-3ds");
     sOutputWidth = Mk64Settings3DSGetResolutionWidth();
     // Wide output is supported across the 3DS family except the Old 2DS.
     // Keep 400 as the default/performance mode, but honor an explicit 800 px
@@ -412,6 +414,13 @@ extern "C" uint32_t OTRGetGameRenderHeight() {
 }
 extern "C" bool Mk64Graphics3DSResolvedNewModel() {
     return sResolvedNewModel;
+}
+extern "C" Mk64PerformanceProfile3DS Mk64Graphics3DSResolvedPerformanceProfile() {
+    return sResolvedNewModel ? MK64_PERFORMANCE_PROFILE_NEW_3DS
+                             : MK64_PERFORMANCE_PROFILE_OLD_3DS;
+}
+extern "C" uint32_t Mk64Graphics3DSBottomHudRefreshDivisor() {
+    return Mk64Graphics3DSResolvedPerformanceProfile() == MK64_PERFORMANCE_PROFILE_OLD_3DS ? 3U : 1U;
 }
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth() {
     return sOutputWidth;

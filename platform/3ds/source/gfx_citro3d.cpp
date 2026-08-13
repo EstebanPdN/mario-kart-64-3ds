@@ -45,11 +45,14 @@ constexpr float kFullscreenBoundsEpsilon = 0.03f;
 constexpr float kFullscreenCoverScale = static_cast<float>(kTopLogicalWidth) / kNativeWidth;
 constexpr size_t kMaxVertexStrideFloats = 64;
 
-constexpr uint32_t kDisplayTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
-                                                   GX_TRANSFER_RAW_COPY(0) |
-                                                   GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                                   GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-                                                   GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+constexpr uint32_t kDisplayTransferFlagsRgba8 =
+    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+constexpr uint32_t kDisplayTransferFlagsRgb565 =
+    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
 enum CombinerSource : int {
     SourceZero = 0,
@@ -1160,12 +1163,19 @@ void GfxRenderingAPICitro3D::Init() {
         return;
     }
     mImpl->initialized = true;
-    mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, mImpl->outputWidth, GPU_RB_RGBA8,
-                                               GPU_RB_DEPTH24_STENCIL8);
+    // Preserve the full-precision New 3DS path. Old 3DS uses the N64-class
+    // 16-bit color/depth profile to halve top-target bandwidth and storage;
+    // the original game itself used a 16-bit framebuffer and Z buffer.
+    const GPU_COLORBUF topColorFormat = mImpl->newModel ? GPU_RB_RGBA8 : GPU_RB_RGB565;
+    const GPU_DEPTHBUF topDepthFormat = mImpl->newModel ? GPU_RB_DEPTH24_STENCIL8 : GPU_RB_DEPTH16;
+    mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, mImpl->outputWidth, topColorFormat,
+                                               topDepthFormat);
     if (mImpl->topTarget == nullptr) {
         return;
     }
-    C3D_RenderTargetSetOutput(mImpl->topTarget, GFX_TOP, GFX_LEFT, kDisplayTransferFlags);
+    C3D_RenderTargetSetOutput(mImpl->topTarget, GFX_TOP, GFX_LEFT,
+                              mImpl->newModel ? kDisplayTransferFlagsRgba8
+                                              : kDisplayTransferFlagsRgb565);
 
     mImpl->shaderBinary = DVLB_ParseFile(reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(fast3d_passthrough_shbin)),
                                          fast3d_passthrough_shbin_size);

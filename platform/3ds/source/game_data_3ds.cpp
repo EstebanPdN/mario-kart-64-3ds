@@ -43,9 +43,9 @@ constexpr const char* kInvalidArchiveDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/i
 constexpr const char* kExtractorAdditionalFile = "meta/mods.toml";
 constexpr const char* kRomfsExtractorSourceDir = "romfs:/torch";
 constexpr const char* kExpectedSha1 = "579c48e211ae952530ffc8738709f078d5dd215e";
-// The on-device ZIP writer stores roughly 54 MiB of payload and temporarily
-// spools its central directory alongside the bundled extractor metadata.
-// Keep enough margin for FAT allocation granularity and installer logs.
+// The on-device ZIP writer streams Deflate output and temporarily spools its
+// central directory alongside the bundled extractor metadata. Keep enough
+// margin for incompressible payloads, FAT allocation granularity and logs.
 constexpr uint64_t kMinimumExtractionFreeBytes = 96ULL * 1024ULL * 1024ULL;
 constexpr long kInstallerFontLetterRomOffset = 0x7F2094;
 constexpr long kInstallerFontDotRomOffset = 0x7F1534;
