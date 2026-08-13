@@ -227,6 +227,8 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
     if (!snapshot->racing) sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
     sWasRacing = snapshot->racing;
     snapshot->mirrorMode = gIsMirrorMode != 0;
+    snapshot->topHudRenderMode = static_cast<int8_t>(sHiddenTopHudMode);
+    snapshot->raceFinished = snapshot->racing && playerHUD[0].lapCount == 3;
     snapshot->courseTimerCentiseconds = playerHUD[0].someTimer;
     snapshot->courseTimerSeconds = static_cast<float>(snapshot->courseTimerCentiseconds) / 100.0f;
     snapshot->currentItem = gPlayers[0].currentItemCopy;

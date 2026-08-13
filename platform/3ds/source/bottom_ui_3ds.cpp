@@ -1279,10 +1279,12 @@ void DrawMinimap() {
 
 void DrawRaceHud() {
     DrawRaceBackground(204.0f);
+    const bool positionLapOnTop =
+        sUi.game.topHudRenderMode == MK64_TOP_HUD_RENDER_POSITION_LAP;
 
     // Preserve the original 320x240 HUD scale: lap at upper left, the live
     // item-window/roulette state in the center, and time at upper right.
-    if (sUi.game.gameMode != 3) {
+    if (sUi.game.gameMode != 3 && !positionLapOnTop) {
         DrawTexture(sUi.raceHud.lapLabel, 13.0f, 15.0f, 40.0f, 10.0f, 0.7f);
         const int lap = std::clamp<int>(sUi.game.currentLap, 1, 3) - 1;
         DrawTexture(sUi.raceHud.lapCounts[static_cast<size_t>(lap)],
@@ -1302,15 +1304,19 @@ void DrawRaceHud() {
         if (character < 0 || character >= 8 || sUi.game.standingNativeY[rank] < 0.0f) continue;
         // Native X/Y and direction are the same animated values consumed by
         // func_80050320. Only shift Y below the new top row.
+        const bool expanded = positionLapOnTop && !sUi.game.raceFinished;
+        const float portraitSize = expanded ? 40.0f : 32.0f;
+        const float portraitHalf = portraitSize * 0.5f;
         const float centerX = sUi.game.standingNativeX[rank];
-        const float centerY = sUi.game.standingNativeY[rank] + 24.0f;
-        const float x = centerX - 16.0f;
-        const float y = centerY - 16.0f;
+        const float centerY = sUi.game.standingNativeY[rank] +
+                              (sUi.game.raceFinished ? 8.0f : (expanded ? 28.0f : 24.0f));
+        const float x = centerX - portraitHalf;
+        const float y = centerY - portraitHalf;
         const bool isPlayer = sUi.game.standingPlayerIds[rank] == 0;
         const bool unknown = sUi.game.standingUnknown[rank];
         const uint8_t portraitAlpha = unknown ? sUi.game.standingAlpha
                                               : (isPlayer ? 255 : sUi.game.standingAlpha);
-        C2D_DrawRectSolid(x, y, 0.48f, 32.0f, 32.0f,
+        C2D_DrawRectSolid(x, y, 0.48f, portraitSize, portraitSize,
                           C2D_Color32(0, 0, 0, portraitAlpha));
         C2D_ImageTint portraitTint = {};
         // Preserve the native CI8/TLUT RGB and apply only the ranking fade.
@@ -1321,7 +1327,7 @@ void DrawRaceHud() {
         UiTexture& portrait = unknown ? sUi.raceHud.questionPortrait
                                       : sUi.raceHud.portraits[static_cast<size_t>(character)];
         DrawTexture(portrait,
-                    x, y, 32.0f, 32.0f, 0.6f, &portraitTint);
+                    x, y, portraitSize, portraitSize, 0.6f, &portraitTint);
         if (unknown) continue;
         if (isPlayer) {
             C2D_ImageTint borderTint = {};
@@ -1329,16 +1335,19 @@ void DrawRaceHud() {
                                C2D_Color32(sUi.game.playerBorderRed,
                                            sUi.game.playerBorderGreen,
                                            sUi.game.playerBorderBlue, 255), 1.0f);
-            DrawTexture(sUi.raceHud.portraitBorder, x, y, 32.0f, 32.0f, 0.64f,
+            DrawTexture(sUi.raceHud.portraitBorder, x, y, portraitSize, portraitSize, 0.64f,
                         &borderTint);
         }
+        const float rankSize = expanded ? 20.0f : 16.0f;
         const float rankX = sUi.game.standingNativeDirection[rank] < 0.0f
-                                ? centerX + 9.0f : centerX - 9.0f;
-        DrawTexture(sUi.raceHud.standingRanks[rank], rankX - 8.0f, centerY - 1.0f,
-                    16.0f, 16.0f, 0.66f, &portraitTint);
+                                ? centerX + portraitSize * 0.28f
+                                : centerX - portraitSize * 0.28f;
+        DrawTexture(sUi.raceHud.standingRanks[rank], rankX - rankSize * 0.5f,
+                    centerY - rankSize * 0.0625f, rankSize, rankSize, 0.66f,
+                    &portraitTint);
     }
 
-    if (sUi.game.gameMode != 3 && sUi.game.currentPlaceVisible) {
+    if (sUi.game.gameMode != 3 && !positionLapOnTop && sUi.game.currentPlaceVisible) {
         const size_t place = std::min<size_t>(sUi.game.currentPlaceIndex,
                                               sUi.raceHud.places.size() - 1U);
         const float scale = std::clamp(sUi.game.currentPlaceScale, 0.25f, 1.0f);

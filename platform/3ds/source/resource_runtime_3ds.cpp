@@ -244,7 +244,12 @@ struct LoadedResource {
         }
         std::memset(bytes, 0, byteCount);
         T* result = reinterpret_cast<T*>(bytes);
-        allocations.emplace_back(bytes);
+        try {
+            allocations.emplace_back(bytes);
+        } catch (...) {
+            linearFree(bytes);
+            throw;
+        }
         return result;
     }
 
@@ -697,6 +702,7 @@ LoadedResource* LoadResolvedPath(std::string_view path, size_t archiveIndex,
         return crcEntry->loaded;
     }
 
+    try {
     const std::string key(path);
     if (const auto found = sCache.find(key); found != sCache.end()) {
         if (crcEntry != nullptr) {
@@ -737,6 +743,9 @@ LoadedResource* LoadResolvedPath(std::string_view path, size_t archiveIndex,
         Mk64Diagnostics3DSSetResource(key.c_str(), sCache.size());
     }
     return result;
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
 }
 
 LoadedResource* LoadByPath(std::string_view path) {
@@ -1026,10 +1035,29 @@ extern "C" void ResourceDirtyByName(const char* name) {
     if (path.rfind("sound/", 0) == 0) {
         return;
     }
-    if (const auto crcEntry = sCrcToEntry.find(PathCrc(path)); crcEntry != sCrcToEntry.end()) {
-        crcEntry->second.loaded = nullptr;
+    const auto crcEntry = sCrcToEntry.find(PathCrc(path));
+    if (crcEntry != sCrcToEntry.end() && sArchive != nullptr &&
+        crcEntry->second.archiveIndex < sArchive->Entries().size() &&
+        std::string_view(sArchive->Entries()[crcEntry->second.archiveIndex]) == path) {
+        const std::string& canonicalPath = sArchive->Entries()[crcEntry->second.archiveIndex];
+        const auto loaded = sCache.find(canonicalPath);
+        if (loaded == sCache.end() || crcEntry->second.loaded == loaded->second.get()) {
+            crcEntry->second.loaded = nullptr;
+        }
+        if (loaded != sCache.end()) {
+            sCache.erase(loaded);
+        }
+        return;
     }
-    sCache.erase(std::string(path));
+
+    // Collision-safe fallback for the exceptional path that was loaded by
+    // name because its CRC slot belongs to another archive entry.
+    for (auto loaded = sCache.begin(); loaded != sCache.end(); ++loaded) {
+        if (std::string_view(loaded->first) == path) {
+            sCache.erase(loaded);
+            return;
+        }
+    }
 }
 
 extern "C" void ResourceDirtyByCrc(uint64_t crc) {

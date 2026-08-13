@@ -21,7 +21,7 @@ https://discord.gg/SMW49UMkw
 
 ## Features
 
-- Native 400x240 gameplay, with optional 800-pixel rendering on supported models.
+- Native 400x240 gameplay.
 - Press `SELECT` at any time to create a diagnostic dump for bug reports.
 - Wide 5:3 and Original 4:3 display modes.
 - Dual-screen interface
@@ -66,6 +66,9 @@ This is done entirely on the console.
 The first extraction can take a long time, so keep the console charged.
 You can close the lid while it is working and extraction will continue.
 
+Press `START` during extraction to cancel it, delete the incomplete output,
+and exit the application safely.
+
 Once extraction finishes successfully, later launches will reuse the generated
 `mk64.o2r` file.
 
@@ -104,7 +107,7 @@ Launch the port and you're ready to play.
 | C-Stick | Turbo |
 | Touch Screen | Navigate bottom-screen menus |
 | SELECT | Create diagnostic dump |
-| START | Start / Pause |
+| START | Start / Pause; cancel and exit during extraction |
 
 ## Diagnostics
 
