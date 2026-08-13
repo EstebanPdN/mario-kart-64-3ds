@@ -1,4 +1,5 @@
 #include "bottom_ui_3ds.h"
+#include "game_runtime_3ds.h"
 
 #include "diagnostics_3ds.h"
 #include "game_state_3ds.h"
@@ -61,11 +62,14 @@ constexpr const char* kStandingRankPaletteResource =
 constexpr const char* kMinimapFinishLineResource =
     "__OTR__textures/common_data/common_texture_minimap_finish_line";
 
-constexpr uint32_t kTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
-                                    GX_TRANSFER_RAW_COPY(0) |
-                                    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-                                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+constexpr uint32_t kTransferFlagsRgba8 =
+    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+constexpr uint32_t kTransferFlagsRgb565 =
+    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
 #if defined(SPAGHETTI_VERSION)
 constexpr const char* kBuildVersion = SPAGHETTI_VERSION;
@@ -167,6 +171,7 @@ struct BottomUiState {
     bool modalOpenedFromPause = false;
     bool consumesCStick = false;
     bool bottomDirty = true;
+    uint8_t raceHudRefreshPhase = 0;
     OptionsTab tab = OptionsTab::Game;
     uint8_t selectedRow = 0;
     uint32_t injectedGameKeys = 0;
@@ -1616,12 +1621,19 @@ extern "C" bool Mk64BottomUI3DSInit() {
     if (sUi.initialized) return true;
     sUi = {};
     if (!C2D_Init(kC2DObjectCapacity)) return false;
-    sUi.bottomTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH16);
+    const GPU_COLORBUF bottomColorFormat =
+        Mk64Graphics3DSResolvedPerformanceProfile() == MK64_PERFORMANCE_PROFILE_OLD_3DS
+            ? GPU_RB_RGB565
+            : GPU_RB_RGBA8;
+    const uint32_t bottomTransferFlags = bottomColorFormat == GPU_RB_RGB565
+                                             ? kTransferFlagsRgb565
+                                             : kTransferFlagsRgba8;
+    sUi.bottomTarget = C3D_RenderTargetCreate(240, 320, bottomColorFormat, GPU_RB_DEPTH16);
     if (sUi.bottomTarget == nullptr) {
         C2D_Fini();
         return false;
     }
-    C3D_RenderTargetSetOutput(sUi.bottomTarget, GFX_BOTTOM, GFX_LEFT, kTransferFlags);
+    C3D_RenderTargetSetOutput(sUi.bottomTarget, GFX_BOTTOM, GFX_LEFT, bottomTransferFlags);
     if (!LoadFontAtlas()) {
         C3D_RenderTargetDelete(sUi.bottomTarget);
         sUi.bottomTarget = nullptr;
@@ -1784,9 +1796,17 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
     sUi.consumesCStick = turboAvailable;
     Mk64GameState3DSApplyTurbo(turboAvailable && cstickHeld, turbo);
 
-    // The game snapshot advances at 30 Hz. Redraw the race HUD once for each
-    // new snapshot, not twice during New 3DS midpoint/key-frame presentation.
-    if (sUi.view == BaseView::RaceHud) sUi.bottomDirty = true;
+    // The game snapshot remains 30 Hz on both profiles. New 3DS redraws every
+    // snapshot; Old 3DS redraws the secondary race HUD at 10 Hz to reserve CPU
+    // and GPU bandwidth for the top-screen race. Menu and modal changes still
+    // mark the target dirty immediately above.
+    if (sUi.view == BaseView::RaceHud) {
+        const uint32_t divisor = Mk64Graphics3DSBottomHudRefreshDivisor();
+        if (sUi.raceHudRefreshPhase == 0) sUi.bottomDirty = true;
+        sUi.raceHudRefreshPhase = static_cast<uint8_t>((sUi.raceHudRefreshPhase + 1U) % divisor);
+    } else {
+        sUi.raceHudRefreshPhase = 0;
+    }
 }
 
 extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {

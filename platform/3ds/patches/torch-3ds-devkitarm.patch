@@ -940,10 +940,10 @@ index 5e0096e..61c8bff 100644
  #ifdef USE_STORMLIB
  private:
 diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
-index 6440b62..74c9e55 100644
+index 6440b62..b7fdf3e 100644
 --- a/src/archive/ZWrapper.cpp
 +++ b/src/archive/ZWrapper.cpp
-@@ -5,21 +5,166 @@
+@@ -5,21 +5,217 @@
  
  #include "spdlog/spdlog.h"
  #include <Companion.h>
@@ -958,6 +958,10 @@ index 6440b62..74c9e55 100644
 +
 +namespace {
 +constexpr size_t kMk64ZipWriteChunkSize = 64 * 1024;
++constexpr size_t kMk64ZipDeflateChunkSize = 16 * 1024;
++constexpr uint16_t kMk64ZipDataDescriptorFlag = 1U << 3U;
++constexpr uint16_t kMk64ZipMethodStored = 0;
++constexpr uint16_t kMk64ZipMethodDeflate = 8;
 +
 +bool Mk64WriteAll(FILE* file, const void* buffer, size_t size) {
 +    if (file == nullptr) {
@@ -995,6 +999,53 @@ index 6440b62..74c9e55 100644
 +        static_cast<unsigned char>((value >> 24) & 0xFF),
 +    };
 +    return Mk64WriteAll(file, bytes, sizeof(bytes));
++}
++
++bool Mk64DeflateToFile(FILE* file, const std::vector<char>& data, uint32_t* compressedSize) {
++    if (file == nullptr || compressedSize == nullptr || data.empty() || data.size() > UINT32_MAX) {
++        errno = EINVAL;
++        return false;
++    }
++
++    mz_stream stream = {};
++    int status = mz_deflateInit2(&stream, MZ_BEST_SPEED, MZ_DEFLATED,
++                                 -MZ_DEFAULT_WINDOW_BITS, 9, MZ_DEFAULT_STRATEGY);
++    if (status != MZ_OK) {
++        errno = status == MZ_MEM_ERROR ? ENOMEM : EIO;
++        return false;
++    }
++
++    stream.next_in = reinterpret_cast<const unsigned char*>(data.data());
++    stream.avail_in = static_cast<unsigned int>(data.size());
++    unsigned char output[kMk64ZipDeflateChunkSize];
++    bool ok = true;
++    int failureErrno = 0;
++    while (status != MZ_STREAM_END) {
++        stream.next_out = output;
++        stream.avail_out = sizeof(output);
++        const int flush = stream.avail_in == 0 ? MZ_FINISH : MZ_NO_FLUSH;
++        status = mz_deflate(&stream, flush);
++        if (status != MZ_OK && status != MZ_STREAM_END) {
++            failureErrno = status == MZ_MEM_ERROR ? ENOMEM : EIO;
++            ok = false;
++            break;
++        }
++        const size_t produced = sizeof(output) - stream.avail_out;
++        if (produced != 0 && !Mk64WriteAll(file, output, produced)) {
++            failureErrno = errno != 0 ? errno : EIO;
++            ok = false;
++            break;
++        }
++    }
++
++    const mz_ulong totalOut = stream.total_out;
++    const int endStatus = mz_deflateEnd(&stream);
++    if (!ok || endStatus != MZ_OK || totalOut > UINT32_MAX) {
++        errno = failureErrno != 0 ? failureErrno : (endStatus == MZ_MEM_ERROR ? ENOMEM : EIO);
++        return false;
++    }
++    *compressedSize = static_cast<uint32_t>(totalOut);
++    return true;
 +}
 +
 +bool Mk64AppendFile(FILE* output, FILE* input, uint64_t* bytesWritten) {
@@ -1111,7 +1162,7 @@ index 6440b62..74c9e55 100644
      char* fileData = data.data();
      size_t fileSize = data.size();
  
-@@ -34,11 +179,141 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
+@@ -34,11 +230,151 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
          stream.close();
      }
  
@@ -1126,33 +1177,43 @@ index 6440b62..74c9e55 100644
 +    const uint32_t crc = static_cast<uint32_t>(mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(data.data()),
 +                                                       data.size()));
 +    const uint32_t zipFileSize = static_cast<uint32_t>(data.size());
++    const bool useDeflate = !data.empty();
++    const uint16_t zipFlags = useDeflate ? kMk64ZipDataDescriptorFlag : 0;
++    const uint16_t zipMethod = useDeflate ? kMk64ZipMethodDeflate : kMk64ZipMethodStored;
++    uint32_t compressedSize = useDeflate ? 0 : zipFileSize;
 +    const uint16_t nameSize = static_cast<uint16_t>(path.size());
 +    const uint32_t localHeaderOffset = static_cast<uint32_t>(this->mArchiveBytesWritten);
 +
 +    bool ok = true;
 +    ok = ok && Mk64WriteU32(this->mArchiveFile, 0x04034b50);
 +    ok = ok && Mk64WriteU16(this->mArchiveFile, 20);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, zipFlags);
++    ok = ok && Mk64WriteU16(this->mArchiveFile, zipMethod);
 +    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
 +    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
-+    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
-+    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
-+    ok = ok && Mk64WriteU32(this->mArchiveFile, crc);
-+    ok = ok && Mk64WriteU32(this->mArchiveFile, zipFileSize);
-+    ok = ok && Mk64WriteU32(this->mArchiveFile, zipFileSize);
++    ok = ok && Mk64WriteU32(this->mArchiveFile, useDeflate ? 0 : crc);
++    ok = ok && Mk64WriteU32(this->mArchiveFile, useDeflate ? 0 : compressedSize);
++    ok = ok && Mk64WriteU32(this->mArchiveFile, useDeflate ? 0 : zipFileSize);
 +    ok = ok && Mk64WriteU16(this->mArchiveFile, nameSize);
 +    ok = ok && Mk64WriteU16(this->mArchiveFile, 0);
 +    ok = ok && Mk64WriteAll(this->mArchiveFile, path.data(), path.size());
-+    ok = ok && (data.empty() || Mk64WriteAll(this->mArchiveFile, data.data(), data.size()));
++    if (useDeflate) {
++        ok = ok && Mk64DeflateToFile(this->mArchiveFile, data, &compressedSize);
++        ok = ok && Mk64WriteU32(this->mArchiveFile, 0x08074b50);
++        ok = ok && Mk64WriteU32(this->mArchiveFile, crc);
++        ok = ok && Mk64WriteU32(this->mArchiveFile, compressedSize);
++        ok = ok && Mk64WriteU32(this->mArchiveFile, zipFileSize);
++    }
 +
 +    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, 0x02014b50);
 +    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 20);
 +    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 20);
-+    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
-+    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, zipFlags);
++    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, zipMethod);
 +    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
 +    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
 +    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, crc);
-+    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, zipFileSize);
++    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, compressedSize);
 +    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, zipFileSize);
 +    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, nameSize);
 +    ok = ok && Mk64WriteU16(this->mCentralDirectoryFile, 0);
@@ -1172,7 +1233,7 @@ index 6440b62..74c9e55 100644
 +    }
 +    ++this->mEntriesWritten;
 +    this->mPayloadBytesWritten += data.size();
-+    this->mArchiveBytesWritten += 30 + path.size() + data.size();
++    this->mArchiveBytesWritten += 30 + path.size() + compressedSize + (useDeflate ? 16 : 0);
 +    this->mCentralDirectoryBytesWritten += 46 + path.size();
 +    if((this->mEntriesWritten % 100) == 0) {
 +        char message[192] = {};
