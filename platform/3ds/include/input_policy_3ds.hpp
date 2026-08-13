@@ -94,7 +94,7 @@ constexpr std::uint16_t MapLegacyCInput(const LegacyCInputPolicy3DS& input) noex
 
 constexpr Mk64TopHudRenderMode3DS NextHiddenTopHudMode(
     Mk64TopHudRenderMode3DS mode) noexcept {
-    return static_cast<Mk64TopHudRenderMode3DS>((static_cast<int>(mode) + 1) % 3);
+    return static_cast<Mk64TopHudRenderMode3DS>((static_cast<int>(mode) + 1) % 4);
 }
 
 } // namespace mk64_3ds

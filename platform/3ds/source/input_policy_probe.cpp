@@ -100,6 +100,8 @@ void CheckHudPolicy() {
     mode = NextHiddenTopHudMode(mode);
     assert(mode == MK64_TOP_HUD_RENDER_SPEEDOMETER);
     mode = NextHiddenTopHudMode(mode);
+    assert(mode == MK64_TOP_HUD_RENDER_POSITION_LAP);
+    mode = NextHiddenTopHudMode(mode);
     assert(mode == MK64_TOP_HUD_RENDER_NONE);
 }
 

@@ -181,7 +181,7 @@ index a881533..2171891 100644
 +#include <3ds.h>
 +#include <malloc.h>
 +extern "C" void Mk64InstallLogWrite(const char* message);
-+extern "C" void Mk64InstallLogWritef(const char* format, ...);
++extern "C" void Mk64InstallLogWritef(const char* format, ...); extern "C" bool Mk64Extraction3DSShouldCancel(void);
 +
 +namespace {
 +void Mk64LogApplicationMemory(const char* phase) {
@@ -369,7 +369,7 @@ index a881533..2171891 100644
 +    size_t processedChunks = 0;
 +    bool configParsed = false;
 +
-+    const auto processChunk = [&]() {
++    const auto processChunk = [&]() { if(Mk64Extraction3DSShouldCancel()) throw std::runtime_error("Extraction cancelled by user.");
 +        if(pendingAssets == 0) {
 +            return;
 +        }
@@ -380,7 +380,7 @@ index a881533..2171891 100644
 +        }
 +
 +        size_t chunkAssets = 0;
-+        for(auto asset = chunkRoot.begin(); asset != chunkRoot.end(); ++asset) {
++        for(auto asset = chunkRoot.begin(); asset != chunkRoot.end(); ++asset) { if(Mk64Extraction3DSShouldCancel()) throw std::runtime_error("Extraction cancelled by user.");
 +            const std::string entryName = asset->first.as<std::string>();
 +            auto assetNode = asset->second;
 +            if(GetTypeNode(assetNode) != "TEXTURE" || !assetNode["offset"] ||
@@ -517,7 +517,8 @@ index a881533..2171891 100644
 +    auto& addressEntries = this->gAddrMap[this->gCurrentFile];
 +    addressEntries.clear();
 +
-     for(auto asset = root.begin(); asset != root.end(); ++asset){
+-    for(auto asset = root.begin(); asset != root.end(); ++asset){
++    for(auto asset = root.begin(); asset != root.end(); ++asset){ if(Mk64Extraction3DSShouldCancel()) throw std::runtime_error("Extraction cancelled by user.");
          auto node = asset->second;
          auto entryName = asset->first.as<std::string>();
          auto output = (this->gCurrentDirectory / entryName).string();
@@ -739,7 +740,8 @@ index a881533..2171891 100644
      }
  
 +    size_t processedYamlFiles = 0;
-     for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){
+-    for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){
++    for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){ if(Mk64Extraction3DSShouldCancel()) throw std::runtime_error("Extraction cancelled by user.");
          if(entry.is_directory())  {
              continue;
 @@ -1302,14 +1664,46 @@ void Companion::Process() {
@@ -954,7 +956,7 @@ index 6440b62..b7fdf3e 100644
 +#include <stdexcept>
 +#include <miniz/zip_file.hpp>
 +
-+extern "C" void Mk64InstallLogWrite(const char* message);
++extern "C" void Mk64InstallLogWrite(const char* message); extern "C" bool Mk64Extraction3DSShouldCancel(void);
 +
 +namespace {
 +constexpr size_t kMk64ZipWriteChunkSize = 64 * 1024;
@@ -970,7 +972,7 @@ index 6440b62..b7fdf3e 100644
 +    }
 +    const auto* bytes = static_cast<const unsigned char*>(buffer);
 +    size_t totalWritten = 0;
-+    while (totalWritten < size) {
++    while (totalWritten < size) { if(Mk64Extraction3DSShouldCancel()) { errno = ECANCELED; return false; }
 +        const size_t chunkSize = std::min(size - totalWritten, kMk64ZipWriteChunkSize);
 +        errno = 0;
 +        const size_t written = std::fwrite(bytes + totalWritten, 1, chunkSize, file);
@@ -1020,7 +1022,7 @@ index 6440b62..b7fdf3e 100644
 +    unsigned char output[kMk64ZipDeflateChunkSize];
 +    bool ok = true;
 +    int failureErrno = 0;
-+    while (status != MZ_STREAM_END) {
++    while (status != MZ_STREAM_END) { if(Mk64Extraction3DSShouldCancel()) { failureErrno = ECANCELED; ok = false; break; }
 +        stream.next_out = output;
 +        stream.avail_out = sizeof(output);
 +        const int flush = stream.avail_in == 0 ? MZ_FINISH : MZ_NO_FLUSH;
@@ -1059,7 +1061,7 @@ index 6440b62..b7fdf3e 100644
 +        return false;
 +    }
 +    unsigned char buffer[kMk64ZipWriteChunkSize];
-+    while (true) {
++    while (true) { if(Mk64Extraction3DSShouldCancel()) { errno = ECANCELED; return false; }
 +        const size_t read = std::fread(buffer, 1, sizeof(buffer), input);
 +        if (read > 0) {
 +            if (!Mk64WriteAll(output, buffer, read)) {
@@ -1117,7 +1119,7 @@ index 6440b62..b7fdf3e 100644
 +        std::remove(this->mCentralDirectoryPath.c_str());
 +    }
 +    this->mArchiveOpen = false;
-+    if(aborted) {
++    if(aborted) { std::remove(this->mPath.c_str());
 +        char message[192] = {};
 +        std::snprintf(message, sizeof(message),
 +                      "O2R writer aborted cleanly after %lu entries and %llu payload bytes.",

@@ -20,6 +20,7 @@ typedef enum Mk64TopHudRenderMode3DS {
     MK64_TOP_HUD_RENDER_NONE = 0,
     MK64_TOP_HUD_RENDER_LAP_PROGRESS = 1,
     MK64_TOP_HUD_RENDER_SPEEDOMETER = 2,
+    MK64_TOP_HUD_RENDER_POSITION_LAP = 3,
 } Mk64TopHudRenderMode3DS;
 
 typedef enum Mk64PauseAction3DS {
@@ -45,6 +46,8 @@ typedef struct Mk64BottomUIGameState3DS {
     bool racing;
     bool paused;
     bool mirrorMode;
+    int8_t topHudRenderMode;
+    bool raceFinished;
 
     float courseTimerSeconds;
     uint32_t courseTimerCentiseconds;

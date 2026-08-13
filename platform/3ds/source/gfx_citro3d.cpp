@@ -346,6 +346,13 @@ struct GfxRenderingAPICitro3D::Impl {
     size_t dirtyVertexEnd = 0;
     std::vector<float> clipScratch;
     ShaderProgram* currentProgram = nullptr;
+    bool tevStateValid = false;
+    ShaderProgram* tevStateProgram = nullptr;
+    int tevStateVaryingInput = -2;
+    std::array<uint32_t, 7> tevStateConstants = {};
+    uint32_t tevStateGrayscale = 0;
+    bool tevStateDepthTest = false;
+    bool tevStateDepthWrite = false;
     std::unordered_map<uint64_t, std::unique_ptr<ShaderProgram>> shaderPrograms;
     // Citro3D retains C3D_Tex pointers after C3D_TexBind. A vector can move
     // every slot when NewTexture grows it, leaving the GPU state pointing at
@@ -879,6 +886,20 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         std::copy_n(color, grayscaleColor.size(), grayscaleColor.begin());
     }
 
+    std::array<uint32_t, 7> packedTevConstants = {};
+    for (size_t index = 0; index < constants.size(); ++index) {
+        packedTevConstants[index] = PackColor(constants[index]);
+    }
+    const uint32_t packedTevGrayscale = PackColor(grayscaleColor);
+    const bool updateTevState = !mImpl->tevStateValid ||
+                                mImpl->tevStateProgram != program ||
+                                mImpl->tevStateVaryingInput != varyingInput ||
+                                mImpl->tevStateConstants != packedTevConstants ||
+                                mImpl->tevStateGrayscale != packedTevGrayscale ||
+                                mImpl->tevStateDepthTest != mImpl->depthTest ||
+                                mImpl->tevStateDepthWrite != mImpl->depthWrite;
+    if (updateTevState) {
+
     // The previous-buffer update mask is persistent Citro3D state. Reset it
     // for every draw so a grayscale program cannot leak into the next one.
     C3D_TexEnvBufUpdate(C3D_Both, 0);
@@ -1005,6 +1026,14 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                   0x08);
     C3D_DepthTest(mImpl->depthTest, mImpl->depthTest ? GPU_GREATER : GPU_ALWAYS,
                   static_cast<GPU_WRITEMASK>(GPU_WRITE_COLOR | (mImpl->depthWrite ? GPU_WRITE_DEPTH : 0)));
+        mImpl->tevStateValid = true;
+        mImpl->tevStateProgram = program;
+        mImpl->tevStateVaryingInput = varyingInput;
+        mImpl->tevStateConstants = packedTevConstants;
+        mImpl->tevStateGrayscale = packedTevGrayscale;
+        mImpl->tevStateDepthTest = mImpl->depthTest;
+        mImpl->tevStateDepthWrite = mImpl->depthWrite;
+    }
     if (mImpl->dirtyVertexBegin == mImpl->dirtyVertexEnd) {
         mImpl->dirtyVertexBegin = firstVertex;
     }
@@ -1031,6 +1060,7 @@ void GfxRenderingAPICitro3D::FlushPackedVertices() {
 }
 
 void GfxRenderingAPICitro3D::RestoreFast3DState() {
+    mImpl->tevStateValid = false;
     C3D_BindProgram(&mImpl->shaderProgram);
 
     C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
@@ -1163,19 +1193,18 @@ void GfxRenderingAPICitro3D::Init() {
         return;
     }
     mImpl->initialized = true;
-    // Preserve the full-precision New 3DS path. Old 3DS uses the N64-class
-    // 16-bit color/depth profile to halve top-target bandwidth and storage;
-    // the original game itself used a 16-bit framebuffer and Z buffer.
-    const GPU_COLORBUF topColorFormat = mImpl->newModel ? GPU_RB_RGBA8 : GPU_RB_RGB565;
-    const GPU_DEPTHBUF topDepthFormat = mImpl->newModel ? GPU_RB_DEPTH24_STENCIL8 : GPU_RB_DEPTH16;
+    // The original game used a 16-bit framebuffer and Z buffer. Use that format
+    // in both hardware profiles to halve top-target traffic without changing
+    // logical resolution or the New 3DS interpolation policy.
+    const GPU_COLORBUF topColorFormat = GPU_RB_RGB565;
+    const GPU_DEPTHBUF topDepthFormat = GPU_RB_DEPTH16;
     mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, mImpl->outputWidth, topColorFormat,
                                                topDepthFormat);
     if (mImpl->topTarget == nullptr) {
         return;
     }
     C3D_RenderTargetSetOutput(mImpl->topTarget, GFX_TOP, GFX_LEFT,
-                              mImpl->newModel ? kDisplayTransferFlagsRgba8
-                                              : kDisplayTransferFlagsRgb565);
+                              kDisplayTransferFlagsRgb565);
 
     mImpl->shaderBinary = DVLB_ParseFile(reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(fast3d_passthrough_shbin)),
                                          fast3d_passthrough_shbin_size);

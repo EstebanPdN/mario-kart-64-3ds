@@ -107,6 +107,14 @@ if(MK64_3DS_BUILD_GAME_CORE)
     set(SPAGHETTIKART_ENDING_SOURCE "${SPAGHETTIKART_ROOT}/src/ending/code_80280000.c")
     set(SPAGHETTIKART_3DS_ENDING_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/code_80280000_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_ENDING_SOURCE}")
+    set(SPAGHETTIKART_ACTORS_EXTENDED_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/actors_extended.c")
+    set(SPAGHETTIKART_RED_BLUE_SHELL_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/actors/blue_and_red_shells/update.inc.c")
+    set(SPAGHETTIKART_3DS_RED_BLUE_SHELL_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/update_red_blue_shell_3ds.inc.c")
+    set(SPAGHETTIKART_3DS_ACTORS_EXTENDED_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/actors_extended_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_ACTORS_EXTENDED_SOURCE}")
     file(READ "${SPAGHETTIKART_MEMORY_SOURCE}" SPAGHETTIKART_MEMORY_TEXT)
     string(REPLACE
         "static u8 sMemoryPool[0x10000000] ALIGNED4096;"
@@ -229,47 +237,11 @@ void mk64_3ds_collision_reset_visits(void) {
 }
 
 static void mk64_3ds_prefetch_course_texture_crc(uint64_t crc) {
-    if (Mk64PrefetchBudget3DSContains(&sCourseTexturePrefetch3DS, crc)) {
-        sCourseTexturePrefetch3DS.duplicateEntries++;
-        return;
-    }
-    size_t archiveBytes = 0;
-    const bool sizeAvailable =
-        Mk64Resource3DSGetArchiveEntrySizeByCrc(crc, &archiveBytes);
-    const Mk64PrefetchDecision3DS decision = Mk64PrefetchBudget3DSTryReserve(
-        &sCourseTexturePrefetch3DS, crc, sizeAvailable ? archiveBytes : 0);
-    if (decision == MK64_PREFETCH_RESERVE) {
-        if (ResourceGetDataByCrc(crc) != NULL) {
-            sCourseTexturePrefetchLoaded3DS++;
-        } else {
-            sCourseTexturePrefetchLoadFailures3DS++;
-        }
-    }
-    mk64_3ds_report_course_prefetch();
+    (void)crc;
 }
 
 static void mk64_3ds_prefetch_course_texture_name(const char* name) {
-    if (name == NULL || name[0] == '\0') {
-        return;
-    }
-    const uint64_t crc = ResourceGetCrcByName(name);
-    if (Mk64PrefetchBudget3DSContains(&sCourseTexturePrefetch3DS, crc)) {
-        sCourseTexturePrefetch3DS.duplicateEntries++;
-        return;
-    }
-    size_t archiveBytes = 0;
-    const bool sizeAvailable =
-        Mk64Resource3DSGetArchiveEntrySizeByName(name, &archiveBytes);
-    const Mk64PrefetchDecision3DS decision = Mk64PrefetchBudget3DSTryReserve(
-        &sCourseTexturePrefetch3DS, crc, sizeAvailable ? archiveBytes : 0);
-    if (decision == MK64_PREFETCH_RESERVE) {
-        if (ResourceGetDataByName(name) != NULL) {
-            sCourseTexturePrefetchLoaded3DS++;
-        } else {
-            sCourseTexturePrefetchLoadFailures3DS++;
-        }
-    }
-    mk64_3ds_report_course_prefetch();
+    (void)name;
 }
 
 static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 sectionId) {
@@ -393,11 +365,9 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         file(WRITE "${SPAGHETTIKART_3DS_COLLISION_SOURCE}" "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
     endif()
 
-    # The initial player setup selects one exact 64x64 kart frame for each
-    # racer, but upstream leaves those paths lazy until Fast3D decodes the first
-    # visible race frames. Generate a bounded 3DS copy that warms the first
-    # five frames and four wheel variants for each one-player racer (at most
-    # 160 small textures), moving their SD/decode stalls before the cup intro.
+    # Keep the generated seam used by E1 diagnostics, but do not preload kart
+    # animation frames. Fast3D's bounded GPU cache now owns their exact lifetime;
+    # eager raw-resource loads bypass that ownership and create the start hitch.
     file(READ "${SPAGHETTIKART_SPAWN_PLAYERS_SOURCE}" SPAGHETTIKART_SPAWN_PLAYERS_TEXT)
     set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_ORIGINAL
         "${SPAGHETTIKART_SPAWN_PLAYERS_TEXT}")
@@ -424,7 +394,7 @@ extern void Mk64Diagnostics3DSKartPrefetch(size_t, size_t, size_t, size_t, size_
 
 #if defined(PLATFORM_3DS)
 #define MK64_3DS_INITIAL_KART_PREFETCH_LIMIT 192
-#define MK64_3DS_INITIAL_KART_PREFETCH_FRAMES 5
+#define MK64_3DS_INITIAL_KART_PREFETCH_FRAMES 0
 #define MK64_3DS_INITIAL_KART_GROUP_COUNT 9
 #define MK64_3DS_INITIAL_KART_WHEEL_COUNT 4
 extern u8**** gKartTextureTable0[];
@@ -456,28 +426,7 @@ static void mk64_3ds_reset_initial_kart_prefetch(void) {
 }
 
 static void mk64_3ds_prefetch_initial_kart(const char* path) {
-    if (path == NULL || path[0] == '\0') {
-        return;
-    }
-    const uint64_t key = ResourceGetCrcByName(path);
-    for (size_t index = 0; index < sInitialKartPrefetchAttempted3DS; ++index) {
-        if (sInitialKartPrefetchKeys3DS[index] == key) {
-            sInitialKartPrefetchDuplicates3DS++;
-            mk64_3ds_report_initial_kart_prefetch();
-            return;
-        }
-    }
-    if (sInitialKartPrefetchAttempted3DS >= MK64_3DS_INITIAL_KART_PREFETCH_LIMIT) {
-        return;
-    }
-    sInitialKartPrefetchKeys3DS[sInitialKartPrefetchAttempted3DS++] = key;
-    if (ResourceGetDataByName(path) != NULL) {
-        sInitialKartPrefetchLoaded3DS++;
-        sInitialKartPrefetchBytes3DS += ResourceGetSizeByName(path);
-    } else {
-        sInitialKartPrefetchUnavailable3DS++;
-    }
-    mk64_3ds_report_initial_kart_prefetch();
+    (void)path;
 }
 #endif]=]
         SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
@@ -546,6 +495,53 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         file(WRITE "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
              "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
     endif()
+
+    # Red shells normally ignore stick direction. Generate a 3DS-only actor
+    # copy that gives a human player the requested backwards launch while
+    # preserving the existing guided forward path and all CPU behavior.
+    file(READ "${SPAGHETTIKART_RED_BLUE_SHELL_SOURCE}" SPAGHETTIKART_RED_BLUE_SHELL_TEXT)
+    set(SPAGHETTIKART_3DS_RED_BLUE_SHELL_ORIGINAL "${SPAGHETTIKART_RED_BLUE_SHELL_TEXT}")
+    string(REPLACE
+        [=[                    controller->buttonDepressed &= ~Z_TRIG;
+                    shell->state = RELEASED_SHELL;]=]
+        [=[                    controller->buttonDepressed &= ~Z_TRIG;
+                    if (pad13 == ACTOR_RED_SHELL &&
+                        controller->rawStickY < THROW_SHELL_BACKWARDS) {
+                        height = player->speed > 8.0f ? player->speed * 1.2f : 8.0f;
+                        somePosVel[0] = 0.0f;
+                        somePosVel[1] = 0.0f;
+                        somePosVel[2] = -height;
+                        func_802B64C4(somePosVel, player->rotation[1] + player->unk_0C0);
+                        shell->velocity[0] = somePosVel[0];
+                        shell->velocity[1] = somePosVel[1];
+                        shell->velocity[2] = somePosVel[2];
+                        shell->state = MOVING_SHELL;
+                        shell->someTimer = 0x001E;
+                        func_800C9060(shell->playerId, SOUND_ARG_LOAD(0x19, 0x00, 0x80, 0x04));
+                        func_800C90F4(shell->playerId,
+                                      (player->characterId * 0x10) +
+                                          SOUND_ARG_LOAD(0x29, 0x00, 0x80, 0x00));
+                        add_red_shell_in_unexpired_actor_list(CM_FindActorIndex(shell));
+                        return;
+                    }
+                    shell->state = RELEASED_SHELL;]=]
+        SPAGHETTIKART_RED_BLUE_SHELL_TEXT
+        "${SPAGHETTIKART_RED_BLUE_SHELL_TEXT}"
+    )
+    if(SPAGHETTIKART_RED_BLUE_SHELL_TEXT STREQUAL SPAGHETTIKART_3DS_RED_BLUE_SHELL_ORIGINAL)
+        message(FATAL_ERROR "The upstream red-shell release point changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_RED_BLUE_SHELL_SOURCE}"
+         "${SPAGHETTIKART_RED_BLUE_SHELL_TEXT}")
+    file(READ "${SPAGHETTIKART_ACTORS_EXTENDED_SOURCE}" SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT)
+    string(REPLACE
+        "#include \"actors/blue_and_red_shells/update.inc.c\""
+        "#include \"${SPAGHETTIKART_3DS_RED_BLUE_SHELL_SOURCE}\""
+        SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT}"
+    )
+    file(WRITE "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_SOURCE}"
+         "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT}")
 
     # The desktop direct-audio path normally advances sample-DMA state through
     # an N64 audio task. The 3DS runtime synthesizes directly into NDSP buffers,
@@ -758,6 +754,7 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
 #define MK64_TOP_HUD_RENDER_NONE 0
 #define MK64_TOP_HUD_RENDER_LAP_PROGRESS 1
 #define MK64_TOP_HUD_RENDER_SPEEDOMETER 2
+#define MK64_TOP_HUD_RENDER_POSITION_LAP 3
 #endif]=]
         SPAGHETTIKART_3DS_HUD_TEXT
         "${SPAGHETTIKART_HUD_TEXT}"
@@ -802,6 +799,10 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
             } else if (mk64TopHudMode == MK64_TOP_HUD_RENDER_SPEEDOMETER) {
                 set_matrix_hud_screen();
                 render_speedometer(PLAYER_ONE);
+            } else if (mk64TopHudMode == MK64_TOP_HUD_RENDER_POSITION_LAP) {
+                set_matrix_hud_screen();
+                draw_simplified_lap_count(PLAYER_ONE);
+                func_8004E800(PLAYER_ONE);
             }
         }
 #endif
@@ -909,6 +910,7 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
         "${SPAGHETTIKART_3DS_MEMORY_SOURCE}"
         "${SPAGHETTIKART_3DS_COLLISION_SOURCE}"
         "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
+        "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_SOURCE}"
         "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}"
         "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}"
         "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}"
@@ -923,6 +925,7 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
         "${SPAGHETTIKART_ROOT}/include"
         "${SPAGHETTIKART_ROOT}/include/assets"
         "${SPAGHETTIKART_ROOT}/src"
+        "${SPAGHETTIKART_ROOT}/src/racing"
         "${SPAGHETTIKART_ROOT}/src/ending"
         "${SPAGHETTIKART_ROOT}/libultraship/include"
         "${SPAGHETTIKART_ROOT}/libultraship/include/libultraship"
@@ -1503,6 +1506,139 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_CACHE_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D texture cache limit insertion point changed")
         endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_OWNER_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "void Interpreter::TextureCacheClear() {"
+            [=[#if defined(__3DS__)
+struct Mk64TextureOwnerSlot3DS {
+    const uint8_t* address = nullptr;
+    size_t references = 0;
+    std::shared_ptr<Ship::IResource> resource;
+};
+
+static std::array<Mk64TextureOwnerSlot3DS, TEXTURE_CACHE_MAX_SIZE> sMk64TextureOwners3DS;
+
+static void Mk64RetainTextureOwner3DS(const uint8_t* address,
+                                      const std::shared_ptr<Ship::IResource>& resource) {
+    if (address == nullptr || resource == nullptr) return;
+    Mk64TextureOwnerSlot3DS* empty = nullptr;
+    for (auto& slot : sMk64TextureOwners3DS) {
+        if (slot.address == address) {
+            ++slot.references;
+            return;
+        }
+        if (empty == nullptr && slot.address == nullptr) empty = &slot;
+    }
+    if (empty != nullptr) {
+        empty->address = address;
+        empty->references = 1;
+        empty->resource = resource;
+    }
+}
+
+static void Mk64ReleaseTextureOwner3DS(const uint8_t* address) {
+    if (address == nullptr) return;
+    for (auto& slot : sMk64TextureOwners3DS) {
+        if (slot.address != address) continue;
+        if (slot.references > 1) {
+            --slot.references;
+        } else {
+            slot.resource.reset();
+            slot.address = nullptr;
+            slot.references = 0;
+        }
+        return;
+    }
+}
+
+static void Mk64ResetTextureOwners3DS() {
+    for (auto& slot : sMk64TextureOwners3DS) {
+        slot.resource.reset();
+        slot.address = nullptr;
+        slot.references = 0;
+    }
+}
+#endif
+
+void Interpreter::TextureCacheClear() {]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-owner helper insertion point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_OWNER_CLEAR_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[    for (const auto& entry : mTextureCache.map) {
+        mTextureCache.free_texture_ids.push_back(entry.second.texture_id);
+    }]=]
+            [=[    for (const auto& entry : mTextureCache.map) {
+        mTextureCache.free_texture_ids.push_back(entry.second.texture_id);
+#if defined(__3DS__)
+        Mk64ReleaseTextureOwner3DS(entry.first.texture_addr);
+#endif
+    }]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_CLEAR_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-owner clear point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_OWNER_EVICT_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[        mTextureCache.map.erase(it);
+        mTextureCache.lru.pop_front();]=]
+            [=[        const uint8_t* evictedTextureAddress3DS = it->first.texture_addr;
+        mTextureCache.map.erase(it);
+        mTextureCache.lru.pop_front();
+#if defined(__3DS__)
+        Mk64ReleaseTextureOwner3DS(evictedTextureAddress3DS);
+#endif]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_EVICT_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-owner eviction point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_OWNER_RETAIN_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[    node->second.lru_location = mTextureCache.lru.insert(mTextureCache.lru.end(), { it });
+
+    mRapi->SelectTexture(i, texture_id);]=]
+            [=[    node->second.lru_location = mTextureCache.lru.insert(mTextureCache.lru.end(), { it });
+#if defined(__3DS__)
+    for (const auto& loadedTexture3DS : mRdp->loaded_texture) {
+        if (loadedTexture3DS.addr == key.texture_addr &&
+            loadedTexture3DS.raw_tex_metadata.resource != nullptr) {
+            Mk64RetainTextureOwner3DS(key.texture_addr,
+                                      loadedTexture3DS.raw_tex_metadata.resource);
+            break;
+        }
+    }
+#endif
+
+    mRapi->SelectTexture(i, texture_id);]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_RETAIN_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-owner retain point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_OWNER_DELETE_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[                mTextureCache.map.erase(it->first);
+                again = true;]=]
+            [=[                mTextureCache.map.erase(it->first);
+#if defined(__3DS__)
+                Mk64ReleaseTextureOwner3DS(origAddr);
+#endif
+                again = true;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_DELETE_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-owner delete point changed")
+        endif()
         set(SPAGHETTIKART_3DS_MATRIX_LOOKUP_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
             [=[void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
@@ -1540,8 +1676,12 @@ void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
             [=[// 3DS command dispatch is synchronous and the runtime explicitly clears this
 // pointer before releasing its owning shared_ptr. Avoid taking an atomic weak
 // reference for every Fast3D command in large race display lists.
+static void Mk64ResetTextureOwners3DS();
 static Interpreter* mInstance = nullptr;
 void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
+    if (gfx == nullptr) {
+        Mk64ResetTextureOwners3DS();
+    }
     mInstance = gfx.get();
 }]=]
             SPAGHETTIKART_3DS_INTERPRETER_TEXT

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <dirent.h>
 #include <exception>
 #include <limits>
@@ -31,6 +32,26 @@ bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* de
                           const char* additionalFile, char* error, size_t errorSize);
 #endif
 
+static std::atomic<bool> gExtractionCancelRequested{false};
+static uint64_t gExtractionLastInputPollMs = 0;
+
+extern "C" bool Mk64Extraction3DSShouldCancel(void) {
+    if (gExtractionCancelRequested.load(std::memory_order_relaxed)) {
+        return true;
+    }
+    const uint64_t now = osGetTime();
+    if (now - gExtractionLastInputPollMs < 50) {
+        return false;
+    }
+    gExtractionLastInputPollMs = now;
+    hidScanInput();
+    if ((hidKeysHeld() & KEY_START) == 0) {
+        return false;
+    }
+    gExtractionCancelRequested.store(true, std::memory_order_relaxed);
+    return true;
+}
+
 namespace {
 constexpr const char* kDataDir = "sdmc:/3ds/MK64";
 constexpr const char* kPrimaryArchivePath = "sdmc:/3ds/MK64/mk64.o2r";
@@ -39,6 +60,8 @@ constexpr const char* kInstallerDir = "sdmc:/3ds/MK64/.mk64-3ds-installer";
 constexpr const char* kExtractorSourceDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/torch";
 constexpr const char* kExtractorWorkDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/work";
 constexpr const char* kWorkArchivePath = "sdmc:/3ds/MK64/.mk64-3ds-installer/work/mk64.o2r";
+constexpr const char* kWorkArchiveCentralDirectoryPath =
+    "sdmc:/3ds/MK64/.mk64-3ds-installer/work/mk64.o2r.cd";
 constexpr const char* kInvalidArchiveDir = "sdmc:/3ds/MK64/.mk64-3ds-installer/invalid";
 constexpr const char* kExtractorAdditionalFile = "meta/mods.toml";
 constexpr const char* kRomfsExtractorSourceDir = "romfs:/torch";
@@ -1165,7 +1188,7 @@ bool GenerateArchiveFromRom(const char* romPath, char* error, size_t errorSize) 
                  mk64_3ds::install_progress::kMetadataCopyEnd);
 
     DrawProgress("Generating mk64.o2r...",
-                 "Writing directly to SD. You may close the lid; extraction will continue.",
+                 "Writing to SD. Press START to cancel, delete the partial file, and exit.",
                  mk64_3ds::install_progress::kGenerationStart);
     Mk64InstallLogWrite("Starting O2R archive generation.");
     Mk64InstallLogWrite("Extractor execution mode: in-process Torch library (no child process or shell command).");
@@ -1428,12 +1451,23 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
 
     char extractionError[384] = {};
     bool extractionSucceeded = false;
+    gExtractionCancelRequested.store(false, std::memory_order_relaxed);
+    gExtractionLastInputPollMs = 0;
     {
         ExtractionAwakeGuard awakeGuard;
         extractionSucceeded = GenerateArchiveFromRom(romPath, extractionError, sizeof(extractionError));
         if (extractionSucceeded) {
             SignalExtractionComplete();
         }
+    }
+    if (gExtractionCancelRequested.load(std::memory_order_relaxed)) {
+        std::remove(kWorkArchivePath);
+        std::remove(kWorkArchiveCentralDirectoryPath);
+        Mk64InstallLogWrite("Extraction cancelled with START; temporary O2R files were removed.");
+        Mk64InstallLogSetCallback(nullptr);
+        gfxExit();
+        Mk64InstallLogClose();
+        std::_Exit(EXIT_SUCCESS);
     }
     if (!extractionSucceeded) {
         Mk64InstallLogWritef("Installation failed: %s", extractionError);
