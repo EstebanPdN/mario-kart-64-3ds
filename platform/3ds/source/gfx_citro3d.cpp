@@ -45,13 +45,9 @@ constexpr float kFullscreenBoundsEpsilon = 0.03f;
 constexpr float kFullscreenCoverScale = static_cast<float>(kTopLogicalWidth) / kNativeWidth;
 constexpr size_t kMaxVertexStrideFloats = 64;
 
-constexpr uint32_t kDisplayTransferFlagsRgba8 =
+constexpr uint32_t kDisplayTransferFlags =
     GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-constexpr uint32_t kDisplayTransferFlagsRgb565 =
-    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
 enum CombinerSource : int {
@@ -1193,18 +1189,15 @@ void GfxRenderingAPICitro3D::Init() {
         return;
     }
     mImpl->initialized = true;
-    // The original game used a 16-bit framebuffer and Z buffer. Use that format
-    // in both hardware profiles to halve top-target traffic without changing
-    // logical resolution or the New 3DS interpolation policy.
-    const GPU_COLORBUF topColorFormat = GPU_RB_RGB565;
-    const GPU_DEPTHBUF topDepthFormat = GPU_RB_DEPTH16;
-    mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, mImpl->outputWidth, topColorFormat,
-                                               topDepthFormat);
+    // Keep the display target on Citro3D's proven RGBA8/depth-stencil path.
+    // E2's 16-bit render target could leave the top-screen GPU queue stalled
+    // while the independently rendered bottom screen remained visible.
+    mImpl->topTarget = C3D_RenderTargetCreate(kTopHeight, mImpl->outputWidth, GPU_RB_RGBA8,
+                                               GPU_RB_DEPTH24_STENCIL8);
     if (mImpl->topTarget == nullptr) {
         return;
     }
-    C3D_RenderTargetSetOutput(mImpl->topTarget, GFX_TOP, GFX_LEFT,
-                              kDisplayTransferFlagsRgb565);
+    C3D_RenderTargetSetOutput(mImpl->topTarget, GFX_TOP, GFX_LEFT, kDisplayTransferFlags);
 
     mImpl->shaderBinary = DVLB_ParseFile(reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(fast3d_passthrough_shbin)),
                                          fast3d_passthrough_shbin_size);

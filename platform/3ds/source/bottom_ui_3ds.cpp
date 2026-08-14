@@ -62,13 +62,9 @@ constexpr const char* kStandingRankPaletteResource =
 constexpr const char* kMinimapFinishLineResource =
     "__OTR__textures/common_data/common_texture_minimap_finish_line";
 
-constexpr uint32_t kTransferFlagsRgba8 =
+constexpr uint32_t kTransferFlags =
     GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-constexpr uint32_t kTransferFlagsRgb565 =
-    GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
 #if defined(SPAGHETTI_VERSION)
@@ -1630,19 +1626,12 @@ extern "C" bool Mk64BottomUI3DSInit() {
     if (sUi.initialized) return true;
     sUi = {};
     if (!C2D_Init(kC2DObjectCapacity)) return false;
-    const GPU_COLORBUF bottomColorFormat =
-        Mk64Graphics3DSResolvedPerformanceProfile() == MK64_PERFORMANCE_PROFILE_OLD_3DS
-            ? GPU_RB_RGB565
-            : GPU_RB_RGBA8;
-    const uint32_t bottomTransferFlags = bottomColorFormat == GPU_RB_RGB565
-                                             ? kTransferFlagsRgb565
-                                             : kTransferFlagsRgba8;
-    sUi.bottomTarget = C3D_RenderTargetCreate(240, 320, bottomColorFormat, GPU_RB_DEPTH16);
+    sUi.bottomTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH16);
     if (sUi.bottomTarget == nullptr) {
         C2D_Fini();
         return false;
     }
-    C3D_RenderTargetSetOutput(sUi.bottomTarget, GFX_BOTTOM, GFX_LEFT, bottomTransferFlags);
+    C3D_RenderTargetSetOutput(sUi.bottomTarget, GFX_BOTTOM, GFX_LEFT, kTransferFlags);
     if (!LoadFontAtlas()) {
         C3D_RenderTargetDelete(sUi.bottomTarget);
         sUi.bottomTarget = nullptr;
