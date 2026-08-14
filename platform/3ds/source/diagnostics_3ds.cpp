@@ -728,25 +728,15 @@ extern "C" void Mk64Diagnostics3DSStop() {
 extern "C" void Mk64Diagnostics3DSAbortForProcessExit() {
     sRunning.store(false, std::memory_order_release);
     if (sThread != nullptr) {
-        // The normal worker wakes every 16 ms. Bound this wait so a close
-        // request can never inherit an SD/HID stall from an in-progress dump.
-        if (R_SUCCEEDED(threadJoin(sThread, 150ULL * 1000ULL * 1000ULL))) {
-            threadFree(sThread);
-            sThread = nullptr;
-            LightLock_Lock(&sTextLock);
-            if (sLog != nullptr) {
-                FlushLogLocked();
-                std::fclose(sLog);
-                sLog = nullptr;
-            }
-            LightLock_Unlock(&sTextLock);
-        } else {
-            threadDetach(sThread);
-            sThread = nullptr;
-            // Do not race a still-running worker by closing its FILE here.
-            // Process termination reclaims both within the next instruction.
-        }
+        // userAppExit runs after newlib's stdio exit handler but before
+        // libctru unmaps HID. Join the poller without touching its FILE: exit
+        // may already have closed it, while process termination reclaims it
+        // on immediate _Exit paths.
+        threadJoin(sThread, U64_MAX);
+        threadFree(sThread);
+        sThread = nullptr;
     }
+    sLog = nullptr;
 }
 
 extern "C" bool Mk64Diagnostics3DSOwnsHid() {
