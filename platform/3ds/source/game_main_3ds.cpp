@@ -199,6 +199,6 @@ extern "C" void userAppExit() {
     // libctru invokes this hook before hidExit() unmaps HID shared memory.
     // Stop the diagnostics HID poller first so abnormal exits cannot leave it
     // dereferencing that mapping while process services are torn down.
-    Mk64Diagnostics3DSStop();
+    Mk64Diagnostics3DSAbortForProcessExit();
     Mk64GameAudio3DSAbortForProcessExit();
 }
