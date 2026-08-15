@@ -51,6 +51,10 @@ OR
 Mario Kart 64.z64
 ```
 
+The ROM must be in **`.z64` format**. If your ROM is in a different format, you can convert it using:
+
+[https://hack64.net/tools/swapper.php](https://hack64.net/tools/swapper.php)
+
 ### Option 1 — Automatic Extraction
 
 Simply place the ROM in the folder and launch the game.
