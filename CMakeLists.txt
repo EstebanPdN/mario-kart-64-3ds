@@ -104,9 +104,23 @@ if(MK64_3DS_BUILD_GAME_CORE)
     set(SPAGHETTIKART_MAIN_SOURCE "${SPAGHETTIKART_ROOT}/src/main.c")
     set(SPAGHETTIKART_3DS_MAIN_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/main_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_ROOT "${SPAGHETTIKART_MAIN_SOURCE}")
+    set(SPAGHETTIKART_UPDATE_OBJECTS_SOURCE "${SPAGHETTIKART_ROOT}/src/update_objects.c")
+    set(SPAGHETTIKART_3DS_UPDATE_OBJECTS_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/update_objects_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_ROOT "${SPAGHETTIKART_UPDATE_OBJECTS_SOURCE}")
     set(SPAGHETTIKART_ENDING_SOURCE "${SPAGHETTIKART_ROOT}/src/ending/code_80280000.c")
     set(SPAGHETTIKART_3DS_ENDING_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/code_80280000_3ds.c")
     list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_ENDING_SOURCE}")
+    set(SPAGHETTIKART_ACTORS_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/actors.c")
+    set(SPAGHETTIKART_3DS_ACTORS_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/actors_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_ACTORS_SOURCE}")
+    set(SPAGHETTIKART_RENDER_COURSES_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/racing/render_courses.c")
+    set(SPAGHETTIKART_3DS_RENDER_COURSES_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/render_courses_3ds.c")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE
+        "${SPAGHETTIKART_RENDER_COURSES_SOURCE}")
     set(SPAGHETTIKART_ACTORS_EXTENDED_SOURCE "${SPAGHETTIKART_ROOT}/src/racing/actors_extended.c")
     set(SPAGHETTIKART_RED_BLUE_SHELL_SOURCE
         "${SPAGHETTIKART_ROOT}/src/actors/blue_and_red_shells/update.inc.c")
@@ -130,10 +144,22 @@ if(MK64_3DS_BUILD_GAME_CORE)
     )
     string(REPLACE
         "#include <stdio.h>"
-        "#include <stdio.h>\n#include <stdlib.h>\nextern void Mk64Diagnostics3DSSetGameArena(const void*, size_t) __attribute__((weak));"
+        "#include <stdio.h>\n#include <stdlib.h>\nextern void Mk64Diagnostics3DSSetGameArena(const void*, size_t) __attribute__((weak));\nextern void Mk64ReleaseLoadedTrackResources3DS(void) __attribute__((weak));"
         SPAGHETTIKART_3DS_MEMORY_TEXT
         "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
     )
+    set(SPAGHETTIKART_3DS_MEMORY_TRACK_RELEASE_ORIGINAL
+        "${SPAGHETTIKART_3DS_MEMORY_TEXT}")
+    string(REPLACE
+        "    CM_CleanWorld();\n    LoadTrack();"
+        "    CM_CleanWorld();\n    if (Mk64ReleaseLoadedTrackResources3DS != NULL) {\n        Mk64ReleaseLoadedTrackResources3DS();\n    }\n    LoadTrack();"
+        SPAGHETTIKART_3DS_MEMORY_TEXT
+        "${SPAGHETTIKART_3DS_MEMORY_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MEMORY_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MEMORY_TRACK_RELEASE_ORIGINAL)
+        message(FATAL_ERROR "The upstream track-load cleanup boundary changed")
+    endif()
     string(REPLACE
         "    // Clear pool\n    memset(sMemoryPool, 0, sizeof(sMemoryPool));\n\n    // Force the pointer to be exactly at the start of the aligned array\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    \n    // Ensure sPoolEnd is exactly at the end of the 256MB block\n    sPoolEnd = poolStart + sizeof(sMemoryPool);"
         "    if (sMemoryPool == NULL) {\n        sMemoryPoolSize = 0x00800000;\n        sMemoryPool = (u8*)aligned_alloc(4096, sMemoryPoolSize);\n        if (sMemoryPool == NULL) {\n            sMemoryPoolSize = 0;\n            printf(\"[memory.c] initialize_memory_pool(): 3DS arena allocation failed!\\n\");\n            return;\n        }\n    }\n    memset(sMemoryPool, 0, sMemoryPoolSize);\n\n    uintptr_t poolStart = (uintptr_t)sMemoryPool;\n    sPoolEnd = poolStart + sMemoryPoolSize;\n    if (Mk64Diagnostics3DSSetGameArena != NULL) {\n        Mk64Diagnostics3DSSetGameArena(sMemoryPool, sMemoryPoolSize);\n    }"
@@ -485,6 +511,45 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
        SPAGHETTIKART_3DS_SPAWN_PLAYERS_CALL_TEXT)
         message(FATAL_ERROR "The upstream initial kart prefetch reset insertion point changed")
     endif()
+    set(SPAGHETTIKART_3DS_RESULTS_CAMERAS_ORIGINAL
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
+    string(REPLACE
+        [=[    camera = CM_AddCamera(spawn, player->rotation[1], 3);
+    if (!camera) {
+        CM_ThrowRuntimeError("[spawn_players] [func_8003DB5C] NULL camera while attempting to create camera for player one");
+    }
+    CM_AttachCamera(camera, PLAYER_ONE);
+    camera = CM_AddCamera(spawn, player->rotation[1], 3);
+    if (!camera) {
+        CM_ThrowRuntimeError("[spawn_players] [func_8003DB5C] NULL camera while attempting to create camera for player two");
+    }
+    CM_AttachCamera(camera, PLAYER_TWO);]=]
+        [=[    Camera* cameraOne = gScreenContexts[PLAYER_ONE].raceCamera;
+    Camera* cameraTwo = gScreenContexts[PLAYER_TWO].raceCamera;
+    if (cameraOne == NULL || cameraTwo == NULL) {
+        CM_ThrowRuntimeError("[spawn_players] [func_8003DB5C] missing GP results cameras");
+    }
+    camera_init(spawn, player->rotation[1], 3, cameraOne->cameraId);
+    camera_init(spawn, player->rotation[1], 3, cameraTwo->cameraId);]=]
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_RESULTS_CAMERAS_ORIGINAL)
+        message(FATAL_ERROR "The upstream GP results-camera allocation path changed")
+    endif()
+    set(SPAGHETTIKART_3DS_RESULTS_CAMERA_DECL_ORIGINAL
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
+    string(REPLACE
+        "void func_8003DB5C(void) {\n    Player* player = gPlayerOne;\n    Camera* camera;\n    s32 playerId;"
+        "void func_8003DB5C(void) {\n    Player* player = gPlayerOne;\n    s32 playerId;"
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
+        "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_RESULTS_CAMERA_DECL_ORIGINAL)
+        message(FATAL_ERROR "The upstream GP results-camera local declaration changed")
+    endif()
     set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_EXISTING "")
     if(EXISTS "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
@@ -495,6 +560,190 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         file(WRITE "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
              "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
     endif()
+
+    # The upstream circular object allocator overwrites its starting slot when
+    # all 550 entries are occupied. Expose a non-fatal form for optional visual
+    # pools and make mandatory allocations stop with a precise diagnostic
+    # instead of corrupting a live object and producing broken sprites later.
+    file(READ "${SPAGHETTIKART_UPDATE_OBJECTS_SOURCE}"
+         SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT)
+    set(SPAGHETTIKART_3DS_UPDATE_OBJECTS_ORIGINAL
+        "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT}")
+    string(REPLACE
+        [=[s32 find_unused_obj_index(s32* arg0) {
+    s32 temp_v0;
+    s32 temp_v1;
+
+    temp_v1 = objectListSize;
+    // clang-format off
+    temp_v0 = 0; do { // this two SHOULD be on the same line
+        // clang-format on
+        ++temp_v1;
+        ++temp_v0;
+
+        if (temp_v1 == OBJECT_LIST_SIZE) {
+            temp_v1 = 0;
+        }
+    } while ((gObjectList[temp_v1].unk_0CA != 0) && (temp_v0 != OBJECT_LIST_SIZE));
+
+    gObjectList[temp_v1].unk_0CA = 1;
+
+    *arg0 = temp_v1;
+    objectListSize = temp_v1;
+    return temp_v1;
+}]=]
+        [=[s32 try_find_unused_obj_index(s32* arg0) {
+    s32 objectIndex = objectListSize;
+    for (s32 count = 0; count < OBJECT_LIST_SIZE; ++count) {
+        if (++objectIndex == OBJECT_LIST_SIZE) {
+            objectIndex = 0;
+        }
+        if (gObjectList[objectIndex].unk_0CA == 0) {
+            gObjectList[objectIndex].unk_0CA = 1;
+            *arg0 = objectIndex;
+            objectListSize = objectIndex;
+            return objectIndex;
+        }
+    }
+    *arg0 = NULL_OBJECT_ID;
+    return NULL_OBJECT_ID;
+}
+
+s32 find_unused_obj_index(s32* arg0) {
+    s32 objectIndex = try_find_unused_obj_index(arg0);
+    if (objectIndex == NULL_OBJECT_ID) {
+        CM_ThrowRuntimeError("[update_objects] 3DS object pool exhausted");
+    }
+    return objectIndex;
+}]=]
+        SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT
+        "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_UPDATE_OBJECTS_ORIGINAL)
+        message(FATAL_ERROR "The upstream object-slot allocator changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_SOURCE}"
+         "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT}")
+
+    # The original game reuses a fixed 100-slot actor array. SpaghettiKart's
+    # vector port disabled that reuse and appended a C++ allocation for every
+    # shell, banana, and fake item box. Use the 3DS sidecar pool, preserve the
+    # real World index after reuse, and keep the original destructible fallback
+    # away from permanent slots and non-base C++ wrappers.
+    file(READ "${SPAGHETTIKART_ACTORS_SOURCE}" SPAGHETTIKART_3DS_ACTORS_TEXT)
+    set(SPAGHETTIKART_3DS_ACTORS_ORIGINAL "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    string(REPLACE
+        "#include <stdio.h>"
+        "#include <stdio.h>\nextern bool Mk64BaseActor3DSIsDynamic(const struct Actor*, size_t);"
+        SPAGHETTIKART_3DS_ACTORS_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_ACTORS_DECL_TEXT "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    if(SPAGHETTIKART_3DS_ACTORS_DECL_TEXT STREQUAL SPAGHETTIKART_3DS_ACTORS_ORIGINAL)
+        message(FATAL_ERROR "The upstream actor-pool declaration point changed")
+    endif()
+    string(REPLACE
+        [=[    var_t1 = (struct ActorSpawnData*) LOAD_ASSET(d_course_moo_moo_farm_cow_spawn);
+    D_8015F704 = 6.4e7f;]=]
+        [=[    var_t1 = (struct ActorSpawnData*) LOAD_ASSET_RAW(d_course_moo_moo_farm_cow_spawn);
+    if (var_t1 == NULL) {
+        return;
+    }
+    D_8015F704 = 6.4e7f;]=]
+        SPAGHETTIKART_3DS_ACTORS_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_ACTORS_COW_TEXT "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    if(SPAGHETTIKART_3DS_ACTORS_COW_TEXT STREQUAL SPAGHETTIKART_3DS_ACTORS_DECL_TEXT)
+        message(FATAL_ERROR "The upstream Moo Moo Farm cow resource lookup changed")
+    endif()
+    string(REPLACE
+        [=[    // try removing a red shell, green shell, banana, or a fake item box if the actor is expired
+    for (actorIndex = gNumPermanentActors; actorIndex < ACTOR_LIST_SIZE; actorIndex++) {
+        compare = (struct ShellActor*) CM_GetActor(actorIndex);]=]
+        [=[    // try removing a red shell, green shell, banana, or a fake item box if the actor is expired
+    for (actorIndex = 0; actorIndex < ACTOR_LIST_SIZE; actorIndex++) {
+        compare = (struct ShellActor*) CM_GetActor(actorIndex);
+        if (!Mk64BaseActor3DSIsDynamic((struct Actor*) compare, gNumPermanentActors)) {
+            continue;
+        }]=]
+        SPAGHETTIKART_3DS_ACTORS_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_ACTORS_FIRST_FALLBACK_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    if(SPAGHETTIKART_3DS_ACTORS_FIRST_FALLBACK_TEXT STREQUAL
+       SPAGHETTIKART_3DS_ACTORS_COW_TEXT)
+        message(FATAL_ERROR "The upstream expired-actor fallback loop changed")
+    endif()
+    string(REPLACE
+        [=[    // will remove the oldest destructable actor in the list
+    for (actorIndex = gNumPermanentActors; actorIndex < ACTOR_LIST_SIZE; actorIndex++) {
+        compare = (struct ShellActor*) CM_GetActor(actorIndex);]=]
+        [=[    // will remove the oldest destructable actor in the list
+    for (actorIndex = 0; actorIndex < ACTOR_LIST_SIZE; actorIndex++) {
+        compare = (struct ShellActor*) CM_GetActor(actorIndex);
+        if (!Mk64BaseActor3DSIsDynamic((struct Actor*) compare, gNumPermanentActors)) {
+            continue;
+        }]=]
+        SPAGHETTIKART_3DS_ACTORS_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_ACTORS_SECOND_FALLBACK_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    if(SPAGHETTIKART_3DS_ACTORS_SECOND_FALLBACK_TEXT STREQUAL
+       SPAGHETTIKART_3DS_ACTORS_FIRST_FALLBACK_TEXT)
+        message(FATAL_ERROR "The upstream oldest-actor fallback loop changed")
+    endif()
+    string(REPLACE
+        [=[// returns actor index if any available actor type is -1
+s16 add_actor_to_empty_slot(Vec3f pos, Vec3s rot, Vec3f velocity, s16 actorType) {
+    size_t index;
+
+    // if (gNumActors >= CM_GetActorSize()) {
+    //     return try_remove_destructable_item(pos, rot, velocity, actorType);
+    // }
+
+    // Cleanup unused actors
+    for (index = 0; index < CM_GetActorSize(); index++) {
+        // if (CM_GetActor(index)->flags == 0) {
+        //! @todo Commented out because deletes too soon.
+        // CM_DeleteActor(index);
+        // gNumActors--;
+        //}
+    }
+    gNumActors++;
+    struct Actor* actor = CM_AddBaseActor();
+    actor_init(actor, pos, rot, velocity, actorType);
+    CM_ActorBeginPlay(actor);
+    return (s16) CM_GetActorSize() - 1; // Return current index;
+}]=]
+        [=[// returns actor index if any available actor type is -1
+s16 add_actor_to_empty_slot(Vec3f pos, Vec3s rot, Vec3f velocity, s16 actorType) {
+    struct Actor* actor = CM_AddBaseActor();
+    if (actor == NULL) {
+        return try_remove_destructable_item(pos, rot, velocity, actorType);
+    }
+
+    size_t actorIndex = CM_FindActorIndex(actor);
+    if (actorIndex > INT16_MAX) {
+        return -1;
+    }
+    actor_init(actor, pos, rot, velocity, actorType);
+    CM_ActorBeginPlay(actor);
+    gNumActors++;
+    return (s16) actorIndex;
+}]=]
+        SPAGHETTIKART_3DS_ACTORS_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_ACTORS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_ACTORS_SECOND_FALLBACK_TEXT)
+        message(FATAL_ERROR "The upstream actor allocation path changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_ACTORS_SOURCE}"
+         "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
 
     # Red shells normally ignore stick direction. Generate a 3DS-only actor
     # copy that gives a human player the requested backwards launch while
@@ -540,6 +789,23 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT
         "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT}"
     )
+    set(SPAGHETTIKART_3DS_BLUE_SHELL_GUARD_ORIGINAL
+        "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT}")
+    string(REPLACE
+        [=[    s16 actorIndex = use_red_shell_item(player);
+    GET_ACTOR(actorIndex)->type = ACTOR_BLUE_SPINY_SHELL;]=]
+        [=[    s16 actorIndex = use_red_shell_item(player);
+    if (actorIndex < 0) {
+        return -1;
+    }
+    GET_ACTOR(actorIndex)->type = ACTOR_BLUE_SPINY_SHELL;]=]
+        SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT
+        "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT STREQUAL
+       SPAGHETTIKART_3DS_BLUE_SHELL_GUARD_ORIGINAL)
+        message(FATAL_ERROR "The upstream blue-shell allocation path changed")
+    endif()
     file(WRITE "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_SOURCE}"
          "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT}")
 
@@ -888,6 +1154,39 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
         file(WRITE "${SPAGHETTIKART_3DS_ENDING_SOURCE}" "${SPAGHETTIKART_3DS_ENDING_TEXT}")
     endif()
 
+    file(READ "${SPAGHETTIKART_RENDER_COURSES_SOURCE}"
+        SPAGHETTIKART_3DS_RENDER_COURSES_TEXT)
+    set(SPAGHETTIKART_3DS_RENDER_COURSES_ORIGINAL
+        "${SPAGHETTIKART_3DS_RENDER_COURSES_TEXT}")
+    string(REPLACE
+        [=[void parse_track_displaylists(TrackSections* asset) {
+    TrackSections* section = (TrackSections*) asset;]=]
+        [=[void parse_track_displaylists(TrackSections* asset) {
+    if (asset == NULL) {
+        // Resource pressure can reject a course-section load. Leave the
+        // collision mesh empty instead of dereferencing a failed C lookup;
+        // the renderer recovery path can then reclaim caches safely.
+        return;
+    }
+    TrackSections* section = (TrackSections*) asset;]=]
+        SPAGHETTIKART_3DS_RENDER_COURSES_TEXT
+        "${SPAGHETTIKART_3DS_RENDER_COURSES_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_RENDER_COURSES_TEXT STREQUAL
+       SPAGHETTIKART_3DS_RENDER_COURSES_ORIGINAL)
+        message(FATAL_ERROR "The upstream track-section parser guard point changed")
+    endif()
+    set(SPAGHETTIKART_3DS_RENDER_COURSES_EXISTING "")
+    if(EXISTS "${SPAGHETTIKART_3DS_RENDER_COURSES_SOURCE}")
+        file(READ "${SPAGHETTIKART_3DS_RENDER_COURSES_SOURCE}"
+            SPAGHETTIKART_3DS_RENDER_COURSES_EXISTING)
+    endif()
+    if(NOT SPAGHETTIKART_3DS_RENDER_COURSES_EXISTING STREQUAL
+       SPAGHETTIKART_3DS_RENDER_COURSES_TEXT)
+        file(WRITE "${SPAGHETTIKART_3DS_RENDER_COURSES_SOURCE}"
+            "${SPAGHETTIKART_3DS_RENDER_COURSES_TEXT}")
+    endif()
+
     set(SPAGHETTIKART_GAME_OS_MATH
         "${SPAGHETTIKART_ROOT}/src/os/guLookAtF.c"
         "${SPAGHETTIKART_ROOT}/src/os/guPerspectiveF.c"
@@ -910,12 +1209,15 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
         "${SPAGHETTIKART_3DS_MEMORY_SOURCE}"
         "${SPAGHETTIKART_3DS_COLLISION_SOURCE}"
         "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
+        "${SPAGHETTIKART_3DS_ACTORS_SOURCE}"
+        "${SPAGHETTIKART_3DS_RENDER_COURSES_SOURCE}"
         "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_SOURCE}"
         "${SPAGHETTIKART_3DS_AUDIO_PORT_SOURCE}"
         "${SPAGHETTIKART_3DS_SEQPLAYER_SOURCE}"
         "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}"
         "${SPAGHETTIKART_3DS_HUD_SOURCE}"
         "${SPAGHETTIKART_3DS_MAIN_SOURCE}"
+        "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_SOURCE}"
         "${SPAGHETTIKART_3DS_ENDING_SOURCE}"
     )
     target_include_directories(mk64-3ds-game-core PRIVATE
@@ -1032,6 +1334,23 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
     file(GLOB SPAGHETTIKART_ENGINE_OBJECTS CONFIGURE_DEPENDS
         "${SPAGHETTIKART_ROOT}/src/engine/objects/*.cpp"
     )
+    set(SPAGHETTIKART_GRAND_PRIX_BALLOONS_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/engine/objects/GrandPrixBalloons.cpp")
+    set(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/GrandPrixBalloons_3ds.cpp")
+    set(SPAGHETTIKART_MOLE_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/engine/objects/Mole.cpp")
+    set(SPAGHETTIKART_3DS_MOLE_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/Mole_3ds.cpp")
+    set(SPAGHETTIKART_MOLE_GROUP_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/engine/objects/MoleGroup.cpp")
+    set(SPAGHETTIKART_3DS_MOLE_GROUP_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/MoleGroup_3ds.cpp")
+    list(REMOVE_ITEM SPAGHETTIKART_ENGINE_OBJECTS
+        "${SPAGHETTIKART_GRAND_PRIX_BALLOONS_SOURCE}"
+        "${SPAGHETTIKART_MOLE_SOURCE}"
+        "${SPAGHETTIKART_MOLE_GROUP_SOURCE}"
+    )
     file(GLOB SPAGHETTIKART_ENGINE_PARTICLES CONFIGURE_DEPENDS
         "${SPAGHETTIKART_ROOT}/src/engine/particles/*.cpp"
     )
@@ -1054,10 +1373,15 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/src/engine/tracks/WarioStadium.cpp")
     set(SPAGHETTIKART_3DS_WARIO_STADIUM_SOURCE
         "${CMAKE_CURRENT_BINARY_DIR}/generated/WarioStadium_3ds.cpp")
+    set(SPAGHETTIKART_MOO_MOO_FARM_SOURCE
+        "${SPAGHETTIKART_ROOT}/src/engine/tracks/MooMooFarm.cpp")
+    set(SPAGHETTIKART_3DS_MOO_MOO_FARM_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/MooMooFarm_3ds.cpp")
     list(REMOVE_ITEM SPAGHETTIKART_ENGINE_TRACKS
         "${SPAGHETTIKART_TOADS_TURNPIKE_SOURCE}"
         "${SPAGHETTIKART_LUIGI_RACEWAY_SOURCE}"
         "${SPAGHETTIKART_WARIO_STADIUM_SOURCE}"
+        "${SPAGHETTIKART_MOO_MOO_FARM_SOURCE}"
     )
 
     # SpaghettiKart advances two 60 Hz logic ticks for every 30 Hz key frame,
@@ -1069,7 +1393,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
     set(SPAGHETTIKART_3DS_WORLD_ORIGINAL "${SPAGHETTIKART_3DS_WORLD_TEXT}")
     string(REPLACE
         "#include <memory>"
-        "#include <memory>\n#include <cstring>"
+        "#include <memory>\n#include <cstring>\n#include \"base_actor_pool_3ds.hpp\""
         SPAGHETTIKART_3DS_WORLD_TEXT
         "${SPAGHETTIKART_3DS_WORLD_TEXT}"
     )
@@ -1077,6 +1401,151 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         message(FATAL_ERROR "The upstream World include point changed")
     endif()
     set(SPAGHETTIKART_3DS_WORLD_INCLUDE_TEXT "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+    string(REPLACE
+        "World* World::Instance;"
+        [=[namespace {
+constexpr size_t kMk64BaseActorCapacity3DS = 100;
+mk64_3ds::BaseActorPool3DS<AActor, kMk64BaseActorCapacity3DS>
+    sMk64BaseActors3DS;
+}
+
+extern "C" bool Mk64BaseActor3DSIsDynamic(const struct Actor* actor,
+                                             size_t permanentCount) {
+    if (actor == nullptr) {
+        return false;
+    }
+    const auto* cppActor = reinterpret_cast<const AActor*>(
+        reinterpret_cast<const char*>(actor) - sizeof(void*));
+    return sMk64BaseActors3DS.IsDynamic(cppActor, permanentCount);
+}
+
+World* World::Instance;]=]
+        SPAGHETTIKART_3DS_WORLD_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_WORLD_POOL_STATE_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+    if(SPAGHETTIKART_3DS_WORLD_POOL_STATE_TEXT STREQUAL
+       SPAGHETTIKART_3DS_WORLD_INCLUDE_TEXT)
+        message(FATAL_ERROR "The upstream World actor-pool state point changed")
+    endif()
+    string(REPLACE
+        [=[struct Actor* World::AddBaseActor() {
+    Actors.push_back(std::make_unique<AActor>());
+
+    AActor* actor = Actors.back().get();
+
+    // Skip C++ vtable to access variables in C
+    return reinterpret_cast<struct Actor*>(reinterpret_cast<char*>(actor) + sizeof(void*));
+}]=]
+        [=[struct Actor* World::AddBaseActor() {
+    AActor* actor = sMk64BaseActors3DS.FindReusable([](const AActor* candidate) {
+        return candidate->Flags == 0 && candidate->Type == 0;
+    });
+    if (actor != nullptr) {
+        actor->bPendingDestroy = false;
+        actor->Name = "";
+        actor->ResourceName = "";
+        actor->Triangles.clear();
+        return ConvertAActorToActor(actor);
+    }
+    if (sMk64BaseActors3DS.Full()) {
+        return nullptr;
+    }
+
+    Actors.push_back(std::make_unique<AActor>());
+    actor = Actors.back().get();
+    if (!sMk64BaseActors3DS.Track(actor)) {
+        Actors.pop_back();
+        return nullptr;
+    }
+    return ConvertAActorToActor(actor);
+}]=]
+        SPAGHETTIKART_3DS_WORLD_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_WORLD_POOL_ALLOC_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+    if(SPAGHETTIKART_3DS_WORLD_POOL_ALLOC_TEXT STREQUAL
+       SPAGHETTIKART_3DS_WORLD_POOL_STATE_TEXT)
+        message(FATAL_ERROR "The upstream World base-actor allocation point changed")
+    endif()
+    string(REPLACE
+        "    Actors.clear();"
+        "    sMk64BaseActors3DS.Reset();\n    Actors.clear();"
+        SPAGHETTIKART_3DS_WORLD_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_WORLD_POOL_RESET_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+    if(SPAGHETTIKART_3DS_WORLD_POOL_RESET_TEXT STREQUAL
+       SPAGHETTIKART_3DS_WORLD_POOL_ALLOC_TEXT)
+        message(FATAL_ERROR "The upstream World actor cleanup points changed")
+    endif()
+    string(REPLACE
+        [=[void World::TickCameras() {
+
+    for (size_t i = 0; i < 4; i++) {
+        ScreenContext* screen = &gScreenContexts[i];
+        if (NULL == screen->pendingCamera) { continue; }
+        if (screen->pendingCamera != screen->camera) {
+            screen->camera = screen->pendingCamera;
+            screen->pendingCamera = nullptr;
+        }
+    }
+
+    for (auto& camera : Cameras) {
+        if (camera->IsActive()) {
+            camera->Tick();
+        }
+    }
+}]=]
+        [=[void World::TickCameras() {
+
+    for (size_t i = 0; i < 4; i++) {
+        ScreenContext* screen = &gScreenContexts[i];
+        if (NULL == screen->pendingCamera) { continue; }
+        if (screen->pendingCamera != screen->camera) {
+            screen->camera = screen->pendingCamera;
+            screen->pendingCamera = nullptr;
+        }
+    }
+
+    size_t activeScreens = 1;
+    if (gActiveScreenMode == SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL ||
+        gActiveScreenMode == SCREEN_MODE_2P_SPLITSCREEN_VERTICAL) {
+        activeScreens = 2;
+    } else if (gActiveScreenMode == SCREEN_MODE_3P_4P_SPLITSCREEN) {
+        activeScreens = 4;
+    }
+    for (auto& camera : Cameras) {
+        if (!camera->IsActive()) {
+            continue;
+        }
+        Camera* rawCamera = camera->Get();
+        bool usedByActiveScreen = false;
+        for (size_t screenIndex = 0; screenIndex < activeScreens; ++screenIndex) {
+            const ScreenContext* screen = &gScreenContexts[screenIndex];
+            if (rawCamera == screen->camera || rawCamera == screen->raceCamera ||
+                rawCamera == screen->lookBehindCamera) {
+                usedByActiveScreen = true;
+                break;
+            }
+        }
+        if (usedByActiveScreen) {
+            camera->Tick();
+        }
+    }
+}]=]
+        SPAGHETTIKART_3DS_WORLD_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_WORLD_CAMERA_TICK_TEXT
+        "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+    if(SPAGHETTIKART_3DS_WORLD_CAMERA_TICK_TEXT STREQUAL
+       SPAGHETTIKART_3DS_WORLD_POOL_RESET_TEXT)
+        message(FATAL_ERROR "The upstream World camera tick loop changed")
+    endif()
     string(REPLACE
         [=[void World::TickActors() {
     // This only ticks modded actors
@@ -1111,10 +1580,258 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         SPAGHETTIKART_3DS_WORLD_TEXT
         "${SPAGHETTIKART_3DS_WORLD_TEXT}"
     )
-    if(SPAGHETTIKART_3DS_WORLD_TEXT STREQUAL SPAGHETTIKART_3DS_WORLD_INCLUDE_TEXT)
+    if(SPAGHETTIKART_3DS_WORLD_TEXT STREQUAL SPAGHETTIKART_3DS_WORLD_CAMERA_TICK_TEXT)
         message(FATAL_ERROR "The upstream World actor tick loop changed")
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_WORLD_SOURCE}" "${SPAGHETTIKART_3DS_WORLD_TEXT}")
+
+    # Results balloons own a large optional object pool. Keep the owner alive
+    # until every balloon has released its slot, and degrade cleanly if the
+    # shared object list is already full instead of overwriting a live object.
+    file(READ "${SPAGHETTIKART_GRAND_PRIX_BALLOONS_SOURCE}"
+         SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT)
+    set(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_ORIGINAL
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}")
+    string(REPLACE
+        "#include \"update_objects.h\""
+        "#include \"update_objects.h\"\ns32 try_find_unused_obj_index(s32*);"
+        SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_DECL_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}")
+    if(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_DECL_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_ORIGINAL)
+        message(FATAL_ERROR "The upstream GP balloon allocator include changed")
+    endif()
+    string(REPLACE
+        [=[    for (size_t i = 0; i < _numBalloons; i++) {
+        find_unused_obj_index(&gObjectParticle3[i]);
+        init_object(gObjectParticle3[i], 0);
+    }
+}]=]
+        [=[    for (size_t i = 0; i < _numBalloons; i++) {
+        gObjectParticle3[i] = NULL_OBJECT_ID;
+        if (try_find_unused_obj_index(&gObjectParticle3[i]) == NULL_OBJECT_ID) {
+            _numBalloons = i;
+            break;
+        }
+        init_object(gObjectParticle3[i], 0);
+    }
+    _count += 1;
+}]=]
+        SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_ALLOC_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}")
+    if(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_ALLOC_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_DECL_TEXT)
+        message(FATAL_ERROR "The upstream GP balloon object allocation changed")
+    endif()
+    string(REPLACE
+        [=[                if (object->state == 0) {
+                    delete_object_wrapper(&gObjectParticle3[someIndex]);
+                    this->Destroy();
+                }]=]
+        [=[                if (object->state == 0) {
+                    delete_object_wrapper(&gObjectParticle3[someIndex]);
+                }]=]
+        SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_RELEASE_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}")
+    if(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_RELEASE_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_ALLOC_TEXT)
+        message(FATAL_ERROR "The upstream GP balloon per-slot release changed")
+    endif()
+    string(REPLACE
+        [=[    if (someCount == 0) {
+        _active = 0;
+    }]=]
+        [=[    if (someCount == 0) {
+        _active = 0;
+        Destroy();
+    }]=]
+        SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_OWNER_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}")
+    if(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_OWNER_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_RELEASE_TEXT)
+        message(FATAL_ERROR "The upstream GP balloon owner lifetime changed")
+    endif()
+    string(REPLACE
+        "        if ((_numBalloons <= gObjectList[objectIndex].offset[1]) &&"
+        "        if ((_numBalloons2 <= gObjectList[objectIndex].offset[1]) &&"
+        SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_OWNER_TEXT)
+        message(FATAL_ERROR "The upstream GP balloon fade threshold changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_SOURCE}"
+         "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_TEXT}")
+
+    # Moo Moo Farm needs 62 mandatory mole slots and a 128-entry optional dirt
+    # pool. Reserve the mole objects first, then fill as much of the visual pool
+    # as remains so object pressure cannot overwrite unrelated live sprites.
+    file(READ "${SPAGHETTIKART_MOO_MOO_FARM_SOURCE}"
+         SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT)
+    set(SPAGHETTIKART_3DS_MOO_MOO_FARM_ORIGINAL
+        "${SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT}")
+    string(REPLACE
+        "    extern s8 gPlayerCount;"
+        "    extern s8 gPlayerCount;\n    s32 try_find_unused_obj_index(s32*);"
+        SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT
+        "${SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_MOO_MOO_FARM_DECL_TEXT
+        "${SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT}")
+    if(SPAGHETTIKART_3DS_MOO_MOO_FARM_DECL_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MOO_MOO_FARM_ORIGINAL)
+        message(FATAL_ERROR "The upstream Moo Moo Farm object allocator declaration changed")
+    endif()
+    string(REPLACE
+        [=[    for (size_t i = 0; i < gObjectParticle2_SIZE; i++) {
+        find_unused_obj_index(&gObjectParticle2[i]);
+    }]=]
+        [=[    for (size_t i = 0; i < gObjectParticle2_SIZE; i++) {
+        gObjectParticle2[i] = NULL_OBJECT_ID;
+    }]=]
+        SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT
+        "${SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_MOO_MOO_FARM_RESET_TEXT
+        "${SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT}")
+    if(SPAGHETTIKART_3DS_MOO_MOO_FARM_RESET_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MOO_MOO_FARM_DECL_TEXT)
+        message(FATAL_ERROR "The upstream Moo Moo Farm dirt-pool reset changed")
+    endif()
+    string(REPLACE
+        [=[        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns1, tick1));
+        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns2, tick2));
+        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns3, tick3));]=]
+        [=[        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns1, tick1));
+        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns2, tick2));
+        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns3, tick3));
+
+        for (size_t i = 0; i < gObjectParticle2_SIZE; i++) {
+            if (try_find_unused_obj_index(&gObjectParticle2[i]) == NULL_OBJECT_ID) {
+                break;
+            }
+        }]=]
+        SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT
+        "${SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MOO_MOO_FARM_RESET_TEXT)
+        message(FATAL_ERROR "The upstream Moo Moo Farm mole-group spawn point changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_MOO_MOO_FARM_SOURCE}"
+         "${SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT}")
+
+    file(READ "${SPAGHETTIKART_MOLE_GROUP_SOURCE}"
+         SPAGHETTIKART_3DS_MOLE_GROUP_TEXT)
+    set(SPAGHETTIKART_3DS_MOLE_GROUP_ORIGINAL
+        "${SPAGHETTIKART_3DS_MOLE_GROUP_TEXT}")
+    string(REPLACE
+        [=[            s32 objectIndex = gObjectParticle2[i];
+            if (gObjectList[objectIndex].state != 0) {]=]
+        [=[            s32 objectIndex = gObjectParticle2[i];
+            if (objectIndex != NULL_OBJECT_ID && gObjectList[objectIndex].state != 0) {]=]
+        SPAGHETTIKART_3DS_MOLE_GROUP_TEXT
+        "${SPAGHETTIKART_3DS_MOLE_GROUP_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MOLE_GROUP_TEXT STREQUAL
+       SPAGHETTIKART_3DS_MOLE_GROUP_ORIGINAL)
+        message(FATAL_ERROR "The upstream mole dirt tick loop changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_MOLE_GROUP_SOURCE}"
+         "${SPAGHETTIKART_3DS_MOLE_GROUP_TEXT}")
+
+    # Dirt is optional when the shared object pool is pressured. Skip missing
+    # entries and scan the pool monotonically for each eruption, preserving the
+    # real pool ordinal used for particle orientation while avoiding repeated
+    # resource lookups and quadratic slot scans.
+    file(READ "${SPAGHETTIKART_MOLE_SOURCE}" SPAGHETTIKART_3DS_MOLE_TEXT)
+    set(SPAGHETTIKART_3DS_MOLE_ORIGINAL "${SPAGHETTIKART_3DS_MOLE_TEXT}")
+    string(REPLACE
+        [=[    if (gPlayerCountSelection1 == 1) {
+        sp70 = 8;
+    } else {
+        sp70 = 4;
+    }
+
+    for (var_s7 = 0; var_s7 < sp70; var_s7++) {
+        for (var_s1 = 0; var_s1 < gObjectParticle2_SIZE; var_s1++) {
+            loopObjectIndex = gObjectParticle2[var_s1];
+
+            if (gObjectList[loopObjectIndex].state != 0) {
+                continue;
+            }
+
+            u8* mole = (u8*) LOAD_ASSET_RAW(d_course_moo_moo_farm_mole_dirt);]=]
+        [=[    if (gPlayerCountSelection1 == 1) {
+        sp70 = 8;
+    } else {
+        sp70 = 4;
+    }
+
+    u8* mole = (u8*) LOAD_ASSET_RAW(d_course_moo_moo_farm_mole_dirt);
+    if (mole == nullptr) {
+        return;
+    }
+    var_s1 = 0;
+    for (var_s7 = 0; var_s7 < sp70; var_s7++) {
+        for (; var_s1 < gObjectParticle2_SIZE; var_s1++) {
+            loopObjectIndex = gObjectParticle2[var_s1];
+
+            if (loopObjectIndex == NULL_OBJECT_ID ||
+                gObjectList[loopObjectIndex].state != 0) {
+                continue;
+            }]=]
+        SPAGHETTIKART_3DS_MOLE_TEXT
+        "${SPAGHETTIKART_3DS_MOLE_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_MOLE_SCAN_TEXT "${SPAGHETTIKART_3DS_MOLE_TEXT}")
+    if(SPAGHETTIKART_3DS_MOLE_SCAN_TEXT STREQUAL SPAGHETTIKART_3DS_MOLE_ORIGINAL)
+        message(FATAL_ERROR "The upstream mole dirt allocation loop changed")
+    endif()
+    string(REPLACE
+        [=[            gObjectList[loopObjectIndex].origin_pos[2] = gObjectList[objectIndex].origin_pos[2];
+            break;]=]
+        [=[            gObjectList[loopObjectIndex].origin_pos[2] = gObjectList[objectIndex].origin_pos[2];
+            ++var_s1;
+            break;]=]
+        SPAGHETTIKART_3DS_MOLE_TEXT
+        "${SPAGHETTIKART_3DS_MOLE_TEXT}"
+    )
+    set(SPAGHETTIKART_3DS_MOLE_CURSOR_TEXT "${SPAGHETTIKART_3DS_MOLE_TEXT}")
+    if(SPAGHETTIKART_3DS_MOLE_CURSOR_TEXT STREQUAL SPAGHETTIKART_3DS_MOLE_SCAN_TEXT)
+        message(FATAL_ERROR "The upstream mole dirt cursor point changed")
+    endif()
+    string(REPLACE
+        [=[            s32 objectIndex = gObjectParticle2[i];
+            Object* object = &gObjectList[objectIndex];
+            if (object->state > 0) {]=]
+        [=[            s32 objectIndex = gObjectParticle2[i];
+            if (objectIndex == NULL_OBJECT_ID) {
+                continue;
+            }
+            Object* object = &gObjectList[objectIndex];
+            if (object->state > 0) {]=]
+        SPAGHETTIKART_3DS_MOLE_TEXT
+        "${SPAGHETTIKART_3DS_MOLE_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_MOLE_TEXT STREQUAL SPAGHETTIKART_3DS_MOLE_CURSOR_TEXT)
+        message(FATAL_ERROR "The upstream mole dirt draw loop changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_MOLE_SOURCE}"
+         "${SPAGHETTIKART_3DS_MOLE_TEXT}")
 
     file(READ "${SPAGHETTIKART_TOADS_TURNPIKE_SOURCE}" SPAGHETTIKART_3DS_TOADS_TURNPIKE_TEXT)
     set(SPAGHETTIKART_3DS_TOADS_TURNPIKE_ORIGINAL
@@ -1234,7 +1951,127 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/src/engine/registry/RegisterItemTables.cpp"
     )
     set(SPAGHETTIKART_GAME_BRIDGE_SOURCE "${SPAGHETTIKART_ROOT}/src/port/Game.cpp")
-    set_source_files_properties("${SPAGHETTIKART_GAME_BRIDGE_SOURCE}" PROPERTIES
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${SPAGHETTIKART_GAME_BRIDGE_SOURCE}")
+    set(SPAGHETTIKART_3DS_GAME_BRIDGE_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/Game_3ds.cpp")
+    file(READ "${SPAGHETTIKART_GAME_BRIDGE_SOURCE}" SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT)
+    set(SPAGHETTIKART_3DS_GAME_BRIDGE_ORIGINAL "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+    string(REPLACE
+        [=[                } else {
+                    GetWorld()->GetTrack()->DrawCredits();
+                }
+            case RENDER_TRACK_SECTIONS:]=]
+        [=[                } else {
+                    GetWorld()->GetTrack()->DrawCredits();
+                }
+                break;
+            case RENDER_TRACK_SECTIONS:]=]
+        SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GAME_BRIDGE_ORIGINAL)
+        message(FATAL_ERROR "The upstream full-scene render switch changed")
+    endif()
+    set(SPAGHETTIKART_3DS_GAME_VEHICLE_COLLISION_ORIGINAL
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+    string(REPLACE
+        [=[void CM_VehicleCollision(s32 playerId, Player* player) {
+    for (auto& actor : GetWorld()->Actors) {
+        if (actor) {
+            actor->VehicleCollision(playerId, player);
+        }
+    }
+}]=]
+        [=[void CM_VehicleCollision(s32 playerId, Player* player) {
+    for (auto& actor : GetWorld()->Actors) {
+        if (actor && actor->IsMod()) {
+            actor->VehicleCollision(playerId, player);
+        }
+    }
+}]=]
+        SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GAME_VEHICLE_COLLISION_ORIGINAL)
+        message(FATAL_ERROR "The upstream vehicle-collision dispatch changed")
+    endif()
+    set(SPAGHETTIKART_3DS_GAME_TRACK_RELEASE_ORIGINAL
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+    string(REPLACE
+        "#include <atomic>"
+        "#include <atomic>\n#include <array>\n#include <cstdio>\n#include <cstring>\n#include \"libultraship/bridge/resourcebridge.h\""
+        SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}"
+    )
+    string(REPLACE
+        [=[void LoadTrack() {
+    GetWorld()->GetRaceManager().Load();
+}]=]
+        [=[namespace {
+std::array<char, 64> sMk64LoadedTrackResources3DS = {};
+
+void Mk64UnloadTrackDirectory3DS(const char* root, const char* track) {
+    std::array<char, 96> directory = {};
+    const int written = std::snprintf(directory.data(), directory.size(), "%s%s/", root, track);
+    if (written > 0 && static_cast<size_t>(written) < directory.size()) {
+        ResourceUnloadDirectory(directory.data());
+    }
+}
+}
+
+extern "C" void Mk64ReleaseLoadedTrackResources3DS(void) {
+    Track* selectedTrack = GetWorld()->GetTrack();
+    if (selectedTrack != nullptr &&
+        selectedTrack->ResourceName == sMk64LoadedTrackResources3DS.data()) {
+        return;
+    }
+    if (std::strncmp(sMk64LoadedTrackResources3DS.data(), "mk:", 3) != 0) {
+        sMk64LoadedTrackResources3DS[0] = '\0';
+        return;
+    }
+    const char* archiveTrack = sMk64LoadedTrackResources3DS.data() + 3;
+    if (std::strcmp(archiveTrack, "podium_ceremony") == 0) {
+        // The ceremony combines its own top-level resources with Royal
+        // Raceway geometry. Release both groups after CM_CleanWorld has
+        // destroyed every actor that could still reference them.
+        Mk64UnloadTrackDirectory3DS("models/", "ceremony_data");
+        Mk64UnloadTrackDirectory3DS("other/", "ceremony_data");
+        Mk64UnloadTrackDirectory3DS("textures/", "ceremony_data");
+        archiveTrack = "royal_raceway";
+    }
+    if (std::strcmp(archiveTrack, "dk_jungle") == 0) {
+        archiveTrack = "dks_jungle_parkway";
+    }
+    Mk64UnloadTrackDirectory3DS("models/tracks/", archiveTrack);
+    Mk64UnloadTrackDirectory3DS("other/tracks/", archiveTrack);
+    Mk64UnloadTrackDirectory3DS("textures/tracks/", archiveTrack);
+    sMk64LoadedTrackResources3DS[0] = '\0';
+}
+
+void LoadTrack() {
+    GetWorld()->GetRaceManager().Load();
+    Track* track = GetWorld()->GetTrack();
+    sMk64LoadedTrackResources3DS[0] = '\0';
+    if (track != nullptr) {
+        std::snprintf(sMk64LoadedTrackResources3DS.data(),
+                      sMk64LoadedTrackResources3DS.size(), "%s",
+                      track->ResourceName.c_str());
+    }
+}]=]
+        SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT STREQUAL
+       SPAGHETTIKART_3DS_GAME_TRACK_RELEASE_ORIGINAL)
+        message(FATAL_ERROR "The upstream track-load resource boundary changed")
+    endif()
+    file(WRITE "${SPAGHETTIKART_3DS_GAME_BRIDGE_SOURCE}"
+         "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+    set_source_files_properties("${SPAGHETTIKART_3DS_GAME_BRIDGE_SOURCE}" PROPERTIES
+        GENERATED TRUE
         COMPILE_DEFINITIONS "main=spaghettikart_desktop_main;Graphics_PushFrame=Graphics_PushFrameDesktop;CustomEngineInit=DesktopCustomEngineInit;CustomEngineDestroy=DesktopCustomEngineDestroy"
     )
 
@@ -1252,7 +2089,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/torch_o2r_3ds.cpp
         platform/3ds/source/vanilla_stubs_3ds.cpp
         "${SPAGHETTIKART_ROOT}/src/engine/editor/GameObject.cpp"
-        ${SPAGHETTIKART_GAME_BRIDGE_SOURCE}
+        ${SPAGHETTIKART_3DS_GAME_BRIDGE_SOURCE}
         ${SPAGHETTIKART_ENGINE_ROOT}
         ${SPAGHETTIKART_ENGINE_ACTORS}
         ${SPAGHETTIKART_ENGINE_CAMERAS}
@@ -1262,6 +2099,10 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         ${SPAGHETTIKART_ENGINE_TRACKS}
         "${SPAGHETTIKART_3DS_WORLD_SOURCE}"
         "${SPAGHETTIKART_3DS_TRACK_SOURCE}"
+        "${SPAGHETTIKART_3DS_GRAND_PRIX_BALLOONS_SOURCE}"
+        "${SPAGHETTIKART_3DS_MOLE_SOURCE}"
+        "${SPAGHETTIKART_3DS_MOLE_GROUP_SOURCE}"
+        "${SPAGHETTIKART_3DS_MOO_MOO_FARM_SOURCE}"
         "${SPAGHETTIKART_3DS_TOADS_TURNPIKE_SOURCE}"
         "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_SOURCE}"
         "${SPAGHETTIKART_3DS_WARIO_STADIUM_SOURCE}"
@@ -1275,7 +2116,9 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         "${SPAGHETTIKART_ROOT}/include"
         "${SPAGHETTIKART_ROOT}/include/assets"
         "${SPAGHETTIKART_ROOT}/src"
+        "${SPAGHETTIKART_ROOT}/src/port"
         "${SPAGHETTIKART_ROOT}/src/engine"
+        "${SPAGHETTIKART_ROOT}/src/engine/objects"
         "${SPAGHETTIKART_ROOT}/src/engine/tracks"
         "${SPAGHETTIKART_ROOT}/libultraship/include"
         "${SPAGHETTIKART_ROOT}/libultraship/include/libultraship"
@@ -1442,6 +2285,8 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
     if(MK64_3DS_BUILD_INTERPRETER_PROBE)
         set(SPAGHETTIKART_INTERPRETER_SOURCE
             "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/libultraship/src/fast/interpreter.cpp")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${SPAGHETTIKART_INTERPRETER_SOURCE}")
         set(SPAGHETTIKART_3DS_INTERPRETER_SOURCE
             "${CMAKE_CURRENT_BINARY_DIR}/generated/interpreter_3ds.cpp")
         file(READ "${SPAGHETTIKART_INTERPRETER_SOURCE}" SPAGHETTIKART_3DS_INTERPRETER_TEXT)
@@ -1452,15 +2297,215 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
+        set(SPAGHETTIKART_3DS_CULL_INCLUDE_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
             "#include \"fast/types.h\""
-            "#include \"fast/types.h\"\n\nextern \"C\" bool Mk64FrameInterpolation3DSLookup(const Mtx*, MtxF*) __attribute__((weak));"
+            "#include \"fast/types.h\"\n#include \"fast3d_culling_3ds.hpp\"\n#include \"fast3d_math_3ds.hpp\"\n\nextern \"C\" bool Mk64FrameInterpolation3DSLookup(const Mtx*, MtxF*) __attribute__((weak));"
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_CULL_INCLUDE_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D culling include point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_CULL_HANDLER_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[bool gfx_cull_dl_handler_f3dex2(F3DGfx** cmd) {
+    // TODO:
+    return false;
+}]=]
+            [=[bool gfx_cull_dl_handler_f3dex2(F3DGfx** cmd) {
+    Interpreter* gfx = mInstance.lock().get();
+    ::mk64_3ds::Fast3DCullEncoding encoding3DS =
+        ::mk64_3ds::Fast3DCullEncoding::F3DEX;
+    if (ucode_handler_index == ucode_f3db || ucode_handler_index == ucode_f3d) {
+        encoding3DS = ::mk64_3ds::Fast3DCullEncoding::F3D;
+    } else if (ucode_handler_index == ucode_f3dex2) {
+        encoding3DS = ::mk64_3ds::Fast3DCullEncoding::F3DEX2;
+    }
+
+    const auto range3DS = ::mk64_3ds::DecodeFast3DCullRange(
+        (*cmd)->words.w0, (*cmd)->words.w1, encoding3DS, MAX_VERTICES);
+    const bool shouldCull3DS = ::mk64_3ds::ShouldCullFast3DRange(
+        range3DS, [gfx](std::size_t index3DS) {
+            return gfx->mRsp->loaded_vertices[index3DS].clip_rej;
+        });
+    if (!shouldCull3DS) {
+        return false;
+    }
+
+    gfx->mMarkerOn = false;
+    g_exec_stack.ret();
+    return true;
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_CULL_HANDLER_ORIGINAL)
+            message(FATAL_ERROR "The upstream Fast3D G_CULLDL handler changed")
+        endif()
+        set(SPAGHETTIKART_3DS_EXEC_STACK_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[void GfxExecStack::start(F3DGfx* dlist) {
+    while (!cmd_stack.empty())
+        cmd_stack.pop();
+    gfx_path.clear();
+    cmd_stack.push(dlist);
+    disp_stack.clear();
+}
+
+void GfxExecStack::stop() {
+    while (!cmd_stack.empty())
+        cmd_stack.pop();
+    gfx_path.clear();
+}
+
+F3DGfx*& GfxExecStack::currCmd() {
+    return cmd_stack.top();
+}
+
+void GfxExecStack::openDisp(const char* file, int line) {
+    disp_stack.push_back({ file, line });
+}
+void GfxExecStack::closeDisp() {
+    disp_stack.pop_back();
+}
+const std::vector<GfxExecStack::CodeDisp>& GfxExecStack::getDisp() const {
+    return disp_stack;
+}
+
+void GfxExecStack::branch(F3DGfx* caller) {
+    F3DGfx* old = cmd_stack.top();
+    cmd_stack.pop();
+    cmd_stack.push(nullptr);
+    cmd_stack.push(old);
+
+    gfx_path.push_back(caller);
+}
+
+void GfxExecStack::call(F3DGfx* caller, F3DGfx* callee) {
+    cmd_stack.push(callee);
+    gfx_path.push_back(caller);
+}
+
+F3DGfx* GfxExecStack::ret() {
+    F3DGfx* cmd = cmd_stack.top();
+
+    cmd_stack.pop();
+    if (!gfx_path.empty()) {
+        gfx_path.pop_back();
+    }
+
+    while (cmd_stack.size() > 0 && cmd_stack.top() == nullptr) {
+        cmd_stack.pop();
+        if (!gfx_path.empty()) {
+            gfx_path.pop_back();
+        }
+    }
+    return cmd;
+}]=]
+            [=[namespace {
+constexpr size_t kMk64ExecStackCapacity3DS = 512;
+std::array<F3DGfx*, kMk64ExecStackCapacity3DS> sMk64ExecStack3DS = {};
+size_t sMk64ExecStackDepth3DS = 0;
+F3DGfx* sMk64NullCommand3DS = nullptr;
+
+bool Mk64ExecStackEmpty3DS() {
+    return sMk64ExecStackDepth3DS == 0;
+}
+
+size_t Mk64ExecStackDepth3DS() {
+    return sMk64ExecStackDepth3DS;
+}
+
+F3DGfx* Mk64ExecStackCurrent3DS() {
+    return Mk64ExecStackEmpty3DS() ? nullptr
+                                   : sMk64ExecStack3DS[sMk64ExecStackDepth3DS - 1];
+}
+}
+
+void GfxExecStack::start(F3DGfx* dlist) {
+    sMk64ExecStackDepth3DS = 0;
+    gfx_path.clear();
+    disp_stack.clear();
+    if (gfx_path.capacity() < kMk64ExecStackCapacity3DS) {
+        gfx_path.reserve(kMk64ExecStackCapacity3DS);
+    }
+    if (disp_stack.capacity() < 16) {
+        disp_stack.reserve(16);
+    }
+    if (dlist != nullptr) {
+        sMk64ExecStack3DS[sMk64ExecStackDepth3DS++] = dlist;
+    }
+}
+
+void GfxExecStack::stop() {
+    sMk64ExecStackDepth3DS = 0;
+    gfx_path.clear();
+    disp_stack.clear();
+}
+
+F3DGfx*& GfxExecStack::currCmd() {
+    return Mk64ExecStackEmpty3DS()
+               ? sMk64NullCommand3DS
+               : sMk64ExecStack3DS[sMk64ExecStackDepth3DS - 1];
+}
+
+void GfxExecStack::openDisp(const char* file, int line) {
+    disp_stack.push_back({ file, line });
+}
+void GfxExecStack::closeDisp() {
+    if (!disp_stack.empty()) disp_stack.pop_back();
+}
+const std::vector<GfxExecStack::CodeDisp>& GfxExecStack::getDisp() const {
+    return disp_stack;
+}
+
+void GfxExecStack::branch(F3DGfx* caller) {
+    if (Mk64ExecStackEmpty3DS() ||
+        sMk64ExecStackDepth3DS >= kMk64ExecStackCapacity3DS) {
+        stop();
+        return;
+    }
+    F3DGfx* old = sMk64ExecStack3DS[sMk64ExecStackDepth3DS - 1];
+    sMk64ExecStack3DS[sMk64ExecStackDepth3DS - 1] = nullptr;
+    sMk64ExecStack3DS[sMk64ExecStackDepth3DS++] = old;
+    gfx_path.push_back(caller);
+}
+
+void GfxExecStack::call(F3DGfx* caller, F3DGfx* callee) {
+    if (callee == nullptr || sMk64ExecStackDepth3DS >= kMk64ExecStackCapacity3DS) {
+        stop();
+        return;
+    }
+    sMk64ExecStack3DS[sMk64ExecStackDepth3DS++] = callee;
+    gfx_path.push_back(caller);
+}
+
+F3DGfx* GfxExecStack::ret() {
+    if (Mk64ExecStackEmpty3DS()) return nullptr;
+    F3DGfx* cmd = sMk64ExecStack3DS[--sMk64ExecStackDepth3DS];
+    if (!gfx_path.empty()) gfx_path.pop_back();
+    while (!Mk64ExecStackEmpty3DS() && Mk64ExecStackCurrent3DS() == nullptr) {
+        --sMk64ExecStackDepth3DS;
+        if (!gfx_path.empty()) gfx_path.pop_back();
+    }
+    return cmd;
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_EXEC_STACK_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D execution-stack insertion point changed")
+        endif()
         string(REPLACE
             "    while (!g_exec_stack.cmd_stack.empty()) {\n        auto cmd = g_exec_stack.cmd_stack.top();"
-            "    size_t commandCount = 0;\n    constexpr size_t kMaxCommandsPerFrame = 250000;\n    constexpr size_t kMaxDisplayListDepth = 512;\n    while (!g_exec_stack.cmd_stack.empty()) {\n        auto cmd = g_exec_stack.cmd_stack.top();\n        if (++commandCount > kMaxCommandsPerFrame || g_exec_stack.cmd_stack.size() > kMaxDisplayListDepth) {\n            if (Mk64Diagnostics3DSGfxWatchdog != nullptr && cmd != nullptr) {\n                Mk64Diagnostics3DSGfxWatchdog(cmd, cmd->words.w0, cmd->words.w1, commandCount);\n            }\n            g_exec_stack.stop();\n            break;\n        }"
+            "    size_t commandCount = 0;\n    constexpr size_t kMaxCommandsPerFrame = 250000;\n    constexpr size_t kMaxDisplayListDepth = 512;\n    while (!Mk64ExecStackEmpty3DS()) {\n        auto cmd = Mk64ExecStackCurrent3DS();\n        if (++commandCount > kMaxCommandsPerFrame || Mk64ExecStackDepth3DS() > kMaxDisplayListDepth) {\n            if (Mk64Diagnostics3DSGfxWatchdog != nullptr && cmd != nullptr) {\n                Mk64Diagnostics3DSGfxWatchdog(cmd, cmd->words.w0, cmd->words.w1, commandCount);\n            }\n            g_exec_stack.stop();\n            break;\n        }"
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
@@ -1475,9 +2520,10 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
 #if defined(__3DS__)
     // 3DS application-heap pointers commonly live below 0x10000000, so the
     // desktop numeric-address guard rejects valid framebuffer and sprite data.
-    // A segmented address is unresolved only when SegAddr returns the original
-    // tagged command word unchanged.
-    if ((cmd->words.w1 & 1U) != 0 && i == static_cast<uintptr_t>(cmd->words.w1)) {
+    // SegAddr rejects an unset or out-of-range segment with nullptr.
+    if ((cmd->words.w1 & 1U) != 0 && i == 0) {
+        gfx->GfxDpSetTextureImage(C0(21, 3), C0(19, 2), C0(0, 12) + 1,
+                                  imgData, 0, rawTexMetdata, nullptr);
         return false;
     }
 #else
@@ -1493,13 +2539,13 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
             message(FATAL_ERROR "The upstream Fast3D texture pointer guard insertion point changed")
         endif()
         set(SPAGHETTIKART_3DS_TEXTURE_CACHE_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
-        # A 96-entry cache recycled animated 64x64 kart frames continuously in
-        # eight-racer scenes. Private hardware dumps retained more than 20 MiB
-        # of linear memory during races; 256 entries give the common RGBA8 kart
-        # working set roughly 4 MiB without restoring desktop's 1024-entry cap.
+        # Animated eight-racer scenes continuously rotate through more than the
+        # old 256-entry working set. The runtime selects 256 entries on Old 3DS
+        # and up to 384 on New 3DS; the compile-time cap bounds every fixed
+        # owner table without restoring desktop's 1024-entry memory footprint.
         string(REPLACE
             "#define TEXTURE_CACHE_MAX_SIZE 1024"
-            "#define TEXTURE_CACHE_MAX_SIZE 256"
+            "#define TEXTURE_CACHE_MAX_SIZE 384"
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
@@ -1510,53 +2556,154 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         string(REPLACE
             "void Interpreter::TextureCacheClear() {"
             [=[#if defined(__3DS__)
-struct Mk64TextureOwnerSlot3DS {
-    const uint8_t* address = nullptr;
-    size_t references = 0;
-    std::shared_ptr<Ship::IResource> resource;
+extern "C" size_t Mk64Graphics3DSTextureCacheCapacity(void) __attribute__((weak));
+
+struct Mk64TextureOwners3DS {
+    std::shared_ptr<Ship::IResource> image;
+    std::array<std::shared_ptr<Ship::IResource>, 2> palettes;
+    const uint8_t* imageBase = nullptr;
+    std::array<const uint8_t*, 2> paletteBases = {};
 };
 
-static std::array<Mk64TextureOwnerSlot3DS, TEXTURE_CACHE_MAX_SIZE> sMk64TextureOwners3DS;
+static std::array<Mk64TextureOwners3DS, TEXTURE_CACHE_MAX_SIZE + 1>
+    sMk64TextureOwners3DS;
+static std::array<std::shared_ptr<Ship::IResource>, 2> sMk64PaletteOwners3DS;
+static std::array<const uint8_t*, 2> sMk64PaletteOwnerBases3DS = {};
+static std::array<uint32_t, TEXTURE_CACHE_MAX_SIZE + 1> sMk64TextureFrameUses3DS = {};
+static uint32_t sMk64TextureFrameSerial3DS = 1;
 
-static void Mk64RetainTextureOwner3DS(const uint8_t* address,
-                                      const std::shared_ptr<Ship::IResource>& resource) {
-    if (address == nullptr || resource == nullptr) return;
-    Mk64TextureOwnerSlot3DS* empty = nullptr;
-    for (auto& slot : sMk64TextureOwners3DS) {
-        if (slot.address == address) {
-            ++slot.references;
-            return;
-        }
-        if (empty == nullptr && slot.address == nullptr) empty = &slot;
-    }
-    if (empty != nullptr) {
-        empty->address = address;
-        empty->references = 1;
-        empty->resource = resource;
+struct Mk64BlendedTextureOwner3DS {
+    const uint8_t* data = nullptr;
+    std::shared_ptr<Fast::Texture> resource;
+};
+static std::array<Mk64BlendedTextureOwner3DS, TEXTURE_CACHE_MAX_SIZE>
+    sMk64BlendedTextureOwners3DS;
+
+static size_t Mk64TextureCacheCapacity3DS() {
+    const size_t requested = Mk64Graphics3DSTextureCacheCapacity != nullptr
+                                 ? Mk64Graphics3DSTextureCacheCapacity()
+                                 : 256;
+    return std::max<size_t>(1, std::min<size_t>(requested, TEXTURE_CACHE_MAX_SIZE));
+}
+
+static void Mk64BeginTextureFrame3DS() {
+    if (++sMk64TextureFrameSerial3DS == 0) {
+        sMk64TextureFrameUses3DS.fill(0);
+        sMk64TextureFrameSerial3DS = 1;
     }
 }
 
-static void Mk64ReleaseTextureOwner3DS(const uint8_t* address) {
-    if (address == nullptr) return;
-    for (auto& slot : sMk64TextureOwners3DS) {
-        if (slot.address != address) continue;
-        if (slot.references > 1) {
-            --slot.references;
-        } else {
-            slot.resource.reset();
-            slot.address = nullptr;
-            slot.references = 0;
-        }
-        return;
+static void Mk64MarkTextureUsed3DS(uint32_t textureId) {
+    if (textureId < sMk64TextureFrameUses3DS.size()) {
+        sMk64TextureFrameUses3DS[textureId] = sMk64TextureFrameSerial3DS;
     }
+}
+
+static bool Mk64TextureUsedThisFrame3DS(uint32_t textureId) {
+    return textureId < sMk64TextureFrameUses3DS.size() &&
+           sMk64TextureFrameUses3DS[textureId] == sMk64TextureFrameSerial3DS;
+}
+
+static bool Mk64AddressInRange3DS(const uint8_t* address, const uint8_t* base,
+                                  size_t size) {
+    if (address == nullptr || base == nullptr) return false;
+    const uintptr_t value = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(base);
+    return value >= start && value - start < std::max<size_t>(size, 1);
+}
+
+static std::shared_ptr<Fast::Texture> Mk64FindBlendedTextureOwner3DS(
+    const uint8_t* data) {
+    for (const auto& entry : sMk64BlendedTextureOwners3DS) {
+        if (entry.data == data) return entry.resource;
+    }
+    return {};
+}
+
+static bool Mk64RegisterBlendedTextureOwner3DS(
+    const uint8_t* data, const std::shared_ptr<Fast::Texture>& resource) {
+    if (data == nullptr || resource == nullptr) return true;
+    for (auto& entry : sMk64BlendedTextureOwners3DS) {
+        if (entry.data == data || entry.data == nullptr) {
+            entry.data = data;
+            entry.resource = resource;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void Mk64UnregisterBlendedTextureOwner3DS(const uint8_t* data) {
+    for (auto& entry : sMk64BlendedTextureOwners3DS) {
+        if (entry.data == data) {
+            entry = {};
+            return;
+        }
+    }
+}
+
+static void Mk64RetainTextureOwners3DS(uint32_t textureId,
+                                       const TextureCacheKey& key, const RDP* rdp) {
+    if (textureId >= sMk64TextureOwners3DS.size() || rdp == nullptr) return;
+    auto& owners = sMk64TextureOwners3DS[textureId];
+    owners = {};
+
+    if (auto blendedOwner = Mk64FindBlendedTextureOwner3DS(key.texture_addr)) {
+        owners.image = blendedOwner;
+        owners.imageBase = blendedOwner->ImageData;
+    } else {
+        for (const auto& loaded : rdp->loaded_texture) {
+            const auto& imageOwner = loaded.raw_tex_metadata.resource;
+            const uint8_t* resourceBase = imageOwner != nullptr
+                                              ? imageOwner->ImageData
+                                              : loaded.addr;
+            const size_t resourceSize = imageOwner != nullptr
+                                            ? imageOwner->ImageDataSize
+                                            : std::max(loaded.orig_size_bytes,
+                                                       loaded.size_bytes);
+            if (Mk64AddressInRange3DS(key.texture_addr, loaded.addr,
+                                      std::max(loaded.orig_size_bytes,
+                                               loaded.size_bytes)) ||
+                Mk64AddressInRange3DS(key.texture_addr, resourceBase,
+                                      resourceSize)) {
+                owners.image = imageOwner;
+                owners.imageBase = resourceBase;
+                break;
+            }
+        }
+    }
+    for (size_t palette = 0; palette < sMk64PaletteOwners3DS.size(); ++palette) {
+        if (key.palette_addrs[palette] != nullptr &&
+            key.palette_addrs[palette] == rdp->palette_dram_addr[palette]) {
+            owners.palettes[palette] = sMk64PaletteOwners3DS[palette];
+            owners.paletteBases[palette] = sMk64PaletteOwnerBases3DS[palette];
+        }
+    }
+}
+
+static void Mk64ReleaseTextureOwner3DS(uint32_t textureId) {
+    if (textureId < sMk64TextureOwners3DS.size()) {
+        sMk64TextureOwners3DS[textureId] = {};
+        sMk64TextureFrameUses3DS[textureId] = 0;
+    }
+}
+
+static bool Mk64TextureOwnerReferences3DS(uint32_t textureId,
+                                          const uint8_t* address) {
+    if (textureId >= sMk64TextureOwners3DS.size() || address == nullptr) return false;
+    const auto& owners = sMk64TextureOwners3DS[textureId];
+    if (owners.imageBase == address) return true;
+    return owners.paletteBases[0] == address || owners.paletteBases[1] == address;
 }
 
 static void Mk64ResetTextureOwners3DS() {
-    for (auto& slot : sMk64TextureOwners3DS) {
-        slot.resource.reset();
-        slot.address = nullptr;
-        slot.references = 0;
+    for (auto& owners : sMk64TextureOwners3DS) owners = {};
+    for (auto& resource : sMk64PaletteOwners3DS) {
+        resource.reset();
     }
+    sMk64PaletteOwnerBases3DS.fill(nullptr);
+    sMk64TextureFrameUses3DS.fill(0);
+    for (auto& owner : sMk64BlendedTextureOwners3DS) owner = {};
 }
 #endif
 
@@ -1567,6 +2714,18 @@ void Interpreter::TextureCacheClear() {]=]
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_ORIGINAL)
             message(FATAL_ERROR "The Fast3D texture-owner helper insertion point changed")
         endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_FREE_IDS_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "mTextureCache.map.reserve(TEXTURE_CACHE_MAX_SIZE);"
+            "mTextureCache.map.reserve(TEXTURE_CACHE_MAX_SIZE);\n    mTextureCache.free_texture_ids.reserve(TEXTURE_CACHE_MAX_SIZE);"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_FREE_IDS_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D free-texture-ID reserve point changed")
+        endif()
         set(SPAGHETTIKART_3DS_TEXTURE_OWNER_CLEAR_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
             [=[    for (const auto& entry : mTextureCache.map) {
@@ -1575,7 +2734,7 @@ void Interpreter::TextureCacheClear() {]=]
             [=[    for (const auto& entry : mTextureCache.map) {
         mTextureCache.free_texture_ids.push_back(entry.second.texture_id);
 #if defined(__3DS__)
-        Mk64ReleaseTextureOwner3DS(entry.first.texture_addr);
+        Mk64ReleaseTextureOwner3DS(entry.second.texture_id);
 #endif
     }]=]
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
@@ -1584,21 +2743,96 @@ void Interpreter::TextureCacheClear() {]=]
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_CLEAR_ORIGINAL)
             message(FATAL_ERROR "The Fast3D texture-owner clear point changed")
         endif()
-        set(SPAGHETTIKART_3DS_TEXTURE_OWNER_EVICT_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        set(SPAGHETTIKART_3DS_TEXTURE_CACHE_LOOKUP_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
-            [=[        mTextureCache.map.erase(it);
-        mTextureCache.lru.pop_front();]=]
-            [=[        const uint8_t* evictedTextureAddress3DS = it->first.texture_addr;
+            [=[    if (mTextureCache.map.size() >= TEXTURE_CACHE_MAX_SIZE) {
+        // Remove the texture that was least recently used
+        it = mTextureCache.lru.front().it;
+        mTextureCache.free_texture_ids.push_back(it->second.texture_id);
+        for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
+            if (mRenderingState.mTextures[j] == &*it)
+                mRenderingState.mTextures[j] = nullptr;
+        }
         mTextureCache.map.erase(it);
         mTextureCache.lru.pop_front();
-#if defined(__3DS__)
-        Mk64ReleaseTextureOwner3DS(evictedTextureAddress3DS);
-#endif]=]
+    }
+
+    uint32_t texture_id;]=]
+            [=[    if (mTextureCache.map.size() >= Mk64TextureCacheCapacity3DS()) {
+        // Never overwrite a backing texture that an earlier draw in this
+        // submitted frame still references. Prefer a cold LRU node; if a frame
+        // really needs more than the profile capacity, grow only up to the
+        // compile-time bound and reclaim those spill nodes on later misses.
+        auto lruLocation3DS = mTextureCache.lru.end();
+        for (auto candidate3DS = mTextureCache.lru.begin();
+             candidate3DS != mTextureCache.lru.end(); ++candidate3DS) {
+            if (!Mk64TextureUsedThisFrame3DS(candidate3DS->it->second.texture_id)) {
+                lruLocation3DS = candidate3DS;
+                break;
+            }
+        }
+        if (lruLocation3DS == mTextureCache.lru.end()) {
+            if (mTextureCache.map.size() >= TEXTURE_CACHE_MAX_SIZE) {
+                throw std::bad_alloc();
+            }
+        } else {
+        it = lruLocation3DS->it;
+        const uint32_t textureId3DS = it->second.texture_id;
+        for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
+            if (mRenderingState.mTextures[j] == &*it)
+                mRenderingState.mTextures[j] = nullptr;
+        }
+        auto nodeHandle3DS = mTextureCache.map.extract(it);
+        nodeHandle3DS.key() = key;
+        auto insertResult3DS = mTextureCache.map.insert(std::move(nodeHandle3DS));
+        assert(insertResult3DS.inserted);
+        it = insertResult3DS.position;
+        lruLocation3DS->it = it;
+        mTextureCache.lru.splice(mTextureCache.lru.end(), mTextureCache.lru,
+                                 lruLocation3DS);
+        // Match the value-initialized state of an ordinary cache miss. Keeping
+        // the evicted sampler metadata can make the interpreter skip a needed
+        // sampler update for the new texture.
+        it->second = TextureCacheValue{};
+        it->second.texture_id = textureId3DS;
+        it->second.lru_location = lruLocation3DS;
+
+        // The cache no longer exposes the old key or node state. Release its
+        // resource before retaining the new owner, preserving normal eviction
+        // ordering while keeping the re-key operation exception-safe.
+        Mk64ReleaseTextureOwner3DS(textureId3DS);
+        Mk64RetainTextureOwners3DS(textureId3DS, key, mRdp);
+        Mk64MarkTextureUsed3DS(textureId3DS);
+        mRapi->SelectTexture(i, textureId3DS);
+        mRapi->SetSamplerParameters(i, false, 0, 0);
+        *n = &*it;
+        return false;
+        }
+    }
+
+    uint32_t texture_id;]=]
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )
-        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_EVICT_ORIGINAL)
-            message(FATAL_ERROR "The Fast3D texture-owner eviction point changed")
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_CACHE_LOOKUP_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-cache reuse point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_FRAME_HIT_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[    if (it != mTextureCache.map.end()) {
+        mRapi->SelectTexture(i, it->second.texture_id);]=]
+            [=[    if (it != mTextureCache.map.end()) {
+        Mk64MarkTextureUsed3DS(it->second.texture_id);
+        mRapi->SelectTexture(i, it->second.texture_id);]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_FRAME_HIT_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture frame-use hit point changed")
         endif()
         set(SPAGHETTIKART_3DS_TEXTURE_OWNER_RETAIN_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
@@ -1607,14 +2841,8 @@ void Interpreter::TextureCacheClear() {]=]
     mRapi->SelectTexture(i, texture_id);]=]
             [=[    node->second.lru_location = mTextureCache.lru.insert(mTextureCache.lru.end(), { it });
 #if defined(__3DS__)
-    for (const auto& loadedTexture3DS : mRdp->loaded_texture) {
-        if (loadedTexture3DS.addr == key.texture_addr &&
-            loadedTexture3DS.raw_tex_metadata.resource != nullptr) {
-            Mk64RetainTextureOwner3DS(key.texture_addr,
-                                      loadedTexture3DS.raw_tex_metadata.resource);
-            break;
-        }
-    }
+    Mk64RetainTextureOwners3DS(texture_id, key, mRdp);
+    Mk64MarkTextureUsed3DS(texture_id);
 #endif
 
     mRapi->SelectTexture(i, texture_id);]=]
@@ -1624,13 +2852,157 @@ void Interpreter::TextureCacheClear() {]=]
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_RETAIN_ORIGINAL)
             message(FATAL_ERROR "The Fast3D texture-owner retain point changed")
         endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_FRAME_BEGIN_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
+    SpReset();]=]
+            [=[void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
+    Mk64BeginTextureFrame3DS();
+    SpReset();]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_FRAME_BEGIN_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture frame-use begin point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_MISS_TRANSACTION_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[    uint32_t texture_id;
+    if (!mTextureCache.free_texture_ids.empty()) {
+        texture_id = mTextureCache.free_texture_ids.back();
+        mTextureCache.free_texture_ids.pop_back();
+    } else {
+        texture_id = mRapi->NewTexture();
+    }
+
+    it = mTextureCache.map.insert(std::make_pair(key, TextureCacheValue())).first;
+    TextureCacheNode* node = &*it;
+    node->second.texture_id = texture_id;
+    node->second.lru_location = mTextureCache.lru.insert(mTextureCache.lru.end(), { it });
+#if defined(__3DS__)
+    Mk64RetainTextureOwners3DS(texture_id, key, mRdp);
+    Mk64MarkTextureUsed3DS(texture_id);
+#endif]=]
+            [=[    // Allocate both CPU cache nodes before consuming a renderer ID. If
+    // ordinary-heap pressure rejects either node, no unreachable GPU slot is
+    // left behind to accumulate across recovery attempts.
+    it = mTextureCache.map.insert(std::make_pair(key, TextureCacheValue())).first;
+    TextureCacheNode* node = &*it;
+    auto lruLocation3DS = mTextureCache.lru.end();
+    uint32_t texture_id = 0;
+    try {
+        lruLocation3DS = mTextureCache.lru.insert(mTextureCache.lru.end(), { it });
+        if (!mTextureCache.free_texture_ids.empty()) {
+            texture_id = mTextureCache.free_texture_ids.back();
+            mTextureCache.free_texture_ids.pop_back();
+        } else {
+            texture_id = mRapi->NewTexture();
+        }
+    } catch (...) {
+        if (lruLocation3DS != mTextureCache.lru.end()) {
+            mTextureCache.lru.erase(lruLocation3DS);
+        }
+        mTextureCache.map.erase(it);
+        throw;
+    }
+    node->second.texture_id = texture_id;
+    node->second.lru_location = lruLocation3DS;
+#if defined(__3DS__)
+    Mk64RetainTextureOwners3DS(texture_id, key, mRdp);
+    Mk64MarkTextureUsed3DS(texture_id);
+#endif]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_MISS_TRANSACTION_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture miss transaction point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_OWNER_ADDRESS_DELETE_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "            if (it->first.texture_addr == origAddr) {"
+            "            if (it->first.texture_addr == origAddr ||\n                it->first.palette_addrs[0] == origAddr ||\n                it->first.palette_addrs[1] == origAddr ||\n                Mk64TextureOwnerReferences3DS(it->second.texture_id, origAddr)) {"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_OWNER_ADDRESS_DELETE_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-owner address delete point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_PALETTE_OWNER_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[    const uint8_t* src = mRdp->texture_to_load.addr;
+    uint32_t entryCount = high_index + 1;]=]
+            [=[    const uint8_t* src = mRdp->texture_to_load.addr;
+    const std::shared_ptr<Fast::Texture> paletteOwner3DS =
+        mRdp->texture_to_load.raw_tex_metadata.resource;
+    const uint8_t* paletteOwnerBase3DS = paletteOwner3DS != nullptr
+                                             ? paletteOwner3DS->ImageData
+                                             : src;
+    if (src == nullptr) {
+        mRdp->palette_dram_addr[0] = nullptr;
+        mRdp->palette_dram_addr[1] = nullptr;
+        sMk64PaletteOwners3DS[0].reset();
+        sMk64PaletteOwners3DS[1].reset();
+        sMk64PaletteOwnerBases3DS[0] = nullptr;
+        sMk64PaletteOwnerBases3DS[1] = nullptr;
+        return;
+    }
+    uint32_t entryCount = high_index + 1;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[            mRdp->palette_dram_addr[0] = src;
+            mRdp->palette_dram_addr[1] = src + 256;]=]
+            [=[            mRdp->palette_dram_addr[0] = src;
+            mRdp->palette_dram_addr[1] = src + 256;
+            sMk64PaletteOwners3DS[0] = paletteOwner3DS;
+            sMk64PaletteOwners3DS[1] = paletteOwner3DS;
+            sMk64PaletteOwnerBases3DS[0] = paletteOwnerBase3DS;
+            sMk64PaletteOwnerBases3DS[1] = paletteOwnerBase3DS;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            "            mRdp->palette_dram_addr[0] = src;\n        } else {"
+            "            mRdp->palette_dram_addr[0] = src;\n            sMk64PaletteOwners3DS[0] = paletteOwner3DS;\n            sMk64PaletteOwnerBases3DS[0] = paletteOwnerBase3DS;\n        } else {"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            "            mRdp->palette_dram_addr[1] = src;\n        }\n    } else {"
+            "            mRdp->palette_dram_addr[1] = src;\n            sMk64PaletteOwners3DS[1] = paletteOwner3DS;\n            sMk64PaletteOwnerBases3DS[1] = paletteOwnerBase3DS;\n        }\n    } else {"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[        mRdp->palettes[1] = src;
+        mRdp->palette_dram_addr[1] = src;]=]
+            [=[        mRdp->palettes[1] = src;
+        mRdp->palette_dram_addr[1] = src;
+        sMk64PaletteOwners3DS[1] = paletteOwner3DS;
+        sMk64PaletteOwnerBases3DS[1] = paletteOwnerBase3DS;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_PALETTE_OWNER_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D palette-owner insertion points changed")
+        endif()
         set(SPAGHETTIKART_3DS_TEXTURE_OWNER_DELETE_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
             [=[                mTextureCache.map.erase(it->first);
                 again = true;]=]
-            [=[                mTextureCache.map.erase(it->first);
+            [=[                const uint32_t textureId3DS = it->second.texture_id;
+                mTextureCache.map.erase(it->first);
 #if defined(__3DS__)
-                Mk64ReleaseTextureOwner3DS(origAddr);
+                Mk64ReleaseTextureOwner3DS(textureId3DS);
 #endif
                 again = true;]=]
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
@@ -1638,6 +3010,28 @@ void Interpreter::TextureCacheClear() {]=]
         )
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_DELETE_ORIGINAL)
             message(FATAL_ERROR "The Fast3D texture-owner delete point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_DELETE_SCAN_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
+    while (mTextureCache.map.bucket_count() > 0) {
+        TextureCacheKey key = { origAddr, { 0 }, 0, 0, 0 }; // bucket index only depends on the address
+        size_t bucket = mTextureCache.map.bucket(key);
+        bool again = false;
+        for (auto it = mTextureCache.map.begin(bucket); it != mTextureCache.map.end(bucket); ++it) {]=]
+            [=[void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
+    while (!mTextureCache.map.empty()) {
+        bool again = false;
+        // Palette addresses are not part of the unordered-map hash. Explicit
+        // source eviction is transition-time work, so scan the bounded cache.
+        for (auto it = mTextureCache.map.begin(); it != mTextureCache.map.end(); ++it) {]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_DELETE_SCAN_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture source-eviction scan changed")
         endif()
         set(SPAGHETTIKART_3DS_MATRIX_LOOKUP_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
@@ -1678,6 +3072,7 @@ void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
 // reference for every Fast3D command in large race display lists.
 static void Mk64ResetTextureOwners3DS();
 static Interpreter* mInstance = nullptr;
+static float sMk64AspectCorrection3DS = 1.0f;
 void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
     if (gfx == nullptr) {
         Mk64ResetTextureOwners3DS();
@@ -1695,6 +3090,27 @@ void GfxSetInstance(std::shared_ptr<Interpreter> gfx) {
         )
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_INTERPRETER_INSTANCE_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D interpreter instance insertion points changed")
+        endif()
+        set(SPAGHETTIKART_3DS_ASPECT_FACTOR_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[    mCurDimensions.aspect_ratio = (float)mCurDimensions.width / (float)mCurDimensions.height;]=]
+            [=[    mCurDimensions.aspect_ratio = (float)mCurDimensions.width / (float)mCurDimensions.height;
+    sMk64AspectCorrection3DS = ::mk64_3ds::Fast3DAspectCorrection(
+        static_cast<float>(mCurDimensions.width),
+        static_cast<float>(mCurDimensions.height));]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[        return x * (4.0f / 3.0f) / ((float)mCurDimensions.width / (float)mCurDimensions.height);]=]
+            [=[        return x * sMk64AspectCorrection3DS;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_ASPECT_FACTOR_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D aspect-factor insertion points changed")
         endif()
         set(SPAGHETTIKART_3DS_CURRENT_DIR_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
@@ -1765,6 +3181,522 @@ uint16_t Interpreter::GetPixelDepth(float x, float y) {
         )
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_DEPTH_READ_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D pixel depth insertion point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_RESOURCE_NULL_GUARDS_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess((char*)data));
+        texFlags = tex->Flags;]=]
+            [=[            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess((char*)data));
+        if (tex == nullptr || tex->ImageData == nullptr) {
+            return;
+        }
+        texFlags = tex->Flags;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[    if (ucode_handler_index == ucode_f3dex2) {
+        gfx->GfxSpMovememF3dex2(index, offset,
+                                Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash));
+    } else {
+        auto light =
+            (Fast::LightEntry*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
+        uintptr_t data = (uintptr_t)&light->Ambient;
+        gfx->GfxSpMovememF3d(index, offset, (void*)(data + (hasOffset == 1 ? 0x8 : 0)));
+    }]=]
+            [=[    if (ucode_handler_index == ucode_f3dex2) {
+        const void* data =
+            Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
+        if (data != nullptr) {
+            gfx->GfxSpMovememF3dex2(index, offset, data);
+        }
+    } else {
+        auto* light =
+            (Fast::LightEntry*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
+        if (light != nullptr) {
+            const uintptr_t data = reinterpret_cast<uintptr_t>(&light->Ambient);
+            gfx->GfxSpMovememF3d(index, offset,
+                                 reinterpret_cast<void*>(data + (hasOffset == 1 ? 0x8 : 0)));
+        }
+    }]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[    F3DVtx* vtx =
+        (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer((const char*)fileName);
+    vtx += vtxDataOff;
+
+    gfx->GfxSpVertex(vtxCnt, vtxIdxOff, vtx);]=]
+            [=[    F3DVtx* vtx =
+        (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer((const char*)fileName);
+    if (vtx != nullptr) {
+        gfx->GfxSpVertex(vtxCnt, vtxIdxOff, vtx + vtxDataOff);
+    }]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[        } else {
+            assert(0 && "???");
+            // gfx_path.pop_back();
+            // cmd = cmd_stack.top();
+            // cmd_stack.pop();
+        }]=]
+            [=[        }]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_RESOURCE_NULL_GUARDS_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D resource null-guard insertion points changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_FAILURE_GUARDS_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[            if (tex == nullptr) {
+                (*cmd0)++;
+                return false;
+            }]=]
+            [=[            if (tex == nullptr || tex->ImageData == nullptr) {
+                gfx->GfxDpSetTextureImage(C0(21, 3), C0(19, 2), C0(0, 12) + 1,
+                                          imgData, 0, rawTexMetdata, nullptr);
+                return false;
+            }]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[    if (texture != nullptr) {
+        Interpreter* gfx = mInstance;]=]
+            [=[    if (texture != nullptr && texture->ImageData != nullptr) {
+        Interpreter* gfx = mInstance;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[    } else {
+        SPDLOG_ERROR("G_SETTIMG_OTR_FILEPATH: Texture is null");
+    }
+    return false;
+}]=]
+            [=[    } else {
+        Interpreter* gfx = mInstance;
+        gfx->GfxDpSetTextureImage(C0(21, 3), C0(19, 2), C0(0, 12) + 1,
+                                  fileName, 0, RawTexMetadata{}, nullptr);
+        SPDLOG_ERROR("G_SETTIMG_OTR_FILEPATH: Texture is null");
+    }
+    return false;
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[        Fast::Texture* tex = std::static_pointer_cast<Fast::Texture>(
+                                 Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
+                                     reinterpret_cast<char*>(replacement)))
+                                 .get();
+
+        replacement = tex->ImageData;]=]
+            [=[        std::shared_ptr<Fast::Texture> tex = std::static_pointer_cast<Fast::Texture>(
+            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
+                reinterpret_cast<char*>(replacement)));
+        if (tex == nullptr || tex->ImageData == nullptr) {
+            return;
+        }
+        replacement = tex->ImageData;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_FAILURE_GUARDS_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture failure guards changed")
+        endif()
+        set(SPAGHETTIKART_3DS_BLENDED_TEXTURE_OWNER_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_t* replacement) {
+    if (gfx_check_image_signature(name)) {
+        name += 7;
+    }
+
+    if (gfx_check_image_signature(reinterpret_cast<char*>(replacement))) {
+        std::shared_ptr<Fast::Texture> tex = std::static_pointer_cast<Fast::Texture>(
+            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
+                reinterpret_cast<char*>(replacement)));
+        if (tex == nullptr || tex->ImageData == nullptr) {
+            return;
+        }
+        replacement = tex->ImageData;
+    }
+
+    mMaskedTextures[name] = MaskedTextureEntry{ mask, replacement };
+}
+
+void Interpreter::UnregisterBlendedTexture(const char* name) {
+    if (gfx_check_image_signature(name)) {
+        name += 7;
+    }
+
+    mMaskedTextures.erase(name);
+}]=]
+            [=[void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_t* replacement) {
+    if (name == nullptr) return;
+    if (gfx_check_image_signature(name)) {
+        name += 7;
+    }
+
+    std::shared_ptr<Fast::Texture> replacementOwner3DS;
+    if (gfx_check_image_signature(reinterpret_cast<char*>(replacement))) {
+        replacementOwner3DS = std::static_pointer_cast<Fast::Texture>(
+            Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
+                reinterpret_cast<char*>(replacement)));
+        if (replacementOwner3DS == nullptr || replacementOwner3DS->ImageData == nullptr) {
+            return;
+        }
+        replacement = replacementOwner3DS->ImageData;
+    }
+
+    if (auto previous3DS = mMaskedTextures.find(name);
+        previous3DS != mMaskedTextures.end()) {
+        Mk64UnregisterBlendedTextureOwner3DS(previous3DS->second.replacementData);
+    }
+    mMaskedTextures[name] = MaskedTextureEntry{ mask, replacement };
+    if (!Mk64RegisterBlendedTextureOwner3DS(replacement, replacementOwner3DS)) {
+        mMaskedTextures.erase(name);
+    }
+}
+
+void Interpreter::UnregisterBlendedTexture(const char* name) {
+    if (name == nullptr) return;
+    if (gfx_check_image_signature(name)) {
+        name += 7;
+    }
+
+    if (auto entry3DS = mMaskedTextures.find(name);
+        entry3DS != mMaskedTextures.end()) {
+        Mk64UnregisterBlendedTextureOwner3DS(entry3DS->second.replacementData);
+        mMaskedTextures.erase(entry3DS);
+    }
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_BLENDED_TEXTURE_OWNER_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D blended-texture owner point changed")
+        endif()
+        set(SPAGHETTIKART_3DS_HASH_TEXTURE_HANDLER_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[bool gfx_set_timg_otr_hash_handler_custom(F3DGfx** cmd0) {
+    uintptr_t addr = (*cmd0)->words.w1;
+    (*cmd0)++;
+    uint64_t hash = ((uint64_t)(*cmd0)->words.w0 << 32) + (uint64_t)(*cmd0)->words.w1;
+
+    const char* fileName =
+        Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->HashToCString(hash);
+    uint32_t texFlags = 0;
+    RawTexMetadata rawTexMetadata = {};
+
+    if (fileName == nullptr) {
+        (*cmd0)++;
+        return false;
+    }
+
+    std::shared_ptr<Fast::Texture> texture = std::static_pointer_cast<Fast::Texture>(
+        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(
+            Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->HashToCString(hash)));
+    if (texture != nullptr) {
+        texFlags = texture->Flags;
+        rawTexMetadata.width = texture->Width;
+        rawTexMetadata.height = texture->Height;
+        rawTexMetadata.h_byte_scale = texture->HByteScale;
+        rawTexMetadata.v_pixel_scale = texture->VPixelScale;
+        rawTexMetadata.type = texture->Type;
+        rawTexMetadata.resource = texture;
+
+        // OTRTODO: We have disabled caching for now to fix a texture corruption issue with HD texture
+        // support. In doing so, there is a potential performance hit since we are not caching lookups. We
+        // need to do proper profiling to see whether or not it is worth it to keep the caching system.
+
+        char* tex = reinterpret_cast<char*>(texture->ImageData);
+
+        if (tex != nullptr) {
+            (*cmd0)--;
+            uintptr_t oldData = (*cmd0)->words.w1;
+            // TODO: wtf??
+            (*cmd0)->words.w1 = (uintptr_t)tex;
+
+            // if (ourHash != (uint64_t)-1) {
+            //     auto res = ResourceLoad(ourHash);
+            // }
+
+            (*cmd0)++;
+        }
+
+        (*cmd0)--;
+        F3DGfx* cmd = (*cmd0);
+        uint32_t fmt = C0(21, 3);
+        uint32_t size = C0(19, 2);
+        uint32_t width = C0(0, 12) + 1;
+
+        if (tex != NULL) {
+            Interpreter* gfx = mInstance;
+            gfx->GfxDpSetTextureImage(fmt, size, width, fileName, texFlags, rawTexMetadata, tex);
+        }
+    } else {
+        SPDLOG_ERROR("G_SETTIMG_OTR_HASH: Texture is null");
+    }
+
+    (*cmd0)++;
+    return false;
+}]=]
+            [=[bool gfx_set_timg_otr_hash_handler_custom(F3DGfx** cmd0) {
+    Interpreter* gfx = mInstance;
+    F3DGfx* cmd = *cmd0;
+    (*cmd0)++;
+    const uint64_t hash =
+        (static_cast<uint64_t>((*cmd0)->words.w0) << 32) |
+        static_cast<uint64_t>((*cmd0)->words.w1);
+    const char* fileName =
+        Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager()->HashToCString(hash);
+    const uint32_t fmt = C0(21, 3);
+    const uint32_t size = C0(19, 2);
+    const uint32_t width = C0(0, 12) + 1;
+    RawTexMetadata rawTexMetadata = {};
+
+    if (fileName == nullptr) {
+        gfx->GfxDpSetTextureImage(fmt, size, width, nullptr, 0,
+                                  rawTexMetadata, nullptr);
+        return false;
+    }
+
+    std::shared_ptr<Fast::Texture> texture = std::static_pointer_cast<Fast::Texture>(
+        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResourceProcess(fileName));
+    if (texture == nullptr || texture->ImageData == nullptr) {
+        gfx->GfxDpSetTextureImage(fmt, size, width, fileName, 0,
+                                  rawTexMetadata, nullptr);
+        SPDLOG_ERROR("G_SETTIMG_OTR_HASH: Texture is null");
+        return false;
+    }
+
+    rawTexMetadata.width = texture->Width;
+    rawTexMetadata.height = texture->Height;
+    rawTexMetadata.h_byte_scale = texture->HByteScale;
+    rawTexMetadata.v_pixel_scale = texture->VPixelScale;
+    rawTexMetadata.type = texture->Type;
+    rawTexMetadata.resource = texture;
+    gfx->GfxDpSetTextureImage(fmt, size, width, fileName, texture->Flags,
+                              rawTexMetadata, texture->ImageData);
+    return false;
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_HASH_TEXTURE_HANDLER_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D hashed texture handler changed")
+        endif()
+        set(SPAGHETTIKART_3DS_TEXTURE_VALIDATION_ORDER_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[    if (TextureCacheLookup(i, key)) {
+        return;
+    }
+
+    // Guard against zero-sized textures that would cause divide-by-zero
+    // or GPU API errors in UploadTexture.
+    if (mRdp->texture_tile[tile].line_size_bytes == 0 || mRdp->loaded_texture[tmemIdex].size_bytes == 0 ||
+        origAddr == nullptr) {
+        return;
+    }]=]
+            [=[    // Never publish a cache key until its source has passed the
+    // cheap validation gates. Otherwise an invalid upload becomes a permanent
+    // false hit and keeps sampling the previous texture bound to this unit.
+    if (mRdp->texture_tile[tile].line_size_bytes == 0 ||
+        mRdp->loaded_texture[tmemIdex].size_bytes == 0 || origAddr == nullptr) {
+        return;
+    }
+
+    const bool directUpload3DS =
+        (texFlags & (TEX_FLAG_LOAD_AS_IMG | TEX_FLAG_LOAD_AS_RAW)) != 0;
+    const bool supportedFormat3DS = directUpload3DS ||
+        (fmt == G_IM_FMT_RGBA && (siz == G_IM_SIZ_16b || siz == G_IM_SIZ_32b)) ||
+        (fmt == G_IM_FMT_IA && (siz == G_IM_SIZ_4b || siz == G_IM_SIZ_8b ||
+                                siz == G_IM_SIZ_16b)) ||
+        (fmt == G_IM_FMT_CI && (siz == G_IM_SIZ_4b || siz == G_IM_SIZ_8b ||
+                                siz == G_IM_SIZ_16b || siz == G_IM_SIZ_32b)) ||
+        (fmt == G_IM_FMT_I && (siz == G_IM_SIZ_4b || siz == G_IM_SIZ_8b));
+    if (!supportedFormat3DS) {
+        return;
+    }
+    if (!directUpload3DS && fmt == G_IM_FMT_CI) {
+        if ((siz == G_IM_SIZ_4b && mRdp->palettes[paletteIndex / 8] == nullptr) ||
+            (siz == G_IM_SIZ_8b &&
+             (mRdp->palettes[0] == nullptr || mRdp->palettes[1] == nullptr))) {
+            return;
+        }
+    }
+
+    if (TextureCacheLookup(i, key)) {
+        return;
+    }]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_TEXTURE_VALIDATION_ORDER_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture validation order changed")
+        endif()
+        set(SPAGHETTIKART_3DS_INTERPRETER_BOUNDS_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            [=[void* Interpreter::SegAddr(uintptr_t w1) {
+    // Segmented?
+    if (w1 & 1) {
+        uint32_t segNum = (uint32_t)(w1 >> 24);
+
+        uint32_t offset = w1 & 0x00FFFFFE;
+
+        if (mSegmentPointers[segNum] != 0) {
+            return (void*)(mSegmentPointers[segNum] + offset);
+        } else {
+            return (void*)w1;
+        }
+    } else {
+        return (void*)w1;
+    }
+}]=]
+            [=[void* Interpreter::SegAddr(uintptr_t w1) {
+    if ((w1 & 1U) == 0) {
+        return reinterpret_cast<void*>(w1);
+    }
+    const uint32_t segNum = static_cast<uint32_t>(w1 >> 24U);
+    if (segNum >= MAX_SEGMENT_POINTERS || mSegmentPointers[segNum] == 0) {
+        return nullptr;
+    }
+    const uint32_t offset = static_cast<uint32_t>(w1) & 0x00FFFFFEU;
+    return reinterpret_cast<void*>(mSegmentPointers[segNum] + offset);
+}]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx* vertices) {
+    for (size_t i = 0; i < n_vertices; i++, dest_index++) {]=]
+            [=[void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx* vertices) {
+    if (vertices == nullptr || dest_index >= MAX_VERTICES ||
+        n_vertices > MAX_VERTICES - dest_index) {
+        return;
+    }
+    for (size_t i = 0; i < n_vertices; i++, dest_index++) {]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[void Interpreter::GfxSpModifyVertex(uint16_t vtx_idx, uint8_t where, uint32_t val) {
+    SUPPORT_CHECK(where == G_MWO_POINT_ST);]=]
+            [=[void Interpreter::GfxSpModifyVertex(uint16_t vtx_idx, uint8_t where, uint32_t val) {
+    if (vtx_idx >= MAX_VERTICES) return;
+    SUPPORT_CHECK(where == G_MWO_POINT_ST);]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
+    struct LoadedVertex* v1 = &mRsp->loaded_vertices[vtx1_idx];]=]
+            [=[void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
+    if (vtx1_idx >= MAX_VERTICES || vtx2_idx >= MAX_VERTICES ||
+        vtx3_idx >= MAX_VERTICES) {
+        return;
+    }
+    struct LoadedVertex* v1 = &mRsp->loaded_vertices[vtx1_idx];]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[        float dx1 = v1->x / (v1->w) - v2->x / (v2->w);
+        float dy1 = v1->y / (v1->w) - v2->y / (v2->w);
+        float dx2 = v3->x / (v3->w) - v2->x / (v2->w);
+        float dy2 = v3->y / (v3->w) - v2->y / (v2->w);
+        float cross = dx1 * dy2 - dy1 * dx2;]=]
+            [=[        float cross;
+        if (v1->w == 0.0f || v2->w == 0.0f || v3->w == 0.0f) {
+            const float dx1 = v1->x / v1->w - v2->x / v2->w;
+            const float dy1 = v1->y / v1->w - v2->y / v2->w;
+            const float dx2 = v3->x / v3->w - v2->x / v2->w;
+            const float dy2 = v3->y / v3->w - v2->y / v2->w;
+            cross = dx1 * dy2 - dy1 * dx2;
+        } else {
+            cross = ::mk64_3ds::Fast3DProjectedCross(
+                v1->x, v1->y, v1->w, v2->x, v2->y, v2->w,
+                v3->x, v3->y, v3->w);
+        }]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
+    float matrix[4][4];]=]
+            [=[void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
+    if (addr == nullptr) return;
+    float matrix[4][4];]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[    } else {
+        (*cmd0) = subGFX;
+        g_exec_stack.branch(cmd);
+        return true; // shortcut cmd increment
+    }
+    return false;]=]
+            [=[    } else if (subGFX != nullptr) {
+        (*cmd0) = subGFX;
+        g_exec_stack.branch(cmd);
+        return true; // shortcut cmd increment
+    }
+    return false;]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_INTERPRETER_BOUNDS_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D bounds-guard insertion points changed")
+        endif()
+        set(SPAGHETTIKART_3DS_DEBUGGER_BYPASS_ORIGINAL
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "    auto dbg = mGfxDebugger;\n"
+            ""
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            [=[        if (dbg->IsDebugging()) {
+            g_exec_stack.gfx_path.push_back(cmd);
+            if (dbg->HasBreakPoint(g_exec_stack.gfx_path)) {
+                // On a breakpoint with the active framebuffer still set, we need to reset back to prevent
+                // soft locking the renderer
+                if (mFbActive) {
+                    mFbActive = 0;
+                    mRapi->StartDrawToFramebuffer(mRendersToFb ? mGameFb : 0, 1);
+                }
+
+                break;
+            }
+            g_exec_stack.gfx_path.pop_back();
+        }
+        gfx_step();]=]
+            [=[        gfx_step();]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
+           SPAGHETTIKART_3DS_DEBUGGER_BYPASS_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D debugger bypass insertion points changed")
         endif()
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_INTERPRETER_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D interpreter watchdog insertion points changed")

@@ -99,6 +99,7 @@ constexpr std::array<uint8_t, 8> kNativePlaceGreen = {
 };
 
 size_t sTrackIndex = 0;
+bool sSelectedMirrorMode = false;
 int8_t sLastTopHudEnabled = -1;
 Mk64TopHudRenderMode3DS sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
 bool sWasRacing = false;
@@ -131,8 +132,16 @@ void RegisterVanillaTracks() {
 
 void SelectIndex(size_t index) {
     if (index >= kTracks.size()) return;
+    World* world = GetWorld();
+    Track* currentTrack = world == nullptr ? nullptr : world->GetTrack();
+    if (index == sTrackIndex && currentTrack != nullptr &&
+        currentTrack->ResourceName == kTracks[index].resourceName &&
+        sSelectedMirrorMode == (gIsMirrorMode != 0)) {
+        return;
+    }
     sTrackIndex = index;
     kTracks[index].select();
+    sSelectedMirrorMode = gIsMirrorMode != 0;
 }
 }
 
@@ -173,6 +182,7 @@ extern "C" bool Mk64GameState3DSInit() {
     RegisterItemTables(gItemTableRegistry);
     SetMarioRaceway();
     sTrackIndex = 0;
+    sSelectedMirrorMode = gIsMirrorMode != 0;
     return true;
 }
 
@@ -187,10 +197,20 @@ extern "C" void TrackBrowser_SetTrack(const char* name) {
 }
 
 extern "C" void TrackBrowser_SetTrackFromCup() {
-    Cup* cup = GetWorld() == nullptr ? nullptr : GetWorld()->GetCurrentCup();
-    if (cup != nullptr) {
-        TrackBrowser_SetTrack(cup->GetTrack().c_str());
+    World* world = GetWorld();
+    Cup* cup = world == nullptr ? nullptr : world->GetCurrentCup();
+    if (cup == nullptr || cup->CursorPosition >= cup->mTracks.size()) return;
+
+    // menus.c asks for the selected cup track every frame. Borrow the existing
+    // cup string and avoid reconstructing a Track (and all of its resource
+    // vectors) while the selection has not changed.
+    const std::string& resourceName = cup->mTracks[cup->CursorPosition];
+    Track* currentTrack = world->GetTrack();
+    if (currentTrack != nullptr && currentTrack->ResourceName == resourceName &&
+        sSelectedMirrorMode == (gIsMirrorMode != 0)) {
+        return;
     }
+    TrackBrowser_SetTrack(resourceName.c_str());
 }
 
 extern "C" void TrackBrowser_NextTrack() { SelectIndex((sTrackIndex + 1) % kTracks.size()); }

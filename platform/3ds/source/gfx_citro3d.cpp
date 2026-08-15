@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <new>
 #include <utility>
 #include <vector>
 
@@ -117,7 +118,10 @@ uint32_t PackColor(const std::array<float, 4>& color) {
 }
 
 size_t ClipTriangleAgainstW(const float* vertices[3], size_t stride, float* output) {
-    std::array<std::array<float, kMaxVertexStrideFloats>, 4> polygon = {};
+    // Every emitted component below is assigned before it is read. Avoid
+    // clearing the full 1 KiB maximum scratch polygon for each clipped
+    // triangle on the CPU hot path.
+    std::array<std::array<float, kMaxVertexStrideFloats>, 4> polygon;
     int polygonCount = 0;
 
     for (int index = 0; index < 3; ++index) {
@@ -326,6 +330,7 @@ struct GfxRenderingAPICitro3D::Impl {
     bool frameActive = false;
     bool newModel = false;
     uint32_t outputWidth = kTopLogicalWidth;
+    bool originalAspect = false;
     bool useAlpha = false;
     bool depthTest = false;
     bool depthWrite = true;
@@ -566,23 +571,30 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
         return;
     }
 
-    auto& slot = mImpl->textures[textureId];
-    if (slot.initialized) {
-        C3D_TexDelete(&slot.texture);
-        slot.initialized = false;
-        slot.allocatedBytes = 0;
-    }
-
     const uint16_t textureWidth = NextPowerOfTwo(width);
     const uint16_t textureHeight = NextPowerOfTwo(height);
-    if (!C3D_TexInit(&slot.texture, textureWidth, textureHeight, GPU_RGBA8)) {
-        return;
+    auto& slot = mImpl->textures[textureId];
+    // Fast3D recycles LRU texture IDs heavily for animated sprites. Keep a
+    // matching RGBA8 backing allocation and overwrite it in place instead of
+    // churning the linear allocator on every upload.
+    const bool canReuseAllocation = slot.initialized && slot.texture.data != nullptr &&
+                                    slot.texture.width == textureWidth && slot.texture.height == textureHeight &&
+                                    slot.texture.fmt == GPU_RGBA8;
+    if (!canReuseAllocation) {
+        if (slot.initialized) {
+            C3D_TexDelete(&slot.texture);
+            slot.initialized = false;
+            slot.allocatedBytes = 0;
+        }
+        if (!C3D_TexInit(&slot.texture, textureWidth, textureHeight, GPU_RGBA8)) {
+            throw std::bad_alloc();
+        }
+        slot.initialized = true;
+        slot.allocatedBytes = static_cast<size_t>(textureWidth) * textureHeight * 4U;
     }
-    slot.initialized = true;
     slot.hasTransparency = false;
     slot.sourceWidth = static_cast<uint16_t>(width);
     slot.sourceHeight = static_cast<uint16_t>(height);
-    slot.allocatedBytes = static_cast<size_t>(textureWidth) * textureHeight * 4U;
 
     // Fast3D supplies RGBA bytes while PICA stores GPU_RGBA8 texels in tiled
     // A-B-G-R byte order. Swap each host word while building the Morton layout;
@@ -638,7 +650,11 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     C3D_TexFlush(&slot.texture);
     ++mImpl->textureCacheUploadCount;
     mImpl->textureCacheUploadBytes += slot.allocatedBytes;
-    C3D_TexSetFilter(&slot.texture, GPU_LINEAR, GPU_LINEAR);
+    // TextureCacheValue is value-initialized with linear_filter=false on a
+    // miss (and reset to that state when an LRU node is recycled). Keep the
+    // uploaded texture descriptor consistent so point-filtered draws are not
+    // skipped by the interpreter's sampler-state cache.
+    C3D_TexSetFilter(&slot.texture, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&slot.texture, GPU_REPEAT, GPU_REPEAT);
     C3D_TexBind(mImpl->selectedTextureUnit, &slot.texture);
 }
@@ -673,6 +689,11 @@ void GfxRenderingAPICitro3D::SetDepthTestAndMask(bool depthTest, bool zUpdate) {
     mImpl->depthWrite = zUpdate;
     C3D_DepthTest(depthTest, depthTest ? GPU_GREATER : GPU_ALWAYS,
                   static_cast<GPU_WRITEMASK>(GPU_WRITE_COLOR | (zUpdate ? GPU_WRITE_DEPTH : 0)));
+    // SetDepthTestAndMask already emitted the complete depth state. Keep the
+    // draw-state cache synchronized so the next batch does not rebuild all six
+    // TEV stages solely because these two cached values lagged behind.
+    mImpl->tevStateDepthTest = depthTest;
+    mImpl->tevStateDepthWrite = zUpdate;
 }
 
 void GfxRenderingAPICitro3D::SetZmodeDecal(bool decal) {
@@ -754,6 +775,20 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                 bufVbo + (triangle * 3 + 1) * program->strideFloats,
                 bufVbo + (triangle * 3 + 2) * program->strideFloats,
             };
+            const int insideCount =
+                static_cast<int>(triangleVertices[0][3] >= kClipWEpsilon) +
+                static_cast<int>(triangleVertices[1][3] >= kClipWEpsilon) +
+                static_cast<int>(triangleVertices[2][3] >= kClipWEpsilon);
+            if (insideCount == 3) {
+                std::copy_n(triangleVertices[0], 3 * program->strideFloats,
+                            mImpl->clipScratch.data() +
+                                clippedVertexCount * program->strideFloats);
+                clippedVertexCount += 3;
+                continue;
+            }
+            if (insideCount == 0) {
+                continue;
+            }
             clippedVertexCount += ClipTriangleAgainstW(
                 triangleVertices, program->strideFloats,
                 mImpl->clipScratch.data() + clippedVertexCount * program->strideFloats);
@@ -771,10 +806,8 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     const size_t firstVertex = mImpl->packedVertexCount;
 
     bool coverNativeFullscreenTexture = false;
-    const bool originalAspect = Mk64Settings3DSGetAspectRatio != nullptr &&
-                                Mk64Settings3DSGetAspectRatio() != 0;
     if (mImpl->activeTarget == mImpl->topTarget &&
-        !originalAspect &&
+        !mImpl->originalAspect &&
         IsNativeFullscreenQuad(drawVertices, vertexCount, program->strideFloats)) {
         for (int texture = 0; texture < 2; ++texture) {
             if (!program->usedTextures[texture] || mImpl->selectedFramebuffers[texture] != 0) {
@@ -800,6 +833,13 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
             constants[input][component] =
                 component == 3 && !program->alpha ? 1.0f : drawVertices[inputOffset + std::min(component, 2)];
         }
+        // PICA exposes one primary vertex color to the TEV pipeline. Once that
+        // varying input is chosen, every later input is necessarily represented
+        // by its first-vertex constant, so scanning the rest of the batch cannot
+        // affect the generated TEV state.
+        if (varyingInput >= 0) {
+            continue;
+        }
         bool constant = true;
         for (size_t vertex = 1; vertex < vertexCount && constant; ++vertex) {
             const float* source = drawVertices + vertex * program->strideFloats + inputOffset;
@@ -821,6 +861,27 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     // centered "cover" presentation without stretching or moving menus, HUD
     // elements, portraits, or other sprites.
     const float coverScale = coverNativeFullscreenTexture ? kFullscreenCoverScale : 1.0f;
+    std::array<float, 2> textureScaleU = { 1.0f, 1.0f };
+    std::array<float, 2> textureScaleV = { 1.0f, 1.0f };
+    for (int texture = 0; texture < 2; ++texture) {
+        if (!program->usedTextures[texture]) {
+            continue;
+        }
+        const uint32_t textureId = mImpl->selectedTextures[texture];
+        if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
+            const auto& slot = mImpl->textures[textureId];
+            textureScaleU[texture] *= static_cast<float>(slot.sourceWidth) / slot.texture.width;
+            textureScaleV[texture] *= static_cast<float>(slot.sourceHeight) / slot.texture.height;
+        }
+        const int framebufferId = mImpl->selectedFramebuffers[texture];
+        if (framebufferId > 0 && framebufferId < static_cast<int>(mImpl->framebuffers.size()) &&
+            mImpl->framebuffers[framebufferId] != nullptr &&
+            mImpl->framebuffers[framebufferId]->initialized) {
+            const auto& slot = *mImpl->framebuffers[framebufferId];
+            textureScaleU[texture] *= static_cast<float>(slot.logicalWidth) / slot.texture.width;
+            textureScaleV[texture] *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
+        }
+    }
     for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
         const float* source = drawVertices + vertex * program->strideFloats;
         float* destination = mImpl->packedVertices + (firstVertex + vertex) * kPackedVertexFloats;
@@ -843,20 +904,8 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                 if (program->clamp[texture][1]) {
                     v = std::min(v, source[clampOffset]);
                 }
-                const uint32_t textureId = mImpl->selectedTextures[texture];
-                if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
-                    const auto& slot = mImpl->textures[textureId];
-                    u *= static_cast<float>(slot.sourceWidth) / slot.texture.width;
-                    v *= static_cast<float>(slot.sourceHeight) / slot.texture.height;
-                }
-                const int framebufferId = mImpl->selectedFramebuffers[texture];
-                if (framebufferId > 0 && framebufferId < static_cast<int>(mImpl->framebuffers.size()) &&
-                    mImpl->framebuffers[framebufferId] != nullptr &&
-                    mImpl->framebuffers[framebufferId]->initialized) {
-                    const auto& slot = *mImpl->framebuffers[framebufferId];
-                    u *= static_cast<float>(slot.logicalWidth) / slot.texture.width;
-                    v *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
-                }
+                u *= textureScaleU[texture];
+                v *= textureScaleV[texture];
             }
             *destination++ = u;
             *destination++ = v;
@@ -883,10 +932,14 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     }
 
     std::array<uint32_t, 7> packedTevConstants = {};
-    for (size_t index = 0; index < constants.size(); ++index) {
+    for (size_t index = 0; index < program->numInputs; ++index) {
+        if (static_cast<int>(index) == varyingInput) {
+            continue;
+        }
         packedTevConstants[index] = PackColor(constants[index]);
     }
-    const uint32_t packedTevGrayscale = PackColor(grayscaleColor);
+    const uint32_t packedTevGrayscale =
+        program->grayscale ? PackColor(grayscaleColor) : 0;
     const bool updateTevState = !mImpl->tevStateValid ||
                                 mImpl->tevStateProgram != program ||
                                 mImpl->tevStateVaryingInput != varyingInput ||
@@ -1250,6 +1303,8 @@ void GfxRenderingAPICitro3D::StartFrame() {
     mImpl->viewportWidth = static_cast<int>(mImpl->outputWidth);
     mImpl->viewportHeight = static_cast<int>(kTopHeight);
     mImpl->scissorEnabled = false;
+    mImpl->originalAspect = Mk64Settings3DSGetAspectRatio != nullptr &&
+                            Mk64Settings3DSGetAspectRatio() != 0;
     C3D_FrameDrawOn(mImpl->topTarget);
     RestoreFast3DState();
 }
@@ -1437,6 +1492,24 @@ void GfxRenderingAPICitro3D::DeleteTexture(uint32_t textureId) {
         slot.initialized = false;
         slot.allocatedBytes = 0;
     }
+}
+
+void GfxRenderingAPICitro3D::ReleaseTextureAllocations() {
+    if (mImpl == nullptr) {
+        return;
+    }
+    // C3D_FrameEnd queues the submitted frame asynchronously. Memory-pressure
+    // recovery releases both the GPU allocations below and the source-resource
+    // owners immediately afterwards, so wait until neither can still be read by
+    // the GPU. This path is exceptional; its stall is preferable to a use-after-
+    // free that presents as corrupted sprites followed by an application exit.
+    if (mImpl->initialized && !mImpl->frameActive) {
+        C3D_FrameSync();
+    }
+    for (uint32_t textureId = 1; textureId < mImpl->textures.size(); ++textureId) {
+        DeleteTexture(textureId);
+    }
+    mImpl->selectedTextures.fill(0);
 }
 
 void GfxRenderingAPICitro3D::SetTextureFilter(FilteringMode mode) {

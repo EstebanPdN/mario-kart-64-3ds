@@ -12,9 +12,11 @@
 #include <citro3d.h>
 #include <fast/interpreter.h>
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <memory>
+#include <new>
 #include <unordered_map>
 
 namespace Fast {
@@ -37,11 +39,13 @@ std::shared_ptr<Fast::GfxDebugger> sDebugger;
 const std::unordered_map<Mtx*, MtxF> sNoMatrixReplacements;
 uint64_t sFrameCounter = 0;
 uint64_t sRendererFaultCounter = 0;
+uint64_t sRendererHealthyFrameCounter = 0;
 bool sRendererFaulted = false;
 bool sHasPresentedTopFrame = false;
-constexpr uint64_t kRendererFaultTolerance = 16;
+constexpr uint64_t kRendererFaultRecoveryResetFrames = 120;
 constexpr uint32_t kLogicalWidth = 400;
 uint32_t sOutputWidth = 400;
+size_t sTextureCacheCapacity = 256;
 bool sResolvedNewModel = false;
 bool sUseIntermediatePresentation = false;
 mk64_3ds::AdaptivePresentationState sAdaptivePresentation;
@@ -50,6 +54,12 @@ uint64_t sPreviousPresentationDuration = 0;
 size_t sLastObservedResourceCount = 0;
 uint64_t sLastObservedTextureUploadCount = 0;
 uint64_t sLastObservedTextureUploadBytes = 0;
+uint64_t sLastPerformanceDrawCalls = 0;
+uint64_t sLastPerformanceTriangles = 0;
+uint64_t sLastPerformanceTextureUploads = 0;
+uint64_t sLastPerformanceTextureBytes = 0;
+uint64_t sLastPerformanceVertexBytes = 0;
+uint64_t sLastPerformanceSampleFrame = 0;
 
 constexpr uint32_t kAudioFramesPerGameTick = 896;
 // The audio worker schedules at two ticks or less and adds one tick. Treat one
@@ -60,14 +70,26 @@ constexpr uint32_t kAudioLowWaterFrames = kAudioFramesPerGameTick;
 constexpr uint32_t kAudioRecoveryFrames = kAudioFramesPerGameTick * 3 / 2;
 // libctru documents osGetTime() in milliseconds.
 // A midpoint is expendable as soon as a 30 Hz tick misses by more than a
-// small scheduling margin. Recover only after the policy observes eight
-// healthy ticks, keeping race-start upload bursts from repeatedly flapping it.
-constexpr uint64_t kSlowTickMilliseconds = 36;
+// small scheduling margin. Recovery requires sustained headroom and a bounded
+// probe, keeping race-start upload bursts from repeatedly flapping the mode.
+constexpr uint64_t kSlowTickMilliseconds = 34;
+constexpr uint64_t kMidpointHeadroomMilliseconds = 18;
 constexpr uint64_t kHeavyTextureUploadBytes = 64u * 1024u;
 constexpr uint64_t kHeavyTextureUploadCount = 2;
 constexpr float kBusyProcessingMilliseconds = 13.0f;
 constexpr float kBusyDrawingMilliseconds = 14.0f;
 constexpr float kBusyCommandBufferUsage = 0.85f;
+constexpr uint64_t kPerformanceSampleFrames = 120;
+constexpr size_t kTextureCacheRecoveryFloor = 128;
+constexpr size_t kTextureCacheRecoveryStep = 64;
+
+uint32_t PositiveHundredths(float value) {
+    return value <= 0.0f ? 0U : static_cast<uint32_t>(std::lround(value * 100.0f));
+}
+
+uint32_t PositiveTenths(float value) {
+    return value <= 0.0f ? 0U : static_cast<uint32_t>(std::lround(value * 10.0f));
+}
 
 uint32_t GetViewportWidth() {
     return Mk64Settings3DSGetAspectRatio() == MK64_ASPECT_RATIO_3DS_ORIGINAL
@@ -133,17 +155,67 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
     inputs.audioBufferedFrames = Mk64Audio3DSBufferedFrames();
     inputs.audioLowWaterFrames = kAudioLowWaterFrames;
     inputs.audioRecoveryFrames = kAudioRecoveryFrames;
+    // A key frame that already consumes more than roughly one 60 Hz interval
+    // cannot afford a second display-list pass inside the 30 Hz simulation
+    // budget. FrameEnd timing is included deliberately because it exposes a
+    // missed VBlank just as clearly as CPU-side display-list work.
+    inputs.keyframeHeadroom = sPreviousPresentationDuration != 0 &&
+                              sPreviousPresentationDuration <= kMidpointHeadroomMilliseconds;
     inputs.previousTickSlow = previousTickSlow;
     inputs.resourceActivity = resourceDelta != 0;
     inputs.textureUploadActivity = uploadActivity;
     inputs.citro3DBusy = citro3DBusy;
     return mk64_3ds::UpdateAdaptivePresentation(&sAdaptivePresentation, inputs).renderMidpoint;
 }
+
+void LogPerformanceSample() {
+    if (sRenderer == nullptr || sFrameCounter == 0 ||
+        sFrameCounter - sLastPerformanceSampleFrame < kPerformanceSampleFrames) {
+        return;
+    }
+    const uint64_t drawCalls = sRenderer->GetDrawCallCount();
+    const uint64_t triangles = sRenderer->GetTriangleCount();
+    const uint64_t textureUploads = sRenderer->GetTextureCacheUploadCount();
+    const uint64_t textureBytes = sRenderer->GetTextureCacheUploadBytes();
+    const uint64_t vertexBytes = sRenderer->GetVertexUploadBytes();
+    Mk64Diagnostics3DSPerformance(
+        static_cast<uint32_t>(sFrameCounter),
+        PositiveTenths(sRenderer->GetPresentedFps2Seconds()),
+        PositiveTenths(sRenderer->GetPresentedFps10Seconds()),
+        static_cast<uint32_t>(drawCalls - sLastPerformanceDrawCalls),
+        static_cast<uint32_t>(triangles - sLastPerformanceTriangles),
+        static_cast<uint32_t>(textureUploads - sLastPerformanceTextureUploads),
+        static_cast<uint32_t>((textureBytes - sLastPerformanceTextureBytes) / 1024U),
+        static_cast<uint32_t>((vertexBytes - sLastPerformanceVertexBytes) / 1024U),
+        Mk64Resource3DSLoadedCount(), PositiveHundredths(C3D_GetProcessingTime()),
+        PositiveHundredths(C3D_GetDrawingTime()),
+        static_cast<uint32_t>(std::lround(std::max(0.0f, C3D_GetCmdBufUsage()) * 1000.0f)));
+    sLastPerformanceDrawCalls = drawCalls;
+    sLastPerformanceTriangles = triangles;
+    sLastPerformanceTextureUploads = textureUploads;
+    sLastPerformanceTextureBytes = textureBytes;
+    sLastPerformanceVertexBytes = vertexBytes;
+    sLastPerformanceSampleFrame = sFrameCounter;
+}
 }
 
-void SetRendererFault(const char* stage, const char* reason) {
+void SetRendererFault(const char* stage, const char* reason, bool frameStateRecovered) {
     ++sRendererFaultCounter;
-    sRendererFaulted = true;
+    sRendererHealthyFrameCounter = 0;
+    sRendererFaulted = !frameStateRecovered;
+    if (frameStateRecovered) {
+        sTextureCacheCapacity = std::max(kTextureCacheRecoveryFloor,
+                                         sTextureCacheCapacity > kTextureCacheRecoveryStep
+                                             ? sTextureCacheCapacity - kTextureCacheRecoveryStep
+                                             : kTextureCacheRecoveryFloor);
+        if (sUseIntermediatePresentation) {
+            sUseIntermediatePresentation = false;
+            Mk64FrameInterpolation3DSSetEnabled(false);
+        }
+    }
+    sAdaptivePresentation = {};
+    sAdaptivePresentation.cooldownTicks =
+        mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks;
     size_t textureSlots = 0;
     size_t initializedTextures = 0;
     size_t textureBytes = 0;
@@ -153,10 +225,16 @@ void SetRendererFault(const char* stage, const char* reason) {
         sRenderer->GetDebugStats(&textureSlots, &initializedTextures, &textureBytes,
                                  &shaderPrograms, &clipScratchBytes);
     }
-    Mk64Diagnostics3DSMemory(stage, Mk64Resource3DSLoadedCount(), textureSlots, initializedTextures,
-                             textureBytes, shaderPrograms, clipScratchBytes);
-    Mk64Diagnostics3DSFailure(stage, reason);
-    if (sRendererFaultCounter > kRendererFaultTolerance) {
+    // A recovered allocation failure costs one dropped presentation. Persist
+    // the first event and the terminal event without forcing an SD flush for
+    // every retry while the renderer is trying to recover its memory budget.
+    if (sRendererFaultCounter == 1 || sRendererFaulted) {
+        Mk64Diagnostics3DSMemory(stage, Mk64Resource3DSLoadedCount(), textureSlots,
+                                 initializedTextures, textureBytes, shaderPrograms,
+                                 clipScratchBytes);
+        Mk64Diagnostics3DSFailure(stage, reason);
+    }
+    if (sRendererFaulted) {
         Mk64Diagnostics3DSSetStage("renderer-fault-limit-reached");
     }
 }
@@ -168,6 +246,7 @@ extern "C" bool Mk64Graphics3DSInit() {
 
     sFrameCounter = 0;
     sRendererFaultCounter = 0;
+    sRendererHealthyFrameCounter = 0;
     sRendererFaulted = false;
     sHasPresentedTopFrame = false;
     sAdaptivePresentation = {};
@@ -176,6 +255,12 @@ extern "C" bool Mk64Graphics3DSInit() {
     sLastObservedResourceCount = Mk64Resource3DSLoadedCount();
     sLastObservedTextureUploadCount = 0;
     sLastObservedTextureUploadBytes = 0;
+    sLastPerformanceDrawCalls = 0;
+    sLastPerformanceTriangles = 0;
+    sLastPerformanceTextureUploads = 0;
+    sLastPerformanceTextureBytes = 0;
+    sLastPerformanceVertexBytes = 0;
+    sLastPerformanceSampleFrame = 0;
     // Diagnostics resolves the hardware model once during process startup.
     // Every graphics component consumes this same conservative answer so a
     // failed APT query cannot produce mismatched target sizes/frame rates.
@@ -190,6 +275,7 @@ extern "C" bool Mk64Graphics3DSInit() {
         sOutputWidth = 400;
     }
     sUseIntermediatePresentation = sResolvedNewModel && sOutputWidth == 400;
+    sTextureCacheCapacity = sResolvedNewModel && sOutputWidth == 400 ? 384U : 256U;
     Mk64FrameInterpolation3DSSetEnabled(sUseIntermediatePresentation);
     sUseIntermediatePresentation = sUseIntermediatePresentation &&
                                    Mk64FrameInterpolation3DSIsEnabled();
@@ -206,6 +292,11 @@ extern "C" bool Mk64Graphics3DSInit() {
     sInterpreter->mInterpolationIndex = 1;
     sInterpreter->mInterpolationIndexTarget = 1;
     sInterpreter->mInterpolationT = 1.0f;
+    // TextureCacheClear recycles every live renderer ID. Reserve its complete
+    // bounded profile capacity now so an out-of-memory recovery never needs to
+    // grow this vector while the ordinary heap is already under pressure.
+    sInterpreter->mTextureCache.free_texture_ids.reserve(
+        Mk64Graphics3DSTextureCacheCapacity());
     // Wide mode is a 2x horizontal-density output, not an 800-unit gameplay
     // canvas. Fast3D must retain its 400x240 logical aspect and coordinates;
     // the Citro3D backend scales the top-target viewport/scissor to 800.
@@ -221,6 +312,11 @@ extern "C" bool Mk64Graphics3DSInit() {
     }
     sLastObservedTextureUploadCount = sRenderer->GetTextureCacheUploadCount();
     sLastObservedTextureUploadBytes = sRenderer->GetTextureCacheUploadBytes();
+    sLastPerformanceDrawCalls = sRenderer->GetDrawCallCount();
+    sLastPerformanceTriangles = sRenderer->GetTriangleCount();
+    sLastPerformanceTextureUploads = sRenderer->GetTextureCacheUploadCount();
+    sLastPerformanceTextureBytes = sRenderer->GetTextureCacheUploadBytes();
+    sLastPerformanceVertexBytes = sRenderer->GetVertexUploadBytes();
     // Desktop builds receive this rectangle from the ImGui viewport. The 3DS
     // runtime has no desktop UI, so bind the game viewport to the top LCD.
     UpdateGameViewport();
@@ -237,7 +333,10 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sRenderer.reset();
     sWindow.reset();
     Mk64FrameInterpolation3DSSetEnabled(false);
+    sRendererFaultCounter = 0;
+    sRendererHealthyFrameCounter = 0;
     sOutputWidth = 400;
+    sTextureCacheCapacity = 256;
     sResolvedNewModel = false;
     sUseIntermediatePresentation = false;
     sHasPresentedTopFrame = false;
@@ -247,6 +346,12 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sLastObservedResourceCount = 0;
     sLastObservedTextureUploadCount = 0;
     sLastObservedTextureUploadBytes = 0;
+    sLastPerformanceDrawCalls = 0;
+    sLastPerformanceTriangles = 0;
+    sLastPerformanceTextureUploads = 0;
+    sLastPerformanceTextureBytes = 0;
+    sLastPerformanceVertexBytes = 0;
+    sLastPerformanceSampleFrame = 0;
 }
 
 extern "C" void Graphics_PushFrame(Gfx* commands) {
@@ -285,9 +390,9 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     const bool renderIntermediate = sUseIntermediatePresentation &&
                                     ShouldRenderIntermediatePresentation(presentationStart);
     SetRendererStage("renderer-prepare");
+    bool didPresentIntermediate = false;
     try {
         UpdateGameViewport();
-        bool didPresentIntermediate = false;
         if (renderIntermediate) {
             // A midpoint is optional. Under CPU/GPU, resource-upload or audio
             // pressure, skip the entire extra presentation instead of paying
@@ -329,28 +434,77 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         SetRendererStage("renderer-end-frame");
         sInterpreter->EndFrame();
         sHasPresentedTopFrame = true;
-    } catch (const std::exception& exception) {
-        // Leave Citro3D in a closed state even if Fast3D rejects a malformed
-        // command or runs out of memory. The diagnostic thread and runtime log
-        // remain usable instead of terminating through std::terminate.
+    } catch (const std::bad_alloc& exception) {
+        // A full animated-texture working set used to fragment the ordinary
+        // heap while rotating map/list nodes. Close the Citro3D frame, release
+        // cache ownership, and retry on the next 30 Hz keyframe. One allocation
+        // failure must not permanently freeze rendering or send the title HOME.
         Mk64FrameInterpolation3DSClearPrepared();
-        SetRendererFault("renderer-exception", exception.what());
         sRenderer->EndFrame();
+        // Flush can throw from the backend before clearing Fast3D's pending
+        // batch. Discard it explicitly, and force both retained RDP texture
+        // slots to import again after the cache nodes are released.
+        sInterpreter->mBufVboLen = 0;
+        sInterpreter->mBufVboNumTris = 0;
+        sInterpreter->mRdp->textures_changed[0] = true;
+        sInterpreter->mRdp->textures_changed[1] = true;
+        bool cacheReleased = false;
+        try {
+            // ReleaseTextureAllocations first waits for the submitted frame.
+            // Keep the Fast3D owners alive until that synchronization completes
+            // because pending texture uploads can still reference their bytes.
+            sRenderer->ReleaseTextureAllocations();
+            sInterpreter->TextureCacheClear();
+            cacheReleased = true;
+        } catch (...) {
+        }
+        Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
+        SetRendererFault("renderer-memory-pressure", exception.what(), cacheReleased);
+        sPreviousPresentationDuration = osGetTime() - presentationStart;
+        return;
+    } catch (const std::exception& exception) {
+        // Leave Citro3D in a closed state if Fast3D rejects a malformed
+        // command. Unlike the explicitly repaired allocation path above, an
+        // arbitrary exception fails closed rather than reusing unknown state.
+        Mk64FrameInterpolation3DSClearPrepared();
+        sRenderer->EndFrame();
+        Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
+        SetRendererFault("renderer-exception", exception.what(), false);
         sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     } catch (...) {
         Mk64FrameInterpolation3DSClearPrepared();
         sRenderer->EndFrame();
-        SetRendererFault("renderer-exception", "unknown C++ exception");
+        Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
+        SetRendererFault("renderer-exception", "unknown C++ exception", false);
         sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     }
+    if (renderIntermediate && !didPresentIntermediate) {
+        // Do not count unavailable interpolation state as a successful probe.
+        // Wait for a fresh sustained-headroom window before trying it again.
+        sAdaptivePresentation = {};
+        sAdaptivePresentation.cooldownTicks =
+            mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks;
+    }
+    if (sRendererFaultCounter != 0 &&
+        ++sRendererHealthyFrameCounter >= kRendererFaultRecoveryResetFrames) {
+        sRendererFaultCounter = 0;
+        sRendererHealthyFrameCounter = 0;
+    }
+    LogPerformanceSample();
     sPreviousPresentationDuration = osGetTime() - presentationStart;
     SetRendererStage("renderer-frame-presented");
 }
 
 extern "C" void GameEngine_ProcessGfxCommands(Gfx* commands) {
     Graphics_PushFrame(commands);
+}
+
+extern "C" void Mk64Graphics3DSEvictSourceTexture(const void* address) {
+    if (address != nullptr && sInterpreter != nullptr) {
+        sInterpreter->TextureCacheDelete(static_cast<const uint8_t*>(address));
+    }
 }
 
 extern "C" bool WindowIsRunning() {
@@ -420,7 +574,20 @@ extern "C" Mk64PerformanceProfile3DS Mk64Graphics3DSResolvedPerformanceProfile()
                              : MK64_PERFORMANCE_PROFILE_OLD_3DS;
 }
 extern "C" uint32_t Mk64Graphics3DSBottomHudRefreshDivisor() {
-    return Mk64Graphics3DSResolvedPerformanceProfile() == MK64_PERFORMANCE_PROFILE_OLD_3DS ? 3U : 1U;
+    // Menu/modal redraws remain immediate. Race HUD work stays at 10 Hz on
+    // Old hardware, in 800 px mode, and while New-400 is pressured, probing,
+    // or cooling down. Restore 15 Hz only after sustained midpoint headroom;
+    // any pressure clears that state immediately and preserves HUD updates.
+    if (!sResolvedNewModel || sOutputWidth != 400 || !sAdaptivePresentation.midpointEnabled) {
+        return 3U;
+    }
+    return 2U;
+}
+extern "C" size_t Mk64Graphics3DSTextureCacheCapacity() {
+    // Old 3DS keeps the proven E4 footprint. New 3DS at 400 px spends its
+    // additional CPU budget on a larger animated-kart working set; 800 px mode
+    // retains the smaller cache to leave linear memory for the wider target.
+    return sTextureCacheCapacity;
 }
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth() {
     return sOutputWidth;
