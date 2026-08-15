@@ -21,7 +21,13 @@ https://discord.gg/SMW49UMkw
 
 ## Features
 
-- Native 400x240 gameplay.
+- Native 400x240 gameplay and an optional 800x240 high-density top-screen
+  mode.
+- Hardware-aware Old 3DS and New 3DS resource, HUD, audio, and presentation
+  profiles.
+- Original 30 Hz game simulation on every model. New 3DS systems in 400-pixel
+  mode may add an adaptive matrix-interpolated midpoint presentation only
+  after sustained frame-time headroom; this is not a fixed-FPS claim.
 - Press `SELECT` at any time to create a diagnostic dump for bug reports.
 - Wide 5:3 and Original 4:3 display modes.
 - Dual-screen interface

@@ -4,7 +4,10 @@
 
 namespace mk64_3ds {
 
-constexpr std::uint8_t kAdaptivePresentationHealthyTicksToEnable = 8;
+constexpr std::uint8_t kAdaptivePresentationHealthyTicksToEnable = 45;
+constexpr std::uint8_t kAdaptivePresentationProbeTicksToEnable = 8;
+constexpr std::uint8_t kAdaptivePresentationPressureCooldownTicks = 15;
+constexpr std::uint8_t kAdaptivePresentationFailedProbeCooldownTicks = 60;
 
 enum AdaptivePresentationPressure : std::uint32_t {
     AdaptivePressureNone = 0,
@@ -22,6 +25,7 @@ struct AdaptivePresentationInputs {
     std::uint32_t audioBufferedFrames = 0;
     std::uint32_t audioLowWaterFrames = 0;
     std::uint32_t audioRecoveryFrames = 0;
+    bool keyframeHeadroom = false;
     bool previousTickSlow = false;
     bool resourceActivity = false;
     bool textureUploadActivity = false;
@@ -31,6 +35,8 @@ struct AdaptivePresentationInputs {
 struct AdaptivePresentationState {
     bool midpointEnabled = false;
     std::uint8_t healthyRecoveryTicks = 0;
+    std::uint8_t midpointProbeTicks = 0;
+    std::uint8_t cooldownTicks = 0;
 };
 
 struct AdaptivePresentationDecision {
@@ -39,9 +45,10 @@ struct AdaptivePresentationDecision {
     std::uint8_t healthyRecoveryTicks = 0;
 };
 
-// A midpoint is optional; the following keyframe is not. Disable immediately
-// on pressure, then require several ticks with a higher audio margin before
-// spending CPU/GPU time on interpolating and decoding a second display list.
+// A midpoint is optional; the following keyframe is not. Require sustained
+// keyframe headroom, then validate several midpoints before committing to the
+// optional midpoint path. A failed validation gets a longer cooldown to avoid
+// oscillating between an expensive probe and an overloaded keyframe.
 inline AdaptivePresentationDecision UpdateAdaptivePresentation(
     AdaptivePresentationState* state, const AdaptivePresentationInputs& inputs) {
     AdaptivePresentationDecision decision = {};
@@ -68,9 +75,27 @@ inline AdaptivePresentationDecision UpdateAdaptivePresentation(
         decision.pressureMask |= AdaptivePressureCitro3DBusy;
     }
 
-    if (decision.pressureMask != AdaptivePressureNone) {
+    const bool lacksRecoveryMargin = inputs.audioBufferedFrames < inputs.audioRecoveryFrames;
+    if (decision.pressureMask != AdaptivePressureNone || lacksRecoveryMargin) {
+        const bool failedMidpoint = state->midpointEnabled || state->midpointProbeTicks != 0;
         state->midpointEnabled = false;
         state->healthyRecoveryTicks = 0;
+        state->midpointProbeTicks = 0;
+        if (failedMidpoint) {
+            state->cooldownTicks = kAdaptivePresentationFailedProbeCooldownTicks;
+        } else if (decision.pressureMask != AdaptivePressureNone &&
+                   state->cooldownTicks < kAdaptivePresentationPressureCooldownTicks) {
+            state->cooldownTicks = kAdaptivePresentationPressureCooldownTicks;
+        }
+        if (lacksRecoveryMargin && decision.pressureMask == AdaptivePressureNone) {
+            decision.pressureMask = AdaptivePressureRecovery;
+        }
+        return decision;
+    }
+
+    if (state->cooldownTicks != 0) {
+        --state->cooldownTicks;
+        decision.pressureMask = AdaptivePressureRecovery;
         return decision;
     }
 
@@ -80,7 +105,23 @@ inline AdaptivePresentationDecision UpdateAdaptivePresentation(
         return decision;
     }
 
-    if (inputs.audioBufferedFrames < inputs.audioRecoveryFrames) {
+    if (state->midpointProbeTicks != 0) {
+        if (state->midpointProbeTicks < kAdaptivePresentationProbeTicksToEnable) {
+            ++state->midpointProbeTicks;
+        }
+        decision.renderMidpoint = true;
+        if (state->midpointProbeTicks >= kAdaptivePresentationProbeTicksToEnable) {
+            state->midpointEnabled = true;
+            state->midpointProbeTicks = 0;
+        }
+        decision.healthyRecoveryTicks = state->healthyRecoveryTicks;
+        return decision;
+    }
+
+    // Meeting the 30 Hz deadline is not enough evidence that a second display
+    // list will fit before the next required keyframe. Only keyframe-only
+    // samples with a measured midpoint-sized margin may build recovery credit.
+    if (!inputs.keyframeHeadroom) {
         state->healthyRecoveryTicks = 0;
         decision.pressureMask = AdaptivePressureRecovery;
         return decision;
@@ -90,7 +131,7 @@ inline AdaptivePresentationDecision UpdateAdaptivePresentation(
         ++state->healthyRecoveryTicks;
     }
     if (state->healthyRecoveryTicks >= kAdaptivePresentationHealthyTicksToEnable) {
-        state->midpointEnabled = true;
+        state->midpointProbeTicks = 1;
         decision.renderMidpoint = true;
     } else {
         decision.pressureMask = AdaptivePressureRecovery;

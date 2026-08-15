@@ -24,6 +24,7 @@ typedef struct Mk64DiagnosticsInput3DS {
 bool Mk64Diagnostics3DSStart(void);
 void Mk64Diagnostics3DSStop(void);
 void Mk64Diagnostics3DSAbortForProcessExit(void);
+void Mk64Diagnostics3DSEmergency(const char* reason);
 bool Mk64Diagnostics3DSOwnsHid(void);
 bool Mk64Diagnostics3DSIsPaused(void);
 bool Mk64Diagnostics3DSServiceDumpIfRequested(void);
@@ -58,6 +59,12 @@ void Mk64Diagnostics3DSAudioPump(uint32_t pumpCalls, uint32_t synthesisBlocks,
 void Mk64Diagnostics3DSAudioState(uint32_t resetStatus, uint32_t resetPreset,
                                   uint32_t sequenceCount, uint32_t activePlayers,
                                   uint32_t activeNotes, uint32_t audioErrors);
+void Mk64Diagnostics3DSPerformance(uint32_t frame, uint32_t fps2Tenths,
+                                   uint32_t fps10Tenths, uint32_t drawCalls,
+                                   uint32_t triangles, uint32_t textureUploads,
+                                   uint32_t textureKilobytes, uint32_t vertexKilobytes,
+                                   size_t loadedResources, uint32_t processingHundredths,
+                                   uint32_t drawingHundredths, uint32_t commandPermille);
 void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResources, size_t textureSlots,
                               size_t initializedTextures, size_t textureBytes,
                               size_t shaderPrograms, size_t clipScratchBytes);

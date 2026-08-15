@@ -13,6 +13,8 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
+#include <new>
 
 extern "C" {
 extern int32_t gMenuSelection;
@@ -30,18 +32,34 @@ extern "C" {
 // and reduced the heap available to the first-run installer on Old 3DS.
 uint32_t __stacksize__ = 1 * 1024 * 1024;
 
-// libctru otherwise reserves 32 MiB for the linear heap and only 24 MiB for
-// ordinary allocations in the 64 MiB application region. Hardware dumps have
-// reached roughly 17.3 MiB of linear use as resource caches fill, while both
-// Torch and the game approach the ordinary-heap ceiling. A conservative 28 MiB
-// linear reservation keeps more than 10 MiB of observed headroom and returns
-// 4 MiB to the fragmentation-prone C/C++ heap.
-uint32_t __ctru_linear_heap_size = 28 * 1024 * 1024;
+// E4 hardware evidence captured std::bad_alloc with roughly 14.5 MiB still
+// free in the linear heap but only 1.8 MiB, badly fragmented, in the ordinary
+// C/C++ heap. The 24 MiB reservation still leaves several MiB above the E4
+// linear working set, including the larger New 3DS texture-cache profile,
+// while returning another 4 MiB to strings, maps and other ordinary objects.
+uint32_t __ctru_linear_heap_size = 24 * 1024 * 1024;
 }
 
 namespace {
 constexpr int32_t kLogoIntroMenu = 8;
 constexpr uint64_t kSimulationRate = 30;
+
+[[noreturn]] void TerminateHandler() noexcept {
+    const char* reason = "std::terminate without an active exception";
+    if (std::current_exception() != nullptr) {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::bad_alloc&) {
+            reason = "uncaught std::bad_alloc";
+        } catch (const std::exception& exception) {
+            reason = exception.what();
+        } catch (...) {
+            reason = "uncaught non-standard C++ exception";
+        }
+    }
+    Mk64Diagnostics3DSEmergency(reason);
+    std::_Exit(1);
+}
 
 [[noreturn]] void ExitWithError(const char* message) {
     gfxInitDefault();
@@ -58,6 +76,7 @@ constexpr uint64_t kSimulationRate = 30;
 }
 
 int main() {
+    std::set_terminate(TerminateHandler);
     Mk64Diagnostics3DSStart();
     Mk64Diagnostics3DSCheckpoint("game-data-init");
     const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
@@ -190,6 +209,7 @@ int main() {
     // and diagnostics workers while NDSP/HID and their stacks are still mapped,
     // then keep the immediate exit that avoids GPU/resource teardown after
     // Citro3D has disabled its VBlank callbacks during the APT transition.
+    Mk64Diagnostics3DSCheckpoint("game-loop-exit-requested");
     Mk64GameAudio3DSShutdown();
     Mk64Diagnostics3DSStop();
     std::_Exit(0);

@@ -17,7 +17,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -33,6 +32,7 @@ extern "C" void Mk64Diagnostics3DSSetArchiveEntryCount(size_t) MK64_OPTIONAL_SYM
 extern "C" void Mk64Diagnostics3DSFailure(const char*, const char*) MK64_OPTIONAL_SYMBOL;
 extern "C" void AudioDma_Register(const void* base, size_t size) MK64_OPTIONAL_SYMBOL;
 extern "C" void AudioDma_Clear(void) MK64_OPTIONAL_SYMBOL;
+extern "C" void Mk64Graphics3DSEvictSourceTexture(const void*) MK64_OPTIONAL_SYMBOL;
 
 namespace {
 
@@ -211,12 +211,13 @@ class Reader final {
         return true;
     }
 
-    bool ReadString(std::string* value) {
+    bool ReadStringView(std::string_view* value) {
         int32_t count = 0;
         if (value == nullptr || !ReadS32(&count) || count < 0 || !CanRead(static_cast<size_t>(count))) {
             return false;
         }
-        value->assign(reinterpret_cast<const char*>(mBytes.data() + mOffset), static_cast<size_t>(count));
+        *value = std::string_view(reinterpret_cast<const char*>(mBytes.data() + mOffset),
+                                  static_cast<size_t>(count));
         mOffset += static_cast<size_t>(count);
         return true;
     }
@@ -226,10 +227,17 @@ class Reader final {
     size_t mOffset;
 };
 
+struct CrcEntry;
+
 struct LoadedResource {
     ~LoadedResource() {
-        for (void* allocation : allocations) {
-            linearFree(allocation);
+        for (size_t i = 0; i < inlineAllocationCount; ++i) {
+            linearFree(inlineAllocations[i]);
+        }
+        if (extraAllocations != nullptr) {
+            for (void* allocation : *extraAllocations) {
+                linearFree(allocation);
+            }
         }
     }
 
@@ -240,12 +248,20 @@ struct LoadedResource {
         const size_t byteCount = sizeof(T) * count;
         void* bytes = linearAlloc(byteCount);
         if (bytes == nullptr) {
-            return nullptr;
+            throw std::bad_alloc();
         }
         std::memset(bytes, 0, byteCount);
         T* result = reinterpret_cast<T*>(bytes);
         try {
-            allocations.emplace_back(bytes);
+            if (inlineAllocationCount < inlineAllocations.size()) {
+                inlineAllocations[inlineAllocationCount++] = bytes;
+            } else {
+                if (extraAllocations == nullptr) {
+                    extraAllocations = std::make_unique<std::vector<void*>>();
+                    extraAllocations->reserve(8);
+                }
+                extraAllocations->emplace_back(bytes);
+            }
         } catch (...) {
             linearFree(bytes);
             throw;
@@ -260,23 +276,39 @@ struct LoadedResource {
     uint16_t textureWidth = 0;
     uint16_t textureHeight = 0;
     uint32_t textureType = 0;
-    std::vector<void*> allocations;
+    size_t archiveIndex = SIZE_MAX;
+    CrcEntry* crcEntry = nullptr;
+    uint32_t textureOwners = 0;
+    bool evictWhenUnused = false;
+    bool streamWhenUnused = false;
+    // Nearly every graphics resource owns one linear block. Keep that pointer
+    // inline; only the small, permanently pinned sound graph needs overflow.
+    std::array<void*, 1> inlineAllocations = {};
+    uint8_t inlineAllocationCount = 0;
+    std::unique_ptr<std::vector<void*>> extraAllocations;
 };
 
 std::unique_ptr<mk64_3ds::O2rArchiveReader> sArchive;
 
 struct CrcEntry {
-    size_t archiveIndex = 0;
+    uint64_t crc = 0;
     LoadedResource* loaded = nullptr;
 };
 
-std::unordered_map<std::string, std::unique_ptr<LoadedResource>> sCache;
-std::unordered_map<uint64_t, CrcEntry> sCrcToEntry;
-std::unordered_map<uint8_t, std::string> sBanksById;
-std::unordered_map<uint8_t, std::string> sSequencesById;
+std::vector<std::unique_ptr<LoadedResource>> sLoadedResources;
+std::vector<CrcEntry> sCrcEntries;
+std::vector<uint32_t> sCrcSlots;
+size_t sLoadedResourceCount = 0;
+std::array<size_t, UINT8_MAX + 1U> sBanksById = {};
+std::array<size_t, UINT8_MAX + 1U> sSequencesById = {};
 std::array<CtlEntry*, UINT8_MAX + 1U> sPinnedBanks = {};
 std::array<AudioSequenceData*, UINT8_MAX + 1U> sPinnedSequences = {};
 uint32_t sPinnedSequenceCount = 0;
+std::vector<uint8_t> sReadScratch;
+bool sReadScratchInUse = false;
+uint32_t sRuntimeGeneration = 0;
+
+constexpr size_t kReadScratchLimit = 256U * 1024U;
 
 LoadedResource* LoadByPath(std::string_view path);
 
@@ -528,8 +560,8 @@ bool ParseEnvelope(Reader& reader, LoadedResource& resource, AdsrEnvelope** enve
 }
 
 bool ParseBankSound(Reader& reader, LoadedResource& resource, AudioBankSound* sound) {
-    std::string sampleName;
-    if (sound == nullptr || !reader.ReadString(&sampleName)) {
+    std::string_view sampleName;
+    if (sound == nullptr || !reader.ReadStringView(&sampleName)) {
         return false;
     }
     LoadedResource* sample = LoadByPath(sampleName);
@@ -617,8 +649,8 @@ bool ParseSequence(Reader& reader, LoadedResource& resource) {
         return false;
     }
     for (uint32_t i = 0; i < bankCount; ++i) {
-        std::string bankName;
-        if (!reader.ReadString(&bankName)) {
+        std::string_view bankName;
+        if (!reader.ReadStringView(&bankName)) {
             return false;
         }
         LoadedResource* bankResource = LoadByPath(bankName);
@@ -693,91 +725,247 @@ bool ParseResource(const std::vector<uint8_t>& bytes, LoadedResource& resource) 
     }
 }
 
-LoadedResource* LoadResolvedPath(std::string_view path, size_t archiveIndex,
-                                 CrcEntry* crcEntry) {
-    if (sArchive == nullptr || path.empty()) {
+size_t CrcSlot(uint64_t crc) {
+    const uint32_t folded = static_cast<uint32_t>(crc) ^ static_cast<uint32_t>(crc >> 32U);
+    return static_cast<size_t>(folded) & (sCrcSlots.size() - 1U);
+}
+
+size_t CrcEntryArchiveIndex(const CrcEntry* entry) {
+    return entry == nullptr ? SIZE_MAX : static_cast<size_t>(entry - sCrcEntries.data());
+}
+
+CrcEntry* FindCrcEntry(uint64_t crc) {
+    if (sCrcSlots.empty()) {
+        return nullptr;
+    }
+    size_t slot = CrcSlot(crc);
+    for (size_t probe = 0; probe < sCrcSlots.size(); ++probe) {
+        const uint32_t encodedIndex = sCrcSlots[slot];
+        if (encodedIndex == 0) {
+            return nullptr;
+        }
+        CrcEntry& entry = sCrcEntries[encodedIndex - 1U];
+        if (entry.crc == crc) {
+            return &entry;
+        }
+        slot = (slot + 1U) & (sCrcSlots.size() - 1U);
+    }
+    return nullptr;
+}
+
+CrcEntry* FindCrcEntry(std::string_view path) {
+    if (sArchive == nullptr || path.empty() || sCrcSlots.empty()) {
+        return nullptr;
+    }
+    const uint64_t crc = PathCrc(path);
+    size_t slot = CrcSlot(crc);
+    for (size_t probe = 0; probe < sCrcSlots.size(); ++probe) {
+        const uint32_t encodedIndex = sCrcSlots[slot];
+        if (encodedIndex == 0) {
+            return nullptr;
+        }
+        CrcEntry& entry = sCrcEntries[encodedIndex - 1U];
+        const size_t archiveIndex = encodedIndex - 1U;
+        if (entry.crc == crc && archiveIndex < sArchive->Entries().size() &&
+            std::string_view(sArchive->Entries()[archiveIndex]) == path) {
+            return &entry;
+        }
+        slot = (slot + 1U) & (sCrcSlots.size() - 1U);
+    }
+    return nullptr;
+}
+
+bool IsSoundPath(std::string_view path) {
+    return path.rfind("sound/", 0) == 0;
+}
+
+bool IsStreamingTexturePath(std::string_view path) {
+    return path.rfind("textures/karts/", 0) == 0;
+}
+
+class SerializedReadLease {
+  public:
+    SerializedReadLease(size_t archiveIndex, std::string_view path) {
+        if (sArchive == nullptr || sReadScratchInUse || IsSoundPath(path)) {
+            return;
+        }
+        size_t byteCount = 0;
+        if (sArchive->GetEntryUncompressedSizeByIndex(archiveIndex, &byteCount) !=
+                mk64_3ds::O2rReadResult::Ok ||
+            byteCount > kReadScratchLimit) {
+            return;
+        }
+        sReadScratchInUse = true;
+        mBytes = &sReadScratch;
+        mUsesScratch = true;
+    }
+
+    ~SerializedReadLease() {
+        if (mUsesScratch) {
+            sReadScratch.clear();
+            sReadScratchInUse = false;
+        }
+    }
+
+    std::vector<uint8_t>* Bytes() {
+        return mBytes;
+    }
+
+  private:
+    std::vector<uint8_t> mLocalBytes;
+    std::vector<uint8_t>* mBytes = &mLocalBytes;
+    bool mUsesScratch = false;
+};
+
+LoadedResource* LoadResolvedPath(size_t archiveIndex, CrcEntry* crcEntry) {
+    if (sArchive == nullptr || archiveIndex >= sArchive->Entries().size() ||
+        archiveIndex >= sLoadedResources.size()) {
         return nullptr;
     }
     if (crcEntry != nullptr && crcEntry->loaded != nullptr) {
         return crcEntry->loaded;
     }
-
-    try {
-    const std::string key(path);
-    if (const auto found = sCache.find(key); found != sCache.end()) {
+    if (sLoadedResources[archiveIndex] != nullptr) {
         if (crcEntry != nullptr) {
-            crcEntry->loaded = found->second.get();
+            crcEntry->loaded = sLoadedResources[archiveIndex].get();
         }
-        return found->second.get();
+        return sLoadedResources[archiveIndex].get();
     }
+
+    const std::string& path = sArchive->Entries()[archiveIndex];
     if (Mk64Diagnostics3DSSetResource != nullptr) {
-        Mk64Diagnostics3DSSetResource(key.c_str(), sCache.size());
+        Mk64Diagnostics3DSSetResource(path.c_str(), sLoadedResourceCount);
     }
-    std::vector<uint8_t> bytes;
-    try {
-        const mk64_3ds::O2rReadResult readResult = archiveIndex < sArchive->Entries().size()
-                                                         ? sArchive->ReadEntryByIndex(archiveIndex, &bytes)
-                                                         : sArchive->ReadEntry(path, &bytes);
-        if (readResult != mk64_3ds::O2rReadResult::Ok) {
-            return nullptr;
-        }
-    } catch (const std::bad_alloc&) {
+
+    SerializedReadLease readLease(archiveIndex, path);
+    if (sArchive->ReadEntryByIndex(archiveIndex, readLease.Bytes()) !=
+        mk64_3ds::O2rReadResult::Ok) {
         return nullptr;
     }
 
-    std::unique_ptr<LoadedResource> resource;
-    try {
-        resource = std::make_unique<LoadedResource>();
-        if (!ParseResource(bytes, *resource)) {
-            return nullptr;
-        }
-    } catch (const std::bad_alloc&) {
+    auto resource = std::make_unique<LoadedResource>();
+    resource->archiveIndex = archiveIndex;
+    resource->crcEntry = crcEntry;
+    resource->streamWhenUnused = IsStreamingTexturePath(path);
+    if (!ParseResource(*readLease.Bytes(), *resource)) {
         return nullptr;
     }
+
     LoadedResource* result = resource.get();
-    sCache.emplace(key, std::move(resource));
+    sLoadedResources[archiveIndex] = std::move(resource);
+    ++sLoadedResourceCount;
     if (crcEntry != nullptr) {
         crcEntry->loaded = result;
     }
     if (Mk64Diagnostics3DSSetResource != nullptr) {
-        Mk64Diagnostics3DSSetResource(key.c_str(), sCache.size());
+        Mk64Diagnostics3DSSetResource(path.c_str(), sLoadedResourceCount);
     }
     return result;
-    } catch (const std::bad_alloc&) {
-        return nullptr;
-    }
 }
 
 LoadedResource* LoadByPath(std::string_view path) {
-    if (sArchive == nullptr || path.empty()) {
-        return nullptr;
-    }
-    if (const auto found = sCrcToEntry.find(PathCrc(path)); found != sCrcToEntry.end() &&
-        found->second.archiveIndex < sArchive->Entries().size() &&
-        std::string_view(sArchive->Entries()[found->second.archiveIndex]) == path) {
-        return LoadResolvedPath(path, found->second.archiveIndex, &found->second);
-    }
-    // Preserve the name-based API as a collision-safe fallback for paths that
-    // are not represented by the CRC index.
-    return LoadResolvedPath(path, SIZE_MAX, nullptr);
+    CrcEntry* entry = FindCrcEntry(path);
+    return entry == nullptr ? nullptr : LoadResolvedPath(CrcEntryArchiveIndex(entry), entry);
 }
 
 LoadedResource* LoadByCrc(uint64_t crc) {
+    CrcEntry* entry = FindCrcEntry(crc);
+    return entry == nullptr ? nullptr : LoadResolvedPath(CrcEntryArchiveIndex(entry), entry);
+}
+
+template <typename Loader>
+Mk64ResourceLoadResult3DS ResolveResource(Loader&& loader, LoadedResource** outResource) noexcept {
+    if (outResource == nullptr) {
+        return MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
+    }
+    *outResource = nullptr;
+    try {
+        *outResource = loader();
+        return *outResource != nullptr ? MK64_RESOURCE_LOAD_OK_3DS
+                                       : MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
+    } catch (const std::bad_alloc&) {
+        return MK64_RESOURCE_LOAD_OUT_OF_MEMORY_3DS;
+    } catch (...) {
+        return MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
+    }
+}
+
+void RequestEviction(size_t archiveIndex) {
+    if (sArchive == nullptr || archiveIndex >= sLoadedResources.size()) {
+        return;
+    }
+    LoadedResource* resource = sLoadedResources[archiveIndex].get();
+    if (resource == nullptr || archiveIndex >= sArchive->Entries().size() ||
+        IsSoundPath(sArchive->Entries()[archiveIndex])) {
+        return;
+    }
+    resource->evictWhenUnused = true;
+    if (resource->crcEntry != nullptr && resource->crcEntry->loaded == resource) {
+        resource->crcEntry->loaded = nullptr;
+    }
+    if (resource->textureOwners != 0) {
+        return;
+    }
+    sLoadedResources[archiveIndex].reset();
+    --sLoadedResourceCount;
+}
+
+bool DirectoryContains(std::string_view directory, std::string_view path) {
+    if (directory.empty() || path.size() < directory.size() ||
+        path.substr(0, directory.size()) != directory) {
+        return false;
+    }
+    return directory.back() == '/' || path.size() == directory.size() ||
+           path[directory.size()] == '/';
+}
+
+void EvictDirectory(const char* name) {
     if (sArchive == nullptr) {
-        return nullptr;
+        return;
     }
-    const auto found = sCrcToEntry.find(crc);
-    if (found == sCrcToEntry.end() || found->second.archiveIndex >= sArchive->Entries().size()) {
-        return nullptr;
+    const std::string_view directory = NormalizePath(name);
+    if (directory.empty() || IsSoundPath(directory)) {
+        return;
     }
-    if (found->second.loaded != nullptr) {
-        return found->second.loaded;
+    for (size_t archiveIndex = 0; archiveIndex < sLoadedResources.size(); ++archiveIndex) {
+        if (sLoadedResources[archiveIndex] != nullptr &&
+            DirectoryContains(directory, sArchive->Entries()[archiveIndex])) {
+            LoadedResource* resource = sLoadedResources[archiveIndex].get();
+            if (resource->type == kTypeTexture && resource->pointer != nullptr &&
+                Mk64Graphics3DSEvictSourceTexture != nullptr) {
+                Mk64Graphics3DSEvictSourceTexture(resource->pointer);
+            }
+            RequestEviction(archiveIndex);
+        }
     }
-    LoadedResource* resource =
-        LoadResolvedPath(sArchive->Entries()[found->second.archiveIndex],
-                         found->second.archiveIndex, &found->second);
-    found->second.loaded = resource;
-    return resource;
+}
+
+uint64_t TextureLifetimeToken(size_t archiveIndex) {
+    if (archiveIndex >= UINT32_MAX || sRuntimeGeneration == 0) {
+        return 0;
+    }
+    return (static_cast<uint64_t>(sRuntimeGeneration) << 32U) |
+           static_cast<uint32_t>(archiveIndex + 1U);
+}
+
+bool FillTextureResult(LoadedResource* resource, Mk64TextureResource3DS* outTexture) {
+    if (outTexture == nullptr) {
+        return false;
+    }
+    *outTexture = {};
+    if (resource == nullptr || resource->type != kTypeTexture || resource->pointer == nullptr ||
+        resource->pointerSize == 0 || resource->textureWidth == 0 || resource->textureHeight == 0) {
+        return false;
+    }
+    outTexture->data = static_cast<const uint8_t*>(resource->pointer);
+    outTexture->size = resource->pointerSize;
+    outTexture->width = resource->textureWidth;
+    outTexture->height = resource->textureHeight;
+    outTexture->type = resource->textureType;
+    if (sArchive != nullptr && resource->archiveIndex < sArchive->Entries().size()) {
+        outTexture->canonicalName = sArchive->Entries()[resource->archiveIndex].c_str();
+    }
+    return true;
 }
 
 } // namespace
@@ -792,38 +980,68 @@ extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
         if (archive->Open() != mk64_3ds::O2rReadResult::Ok) {
             return false;
         }
-        sCrcToEntry.reserve(archive->Entries().size());
-        for (size_t i = 0; i < archive->Entries().size(); ++i) {
-            sCrcToEntry.emplace(PathCrc(archive->Entries()[i]), CrcEntry{ i, nullptr });
+        const size_t entryCount = archive->Entries().size();
+        if (entryCount > UINT32_MAX || entryCount > SIZE_MAX / 2U) {
+            return false;
+        }
+        size_t slotCount = 1;
+        while (slotCount < std::max<size_t>(2U, entryCount * 2U)) {
+            if (slotCount > SIZE_MAX / 2U) {
+                return false;
+            }
+            slotCount *= 2U;
+        }
+        sCrcEntries.resize(entryCount);
+        sCrcSlots.assign(slotCount, 0);
+        sLoadedResources.resize(entryCount);
+        for (size_t archiveIndex = 0; archiveIndex < entryCount; ++archiveIndex) {
+            CrcEntry& entry = sCrcEntries[archiveIndex];
+            entry.crc = PathCrc(archive->Entries()[archiveIndex]);
+            size_t slot = CrcSlot(entry.crc);
+            while (sCrcSlots[slot] != 0) {
+                slot = (slot + 1U) & (sCrcSlots.size() - 1U);
+            }
+            sCrcSlots[slot] = static_cast<uint32_t>(archiveIndex + 1U);
+        }
+        ++sRuntimeGeneration;
+        if (sRuntimeGeneration == 0) {
+            ++sRuntimeGeneration;
         }
         sArchive = std::move(archive);
+        if (!Mk64Resource3DSValidateCrcIndex()) {
+            throw std::runtime_error("compact CRC index did not preserve archive lookup parity");
+        }
         if (Mk64Diagnostics3DSSetArchiveEntryCount != nullptr) {
             Mk64Diagnostics3DSSetArchiveEntryCount(sArchive->Entries().size());
         }
 
-        std::vector<uint8_t> bytes;
-        for (size_t archiveIndex = 0; archiveIndex < sArchive->Entries().size(); ++archiveIndex) {
-            const std::string& entry = sArchive->Entries()[archiveIndex];
-            const bool isBank = entry.rfind("sound/banks/", 0) == 0;
-            const bool isSequence = entry.rfind("sound/sequences/", 0) == 0;
-            if ((!isBank && !isSequence) ||
-                sArchive->ReadEntryByIndex(archiveIndex, &bytes) != mk64_3ds::O2rReadResult::Ok ||
-                bytes.size() < kOtrHeaderSize + sizeof(uint32_t)) {
-                continue;
-            }
-            Reader header(bytes, 4);
-            Reader body(bytes, kOtrHeaderSize);
-            uint32_t type = 0;
-            uint32_t version = 0;
-            uint32_t id = 0;
-            if (!header.ReadU32(&type) || !header.ReadU32(&version) || version != 0 || !body.ReadU32(&id) ||
-                id > UINT8_MAX) {
-                continue;
-            }
-            if (isBank && type == kTypeAudioBank) {
-                sBanksById[static_cast<uint8_t>(id)] = entry;
-            } else if (isSequence && type == kTypeSequence) {
-                sSequencesById[static_cast<uint8_t>(id)] = entry;
+        sBanksById.fill(SIZE_MAX);
+        sSequencesById.fill(SIZE_MAX);
+        {
+            std::vector<uint8_t> bytes;
+            for (size_t archiveIndex = 0; archiveIndex < sArchive->Entries().size(); ++archiveIndex) {
+                const std::string& entry = sArchive->Entries()[archiveIndex];
+                const bool isBank = entry.rfind("sound/banks/", 0) == 0;
+                const bool isSequence = entry.rfind("sound/sequences/", 0) == 0;
+                if ((!isBank && !isSequence) ||
+                    sArchive->ReadEntryByIndex(archiveIndex, &bytes) != mk64_3ds::O2rReadResult::Ok ||
+                    bytes.size() < kOtrHeaderSize + sizeof(uint32_t)) {
+                    continue;
+                }
+                Reader header(bytes, 4);
+                Reader body(bytes, kOtrHeaderSize);
+                uint32_t type = 0;
+                uint32_t version = 0;
+                uint32_t id = 0;
+                if (!header.ReadU32(&type) || !header.ReadU32(&version) || version != 0 ||
+                    !body.ReadU32(&id) || id > UINT8_MAX) {
+                    continue;
+                }
+                if (isBank && type == kTypeAudioBank) {
+                    sBanksById[static_cast<uint8_t>(id)] = archiveIndex;
+                } else if (isSequence && type == kTypeSequence) {
+                    sSequencesById[static_cast<uint8_t>(id)] = archiveIndex;
+                }
             }
         }
 
@@ -831,9 +1049,14 @@ extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
         // Resolve every bank, sequence and recursively referenced sample now,
         // while initialization is still single-threaded. The mixer can then
         // use immutable pointer tables without touching the non-concurrent
-        // O2R FILE*, resource cache or unordered maps alongside Fast3D.
-        for (const auto& [bankId, path] : sBanksById) {
-            LoadedResource* resource = LoadByPath(path);
+        // O2R FILE* or resource cache alongside Fast3D.
+        for (size_t bankId = 0; bankId < sBanksById.size(); ++bankId) {
+            const size_t archiveIndex = sBanksById[bankId];
+            if (archiveIndex == SIZE_MAX) {
+                continue;
+            }
+            LoadedResource* resource =
+                LoadResolvedPath(archiveIndex, &sCrcEntries[archiveIndex]);
             if (resource == nullptr || resource->type != kTypeAudioBank ||
                 resource->pointer == nullptr) {
                 throw std::runtime_error("could not preload an audio bank");
@@ -844,8 +1067,13 @@ extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
             }
             sPinnedBanks[bankId] = bank;
         }
-        for (const auto& [sequenceId, path] : sSequencesById) {
-            LoadedResource* resource = LoadByPath(path);
+        for (size_t sequenceId = 0; sequenceId < sSequencesById.size(); ++sequenceId) {
+            const size_t archiveIndex = sSequencesById[sequenceId];
+            if (archiveIndex == SIZE_MAX) {
+                continue;
+            }
+            LoadedResource* resource =
+                LoadResolvedPath(archiveIndex, &sCrcEntries[archiveIndex]);
             if (resource == nullptr || resource->type != kTypeSequence ||
                 resource->pointer == nullptr) {
                 throw std::runtime_error("could not preload an audio sequence");
@@ -859,10 +1087,9 @@ extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
         }
 
         // The fixed pointer tables are the only audio lookup state needed at
-        // runtime. Release the temporary path maps and their buckets before
-        // graphics begins loading thousands of course and kart resources.
-        decltype(sBanksById){}.swap(sBanksById);
-        decltype(sSequencesById){}.swap(sSequencesById);
+        // runtime. Clear the temporary archive-index tables before graphics.
+        sBanksById.fill(SIZE_MAX);
+        sSequencesById.fill(SIZE_MAX);
         return true;
     } catch (const std::bad_alloc&) {
         if (Mk64Diagnostics3DSFailure != nullptr) {
@@ -883,10 +1110,14 @@ extern "C" void Mk64Resource3DSShutdown(void) {
     sPinnedBanks.fill(nullptr);
     sPinnedSequences.fill(nullptr);
     sPinnedSequenceCount = 0;
-    sCache.clear();
-    sCrcToEntry.clear();
-    sBanksById.clear();
-    sSequencesById.clear();
+    decltype(sLoadedResources){}.swap(sLoadedResources);
+    decltype(sCrcEntries){}.swap(sCrcEntries);
+    decltype(sCrcSlots){}.swap(sCrcSlots);
+    sLoadedResourceCount = 0;
+    sBanksById.fill(SIZE_MAX);
+    sSequencesById.fill(SIZE_MAX);
+    decltype(sReadScratch){}.swap(sReadScratch);
+    sReadScratchInUse = false;
     sArchive.reset();
     if (AudioDma_Clear != nullptr) {
         AudioDma_Clear();
@@ -898,25 +1129,136 @@ extern "C" size_t Mk64Resource3DSArchiveEntryCount(void) {
 }
 
 extern "C" size_t Mk64Resource3DSLoadedCount(void) {
-    return sCache.size();
+    return sLoadedResourceCount;
+}
+
+extern "C" bool Mk64Resource3DSValidateCrcIndex(void) {
+    if (sArchive == nullptr || sCrcSlots.empty() ||
+        (sCrcSlots.size() & (sCrcSlots.size() - 1U)) != 0 ||
+        sCrcEntries.size() != sArchive->Entries().size() ||
+        sLoadedResources.size() != sArchive->Entries().size()) {
+        return false;
+    }
+    for (size_t archiveIndex = 0; archiveIndex < sCrcEntries.size(); ++archiveIndex) {
+        const CrcEntry& entry = sCrcEntries[archiveIndex];
+        const std::string& path = sArchive->Entries()[archiveIndex];
+        if (entry.crc != PathCrc(path)) {
+            return false;
+        }
+
+        bool exactSlotFound = false;
+        size_t slot = CrcSlot(entry.crc);
+        for (size_t probe = 0; probe < sCrcSlots.size(); ++probe) {
+            const uint32_t encodedIndex = sCrcSlots[slot];
+            if (encodedIndex == 0) {
+                break;
+            }
+            if (encodedIndex - 1U == archiveIndex) {
+                exactSlotFound = true;
+                break;
+            }
+            slot = (slot + 1U) & (sCrcSlots.size() - 1U);
+        }
+        CrcEntry* firstByCrc = FindCrcEntry(entry.crc);
+        CrcEntry* firstByPath = FindCrcEntry(path);
+        if (!exactSlotFound || firstByCrc == nullptr || firstByPath == nullptr ||
+            CrcEntryArchiveIndex(firstByCrc) > archiveIndex ||
+            CrcEntryArchiveIndex(firstByPath) > archiveIndex ||
+            std::string_view(sArchive->Entries()[CrcEntryArchiveIndex(firstByPath)]) != path) {
+            return false;
+        }
+    }
+    return true;
 }
 
 extern "C" bool Mk64Resource3DSGetTexture(const char* name, Mk64TextureResource3DS* outTexture) {
-    if (outTexture == nullptr) {
-        return false;
+    if (outTexture != nullptr) {
+        *outTexture = {};
     }
-    *outTexture = {};
-    LoadedResource* resource = LoadByPath(NormalizePath(name));
-    if (resource == nullptr || resource->type != kTypeTexture || resource->pointer == nullptr ||
-        resource->pointerSize == 0 || resource->textureWidth == 0 || resource->textureHeight == 0) {
-        return false;
+    LoadedResource* resource = nullptr;
+    return ResolveResource([name] { return LoadByPath(NormalizePath(name)); }, &resource) ==
+               MK64_RESOURCE_LOAD_OK_3DS &&
+           FillTextureResult(resource, outTexture);
+}
+
+extern "C" Mk64ResourceLoadResult3DS Mk64Resource3DSAcquireTexture(
+    const char* name, Mk64TextureResource3DS* outTexture) {
+    LoadedResource* resource = nullptr;
+    const Mk64ResourceLoadResult3DS loadResult = ResolveResource(
+        [name] { return LoadByPath(NormalizePath(name)); }, &resource);
+    if (loadResult != MK64_RESOURCE_LOAD_OK_3DS) {
+        if (outTexture != nullptr) {
+            *outTexture = {};
+        }
+        return loadResult;
     }
-    outTexture->data = static_cast<const uint8_t*>(resource->pointer);
-    outTexture->size = resource->pointerSize;
-    outTexture->width = resource->textureWidth;
-    outTexture->height = resource->textureHeight;
-    outTexture->type = resource->textureType;
-    return true;
+    if (!FillTextureResult(resource, outTexture) || resource->textureOwners == UINT32_MAX) {
+        if (outTexture != nullptr) {
+            *outTexture = {};
+        }
+        return MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
+    }
+    const uint64_t token = TextureLifetimeToken(resource->archiveIndex);
+    if (token == 0) {
+        *outTexture = {};
+        return MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
+    }
+    ++resource->textureOwners;
+    if (resource->streamWhenUnused) {
+        resource->evictWhenUnused = true;
+    }
+    outTexture->lifetimeToken = token;
+    return MK64_RESOURCE_LOAD_OK_3DS;
+}
+
+extern "C" Mk64ResourceLoadResult3DS Mk64Resource3DSResolveDataByName(
+    const char* name, void** outData) {
+    if (outData == nullptr) {
+        return MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
+    }
+    *outData = nullptr;
+    LoadedResource* resource = nullptr;
+    const Mk64ResourceLoadResult3DS result = ResolveResource(
+        [name] { return LoadByPath(NormalizePath(name)); }, &resource);
+    if (result == MK64_RESOURCE_LOAD_OK_3DS) {
+        *outData = resource->pointer;
+    }
+    return result;
+}
+
+extern "C" Mk64ResourceLoadResult3DS Mk64Resource3DSResolveDataByCrc(
+    uint64_t crc, void** outData) {
+    if (outData == nullptr) {
+        return MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
+    }
+    *outData = nullptr;
+    LoadedResource* resource = nullptr;
+    const Mk64ResourceLoadResult3DS result = ResolveResource(
+        [crc] { return LoadByCrc(crc); }, &resource);
+    if (result == MK64_RESOURCE_LOAD_OK_3DS) {
+        *outData = resource->pointer;
+    }
+    return result;
+}
+
+extern "C" void Mk64Resource3DSReleaseTexture(uint64_t lifetimeToken) {
+    const uint32_t generation = static_cast<uint32_t>(lifetimeToken >> 32U);
+    const uint32_t encodedIndex = static_cast<uint32_t>(lifetimeToken);
+    if (generation == 0 || generation != sRuntimeGeneration || encodedIndex == 0) {
+        return;
+    }
+    const size_t archiveIndex = static_cast<size_t>(encodedIndex - 1U);
+    if (archiveIndex >= sLoadedResources.size()) {
+        return;
+    }
+    LoadedResource* resource = sLoadedResources[archiveIndex].get();
+    if (resource == nullptr || resource->textureOwners == 0) {
+        return;
+    }
+    --resource->textureOwners;
+    if (resource->textureOwners == 0 && resource->evictWhenUnused) {
+        RequestEviction(archiveIndex);
+    }
 }
 
 extern "C" bool Mk64Resource3DSGetArchiveEntrySizeByName(const char* name, size_t* byteCount) {
@@ -931,12 +1273,11 @@ extern "C" bool Mk64Resource3DSGetArchiveEntrySizeByName(const char* name, size_
     if (path.empty()) {
         return false;
     }
-    const auto found = sCrcToEntry.find(PathCrc(path));
-    if (found == sCrcToEntry.end() || found->second.archiveIndex >= sArchive->Entries().size() ||
-        std::string_view(sArchive->Entries()[found->second.archiveIndex]) != path) {
+    CrcEntry* entry = FindCrcEntry(path);
+    if (entry == nullptr) {
         return false;
     }
-    return sArchive->GetEntryUncompressedSizeByIndex(found->second.archiveIndex, byteCount) ==
+    return sArchive->GetEntryUncompressedSizeByIndex(CrcEntryArchiveIndex(entry), byteCount) ==
            mk64_3ds::O2rReadResult::Ok;
 }
 
@@ -948,11 +1289,11 @@ extern "C" bool Mk64Resource3DSGetArchiveEntrySizeByCrc(uint64_t crc, size_t* by
     if (sArchive == nullptr) {
         return false;
     }
-    const auto found = sCrcToEntry.find(crc);
-    if (found == sCrcToEntry.end() || found->second.archiveIndex >= sArchive->Entries().size()) {
+    CrcEntry* entry = FindCrcEntry(crc);
+    if (entry == nullptr) {
         return false;
     }
-    return sArchive->GetEntryUncompressedSizeByIndex(found->second.archiveIndex, byteCount) ==
+    return sArchive->GetEntryUncompressedSizeByIndex(CrcEntryArchiveIndex(entry), byteCount) ==
            mk64_3ds::O2rReadResult::Ok;
 }
 
@@ -965,37 +1306,44 @@ extern "C" const char* ResourceGetNameByCrc(uint64_t crc) {
     if (sArchive == nullptr) {
         return nullptr;
     }
-    const auto found = sCrcToEntry.find(crc);
-    return found == sCrcToEntry.end() ? nullptr : sArchive->Entries()[found->second.archiveIndex].c_str();
+    CrcEntry* entry = FindCrcEntry(crc);
+    return entry == nullptr ? nullptr
+                            : sArchive->Entries()[CrcEntryArchiveIndex(entry)].c_str();
 }
 
 extern "C" void* ResourceGetDataByName(const char* name) {
-    LoadedResource* resource = LoadByPath(NormalizePath(name));
-    return resource == nullptr ? nullptr : resource->pointer;
+    void* data = nullptr;
+    Mk64Resource3DSResolveDataByName(name, &data);
+    return data;
 }
 
 extern "C" void* ResourceGetDataByCrc(uint64_t crc) {
-    LoadedResource* resource = LoadByCrc(crc);
-    return resource == nullptr ? nullptr : resource->pointer;
+    void* data = nullptr;
+    Mk64Resource3DSResolveDataByCrc(crc, &data);
+    return data;
 }
 
 extern "C" size_t ResourceGetSizeByName(const char* name) {
-    LoadedResource* resource = LoadByPath(NormalizePath(name));
+    LoadedResource* resource = nullptr;
+    ResolveResource([name] { return LoadByPath(NormalizePath(name)); }, &resource);
     return resource == nullptr ? 0 : resource->pointerSize;
 }
 
 extern "C" size_t ResourceGetSizeByCrc(uint64_t crc) {
-    LoadedResource* resource = LoadByCrc(crc);
+    LoadedResource* resource = nullptr;
+    ResolveResource([crc] { return LoadByCrc(crc); }, &resource);
     return resource == nullptr ? 0 : resource->pointerSize;
 }
 
 extern "C" uint16_t ResourceGetTexWidthByName(const char* name) {
-    LoadedResource* resource = LoadByPath(NormalizePath(name));
+    LoadedResource* resource = nullptr;
+    ResolveResource([name] { return LoadByPath(NormalizePath(name)); }, &resource);
     return resource == nullptr ? 0 : resource->textureWidth;
 }
 
 extern "C" uint16_t ResourceGetTexHeightByName(const char* name) {
-    LoadedResource* resource = LoadByPath(NormalizePath(name));
+    LoadedResource* resource = nullptr;
+    ResolveResource([name] { return LoadByPath(NormalizePath(name)); }, &resource);
     return resource == nullptr ? 0 : resource->textureHeight;
 }
 
@@ -1004,12 +1352,14 @@ extern "C" size_t ResourceGetTexSizeByName(const char* name) {
 }
 
 extern "C" uint16_t ResourceGetTexWidthByCrc(uint64_t crc) {
-    LoadedResource* resource = LoadByCrc(crc);
+    LoadedResource* resource = nullptr;
+    ResolveResource([crc] { return LoadByCrc(crc); }, &resource);
     return resource == nullptr ? 0 : resource->textureWidth;
 }
 
 extern "C" uint16_t ResourceGetTexHeightByCrc(uint64_t crc) {
-    LoadedResource* resource = LoadByCrc(crc);
+    LoadedResource* resource = nullptr;
+    ResolveResource([crc] { return LoadByCrc(crc); }, &resource);
     return resource == nullptr ? 0 : resource->textureHeight;
 }
 
@@ -1032,44 +1382,35 @@ extern "C" void ResourceDirtyByName(const char* name) {
     // Banks, sequences and their recursively loaded samples back immutable
     // pointers used by the cross-core audio mixer. A generic future dirty or
     // unload request must never invalidate that pinned object graph.
-    if (path.rfind("sound/", 0) == 0) {
+    if (IsSoundPath(path)) {
         return;
     }
-    const auto crcEntry = sCrcToEntry.find(PathCrc(path));
-    if (crcEntry != sCrcToEntry.end() && sArchive != nullptr &&
-        crcEntry->second.archiveIndex < sArchive->Entries().size() &&
-        std::string_view(sArchive->Entries()[crcEntry->second.archiveIndex]) == path) {
-        const std::string& canonicalPath = sArchive->Entries()[crcEntry->second.archiveIndex];
-        const auto loaded = sCache.find(canonicalPath);
-        if (loaded == sCache.end() || crcEntry->second.loaded == loaded->second.get()) {
-            crcEntry->second.loaded = nullptr;
+    CrcEntry* entry = FindCrcEntry(path);
+    if (entry != nullptr) {
+        const size_t archiveIndex = CrcEntryArchiveIndex(entry);
+        LoadedResource* resource = archiveIndex < sLoadedResources.size()
+                                       ? sLoadedResources[archiveIndex].get()
+                                       : nullptr;
+        if (resource != nullptr && resource->type == kTypeTexture &&
+            resource->pointer != nullptr && Mk64Graphics3DSEvictSourceTexture != nullptr) {
+            Mk64Graphics3DSEvictSourceTexture(resource->pointer);
         }
-        if (loaded != sCache.end()) {
-            sCache.erase(loaded);
-        }
-        return;
-    }
-
-    // Collision-safe fallback for the exceptional path that was loaded by
-    // name because its CRC slot belongs to another archive entry.
-    for (auto loaded = sCache.begin(); loaded != sCache.end(); ++loaded) {
-        if (std::string_view(loaded->first) == path) {
-            sCache.erase(loaded);
-            return;
-        }
+        RequestEviction(archiveIndex);
     }
 }
 
 extern "C" void ResourceDirtyByCrc(uint64_t crc) {
-    const auto found = sCrcToEntry.find(crc);
-    if (found != sCrcToEntry.end() && sArchive != nullptr &&
-        found->second.archiveIndex < sArchive->Entries().size()) {
-        const std::string& path = sArchive->Entries()[found->second.archiveIndex];
-        if (path.rfind("sound/", 0) == 0) {
-            return;
+    CrcEntry* entry = FindCrcEntry(crc);
+    if (entry != nullptr) {
+        const size_t archiveIndex = CrcEntryArchiveIndex(entry);
+        LoadedResource* resource = archiveIndex < sLoadedResources.size()
+                                       ? sLoadedResources[archiveIndex].get()
+                                       : nullptr;
+        if (resource != nullptr && resource->type == kTypeTexture &&
+            resource->pointer != nullptr && Mk64Graphics3DSEvictSourceTexture != nullptr) {
+            Mk64Graphics3DSEvictSourceTexture(resource->pointer);
         }
-        found->second.loaded = nullptr;
-        sCache.erase(path);
+        RequestEviction(archiveIndex);
     }
 }
 
@@ -1085,9 +1426,11 @@ extern "C" void ResourceLoadDirectory(const char*) {
 }
 extern "C" void ResourceLoadDirectoryAsync(const char*) {
 }
-extern "C" void ResourceDirtyDirectory(const char*) {
+extern "C" void ResourceDirtyDirectory(const char* name) {
+    EvictDirectory(name);
 }
-extern "C" void ResourceUnloadDirectory(const char*) {
+extern "C" void ResourceUnloadDirectory(const char* name) {
+    EvictDirectory(name);
 }
 
 extern "C" uint32_t IsResourceManagerLoaded(void) {
@@ -1099,7 +1442,8 @@ extern "C" bool GameEngine_OTRSigCheck(const char* data) {
 }
 
 extern "C" int32_t GameEngine_ResourceGetTexTypeByName(const char* name) {
-    LoadedResource* resource = LoadByPath(NormalizePath(name));
+    LoadedResource* resource = nullptr;
+    ResolveResource([name] { return LoadByPath(NormalizePath(name)); }, &resource);
     return resource == nullptr ? 0 : static_cast<int32_t>(resource->textureType);
 }
 

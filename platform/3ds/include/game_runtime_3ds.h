@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -18,6 +19,7 @@ typedef enum Mk64PerformanceProfile3DS {
 
 Mk64PerformanceProfile3DS Mk64Graphics3DSResolvedPerformanceProfile(void);
 uint32_t Mk64Graphics3DSBottomHudRefreshDivisor(void);
+size_t Mk64Graphics3DSTextureCacheCapacity(void);
 bool Mk64Graphics3DSResolvedNewModel(void);
 uint32_t Mk64Graphics3DSResolvedOutputWidth(void);
 bool Mk64Graphics3DSUsesIntermediatePresentation(void);

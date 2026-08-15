@@ -93,6 +93,7 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     uint64_t GetTextureCacheUploadBytes() const;
     uint64_t GetVertexUploadCount() const;
     uint64_t GetVertexUploadBytes() const;
+    void ReleaseTextureAllocations();
     void* PrepareForExternalDraw();
 
   private:

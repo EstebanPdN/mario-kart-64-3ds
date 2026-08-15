@@ -8,17 +8,21 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <malloc.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
 constexpr const char* kGameDirectory = "sdmc:/3ds/MK64";
 constexpr const char* kDumpDirectory = "sdmc:/3ds/MK64/dump";
 constexpr const char* kRuntimeLog = "sdmc:/3ds/MK64/dump/runtime.log";
+constexpr const char* kFatalLog = "sdmc:/3ds/MK64/dump/last-fatal.log";
 constexpr size_t kMaxArenaDump = 32u * 1024u * 1024u;
 constexpr size_t kMaxDisplayListDump = 4u * 1024u * 1024u;
 constexpr size_t kRuntimeLogBufferSize = 64u * 1024u;
+constexpr uint64_t kRuntimeFlushIntervalMilliseconds = 15000;
 
 std::atomic<bool> sRunning{ false };
 std::atomic<bool> sInputReady{ false };
@@ -61,6 +65,7 @@ std::atomic<uint32_t> sKartPrefetchDuplicates{ 0 };
 std::atomic<uint32_t> sKartPrefetchUnavailable{ 0 };
 std::atomic<uint32_t> sPrefetchUpdateSerial{ 0 };
 std::atomic<uint32_t> sPrefetchLoggedSerial{ 0 };
+std::atomic_flag sEmergencyWriteStarted = ATOMIC_FLAG_INIT;
 
 LightLock sTextLock;
 char sStage[96] = "not-started";
@@ -127,6 +132,38 @@ void LogLine(const char* prefix, const char* value, bool flush = false) {
         }
     }
     LightLock_Unlock(&sTextLock);
+}
+
+void WriteAll(int fd, const char* text) {
+    if (fd < 0 || text == nullptr) return;
+    size_t remaining = std::strlen(text);
+    while (remaining != 0) {
+        const ssize_t written = write(fd, text, remaining);
+        if (written > 0) {
+            text += written;
+            remaining -= static_cast<size_t>(written);
+        } else if (written < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+}
+
+void LogRuntimeHeartbeat() {
+    char stage[sizeof(sStage)] = {};
+    char resource[sizeof(sLastResource)] = {};
+    ReadTextSnapshot(stage, sizeof(stage), resource, sizeof(resource));
+    const struct mallinfo heap = mallinfo();
+    char value[512] = {};
+    std::snprintf(value, sizeof(value),
+                  "frame=%lu resources=%lu heapFree=%d heapUsed=%d linearFree=%lu "
+                  "stage=%s resource=%s",
+                  static_cast<unsigned long>(sFrame.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long>(sLoadedResources.load(std::memory_order_relaxed)),
+                  heap.fordblks, heap.uordblks,
+                  static_cast<unsigned long>(linearSpaceFree()), stage, resource);
+    LogLine("heartbeat: ", value, true);
 }
 
 void LogPrefetchSnapshotIfChanged() {
@@ -576,6 +613,7 @@ void WriteQuickDump(const char* trigger) {
 
 void DiagnosticThread(void*) {
     bool selectWasHeld = false;
+    uint64_t lastRuntimeFlush = osGetTime();
     while (sRunning.load(std::memory_order_acquire)) {
         hidScanInput();
         const uint32_t keys = hidKeysHeld();
@@ -617,6 +655,11 @@ void DiagnosticThread(void*) {
             }
         }
         selectWasHeld = select;
+        const uint64_t now = osGetTime();
+        if (now - lastRuntimeFlush >= kRuntimeFlushIntervalMilliseconds) {
+            LogRuntimeHeartbeat();
+            lastRuntimeFlush = now;
+        }
         svcSleepThread(16000000LL);
     }
 }
@@ -667,8 +710,10 @@ extern "C" bool Mk64Diagnostics3DSStart() {
     sKartPrefetchUnavailable.store(0, std::memory_order_relaxed);
     sPrefetchUpdateSerial.store(0, std::memory_order_relaxed);
     sPrefetchLoggedSerial.store(0, std::memory_order_relaxed);
+    sEmergencyWriteStarted.clear(std::memory_order_relaxed);
     EnsureDirectory(kGameDirectory);
     EnsureDirectory(kDumpDirectory);
+    std::remove(kFatalLog);
     sStartTime = osGetTime();
     sSystemModelKnown = false;
     sSystemModel = 0xff;
@@ -737,6 +782,31 @@ extern "C" void Mk64Diagnostics3DSAbortForProcessExit() {
         sThread = nullptr;
     }
     sLog = nullptr;
+}
+
+extern "C" void Mk64Diagnostics3DSEmergency(const char* reason) {
+    if (sEmergencyWriteStarted.test_and_set(std::memory_order_acq_rel)) {
+        return;
+    }
+    const int fd = open(kFatalLog, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        return;
+    }
+    WriteAll(fd, "fatal: ");
+    WriteAll(fd, reason == nullptr ? "unknown" : reason);
+    WriteAll(fd, "\n");
+    if (LightLock_TryLock(&sTextLock) == 0) {
+        WriteAll(fd, "stage: ");
+        WriteAll(fd, sStage);
+        WriteAll(fd, "\nresource: ");
+        WriteAll(fd, sLastResource);
+        WriteAll(fd, "\n");
+        LightLock_Unlock(&sTextLock);
+    } else {
+        WriteAll(fd, "stage: unavailable (diagnostic lock held)\n");
+    }
+    fsync(fd);
+    close(fd);
 }
 
 extern "C" bool Mk64Diagnostics3DSOwnsHid() {
@@ -917,6 +987,39 @@ extern "C" void Mk64Diagnostics3DSAudioState(uint32_t resetStatus, uint32_t rese
                   static_cast<unsigned long>(sequenceCount), static_cast<unsigned long>(activePlayers),
                   static_cast<unsigned long>(activeNotes), static_cast<unsigned long>(audioErrors));
     LogLine("audio-state: ", value);
+}
+
+extern "C" void Mk64Diagnostics3DSPerformance(uint32_t frame, uint32_t fps2Tenths,
+                                                uint32_t fps10Tenths, uint32_t drawCalls,
+                                                uint32_t triangles, uint32_t textureUploads,
+                                                uint32_t textureKilobytes, uint32_t vertexKilobytes,
+                                                size_t loadedResources,
+                                                uint32_t processingHundredths,
+                                                uint32_t drawingHundredths,
+                                                uint32_t commandPermille) {
+    char value[288] = {};
+    std::snprintf(value, sizeof(value),
+                  "frame=%lu fps2=%lu.%lu fps10=%lu.%lu draws=%lu tris=%lu "
+                  "tex_up=%lu tex_kib=%lu vtx_kib=%lu resources=%lu "
+                  "c3d_process=%lu.%02lu c3d_draw=%lu.%02lu cmd=%lu.%01lu%%",
+                  static_cast<unsigned long>(frame),
+                  static_cast<unsigned long>(fps2Tenths / 10U),
+                  static_cast<unsigned long>(fps2Tenths % 10U),
+                  static_cast<unsigned long>(fps10Tenths / 10U),
+                  static_cast<unsigned long>(fps10Tenths % 10U),
+                  static_cast<unsigned long>(drawCalls),
+                  static_cast<unsigned long>(triangles),
+                  static_cast<unsigned long>(textureUploads),
+                  static_cast<unsigned long>(textureKilobytes),
+                  static_cast<unsigned long>(vertexKilobytes),
+                  static_cast<unsigned long>(loadedResources),
+                  static_cast<unsigned long>(processingHundredths / 100U),
+                  static_cast<unsigned long>(processingHundredths % 100U),
+                  static_cast<unsigned long>(drawingHundredths / 100U),
+                  static_cast<unsigned long>(drawingHundredths % 100U),
+                  static_cast<unsigned long>(commandPermille / 10U),
+                  static_cast<unsigned long>(commandPermille % 10U));
+    LogLine("performance: ", value);
 }
 
 extern "C" void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResources, size_t textureSlots,
