@@ -22,7 +22,6 @@ extern "C" bool Mk64Diagnostics3DSSupportsWideMode(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSResolvedNewModel(void) __attribute__((weak));
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation(void) __attribute__((weak));
-extern "C" bool Mk64BottomUI3DSConsumeC2DUsage(void) __attribute__((weak));
 
 namespace Fast {
 namespace {
@@ -1320,14 +1319,15 @@ void GfxRenderingAPICitro3D::EndFrame() {
     if (!mImpl->frameActive) {
         return;
     }
-    // Fast3D textures and the exact dirty VBO range are already coherent.
-    // Citro2D owns private dynamic buffers and needs Citro3D's whole-heap flush
-    // only on presentations where it actually emitted a batch. Avoid scanning
-    // the complete 24 MiB linear heap on the remaining gameplay frames.
+    // Citro2D keeps dynamic command data in its private linear buffers. The
+    // bottom screen can remain visually unchanged for many frames, but its
+    // command state still shares Citro3D's cache-coherency contract with the
+    // top renderer. E6 skipped that flush once the bottom UI became static;
+    // subsequent Fast3D texture uploads could then reach PICA as black data.
+    // Until Citro2D exposes explicit dirty ranges, preserve the proven full
+    // frame-end flush rather than trading correct textures for a cache scan.
     FlushPackedVertices();
-    const bool c2dUsed = Mk64BottomUI3DSConsumeC2DUsage == nullptr ||
-                         Mk64BottomUI3DSConsumeC2DUsage();
-    C3D_FrameEnd(c2dUsed ? 0 : GX_CMDLIST_FLUSH);
+    C3D_FrameEnd(0);
     mImpl->frameActive = false;
     mImpl->activeTarget = nullptr;
 

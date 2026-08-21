@@ -74,11 +74,14 @@ constexpr uint32_t kAudioRecoveryFrames = kAudioFramesPerGameTick * 3 / 2;
 // A midpoint is expendable as soon as a 30 Hz tick misses by more than a
 // small scheduling margin. Recovery requires sustained headroom and a bounded
 // probe, keeping race-start upload bursts from repeatedly flapping the mode.
-constexpr uint64_t kSlowTickMilliseconds = 34;
+// The 30 Hz game clock naturally lands around 33-34 ms. E6 treated normal
+// scheduler jitter as overload, so its 60 Hz midpoint path never accumulated
+// enough healthy samples to turn on. Leave a real margin for missed frames.
+constexpr uint64_t kSlowTickMilliseconds = 42;
 constexpr uint64_t kHeavyTextureUploadBytes = 64u * 1024u;
 constexpr uint64_t kHeavyTextureUploadCount = 2;
-constexpr float kBusyProcessingMilliseconds = 13.0f;
-constexpr float kBusyDrawingMilliseconds = 14.0f;
+constexpr float kBusyProcessingMilliseconds = 16.0f;
+constexpr float kBusyDrawingMilliseconds = 16.0f;
 constexpr float kBusyCommandBufferUsage = 0.85f;
 constexpr uint64_t kPerformanceSampleFrames = 120;
 constexpr size_t kTextureCacheRecoveryFloor = 128;
@@ -152,6 +155,12 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
                              C3D_GetCmdBufUsage() > kBusyCommandBufferUsage;
     const bool uploadActivity = textureUploadDelta >= kHeavyTextureUploadCount ||
                                 textureUploadByteDelta >= kHeavyTextureUploadBytes;
+    // Animated kart frames and menu assets enter the O2R resource index a few
+    // entries at a time throughout a normal race. E6 interpreted every one of
+    // those harmless index additions as pressure, which permanently reset the
+    // 60 Hz recovery state even while the measured GPU work had headroom.
+    // Large bursts remain gated here and texture uploads remain a hard veto.
+    const bool resourceBurst = resourceDelta >= 16U;
 
     mk64_3ds::AdaptivePresentationInputs inputs = {};
     inputs.hasPriorTopFrame = sHasPresentedTopFrame;
@@ -167,7 +176,7 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
                               sPreviousPresentationDuration <= kSlowTickMilliseconds &&
                               !citro3DBusy;
     inputs.previousTickSlow = previousTickSlow;
-    inputs.resourceActivity = resourceDelta != 0;
+    inputs.resourceActivity = resourceBurst;
     inputs.textureUploadActivity = uploadActivity;
     inputs.citro3DBusy = citro3DBusy;
     return mk64_3ds::UpdateAdaptivePresentation(&sAdaptivePresentation, inputs).renderMidpoint;
@@ -401,7 +410,15 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     // and the 800 px quality mode present only the key frame.
     ++sFrameCounter;
     const uint64_t presentationStart = osGetTime();
+    // A midpoint would run the full display list before the mandatory keyframe.
+    // When either RDP texture unit is dirty that doubles the upload/swizzle
+    // work, delays the texture becoming visible, and can turn a short resource
+    // burst into a missed VBlank. Let the required keyframe import it once.
+    const bool hasPendingTextureUpload = sInterpreter->mRdp != nullptr &&
+                                         (sInterpreter->mRdp->textures_changed[0] ||
+                                          sInterpreter->mRdp->textures_changed[1]);
     const bool renderIntermediate = sUseIntermediatePresentation &&
+                                    !hasPendingTextureUpload &&
                                     ShouldRenderIntermediatePresentation(presentationStart);
     SetRendererStage("renderer-prepare");
     bool didPresentIntermediate = false;
