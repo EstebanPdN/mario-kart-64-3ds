@@ -18,7 +18,6 @@ void Mk64BottomUI3DSPrepareFrame(void);
 void Mk64BottomUI3DSRecordPresentation(void);
 void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget);
 void Mk64BottomUI3DSDraw(void* existingTopTarget);
-bool Mk64BottomUI3DSConsumeC2DUsage(void);
 
 /* Input-layer boundary used by input_3ds.cpp. */
 uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t heldKeys);
