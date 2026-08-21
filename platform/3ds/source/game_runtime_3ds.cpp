@@ -17,6 +17,7 @@
 #include <exception>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace Fast {
@@ -48,6 +49,7 @@ uint32_t sOutputWidth = 400;
 size_t sTextureCacheCapacity = 256;
 bool sResolvedNewModel = false;
 bool sUseIntermediatePresentation = false;
+bool sSuppressNextPresentation = false;
 mk64_3ds::AdaptivePresentationState sAdaptivePresentation;
 uint64_t sLastPresentationStart = 0;
 uint64_t sPreviousPresentationDuration = 0;
@@ -73,7 +75,6 @@ constexpr uint32_t kAudioRecoveryFrames = kAudioFramesPerGameTick * 3 / 2;
 // small scheduling margin. Recovery requires sustained headroom and a bounded
 // probe, keeping race-start upload bursts from repeatedly flapping the mode.
 constexpr uint64_t kSlowTickMilliseconds = 34;
-constexpr uint64_t kMidpointHeadroomMilliseconds = 18;
 constexpr uint64_t kHeavyTextureUploadBytes = 64u * 1024u;
 constexpr uint64_t kHeavyTextureUploadCount = 2;
 constexpr float kBusyProcessingMilliseconds = 13.0f;
@@ -144,8 +145,10 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
                                   sPreviousPresentationDuration > kSlowTickMilliseconds;
     sLastPresentationStart = presentationStart;
 
-    const bool citro3DBusy = C3D_GetProcessingTime() > kBusyProcessingMilliseconds ||
-                             C3D_GetDrawingTime() > kBusyDrawingMilliseconds ||
+    const float processingMilliseconds = C3D_GetProcessingTime();
+    const float drawingMilliseconds = C3D_GetDrawingTime();
+    const bool citro3DBusy = processingMilliseconds > kBusyProcessingMilliseconds ||
+                             drawingMilliseconds > kBusyDrawingMilliseconds ||
                              C3D_GetCmdBufUsage() > kBusyCommandBufferUsage;
     const bool uploadActivity = textureUploadDelta >= kHeavyTextureUploadCount ||
                                 textureUploadByteDelta >= kHeavyTextureUploadBytes;
@@ -155,12 +158,14 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
     inputs.audioBufferedFrames = Mk64Audio3DSBufferedFrames();
     inputs.audioLowWaterFrames = kAudioLowWaterFrames;
     inputs.audioRecoveryFrames = kAudioRecoveryFrames;
-    // A key frame that already consumes more than roughly one 60 Hz interval
-    // cannot afford a second display-list pass inside the 30 Hz simulation
-    // budget. FrameEnd timing is included deliberately because it exposes a
-    // missed VBlank just as clearly as CPU-side display-list work.
+    // Overall presentation duration includes SYNCDRAW's VBlank wait and cannot
+    // be compared with a 16.7 ms CPU budget. Citro3D's processing/drawing
+    // timers above exclude that wait. Allow a bounded midpoint probe whenever
+    // the mandatory keyframe still fits its 30 Hz interval; the adaptive state
+    // immediately backs out if the extra image misses the next interval.
     inputs.keyframeHeadroom = sPreviousPresentationDuration != 0 &&
-                              sPreviousPresentationDuration <= kMidpointHeadroomMilliseconds;
+                              sPreviousPresentationDuration <= kSlowTickMilliseconds &&
+                              !citro3DBusy;
     inputs.previousTickSlow = previousTickSlow;
     inputs.resourceActivity = resourceDelta != 0;
     inputs.textureUploadActivity = uploadActivity;
@@ -249,6 +254,7 @@ extern "C" bool Mk64Graphics3DSInit() {
     sRendererHealthyFrameCounter = 0;
     sRendererFaulted = false;
     sHasPresentedTopFrame = false;
+    sSuppressNextPresentation = false;
     sAdaptivePresentation = {};
     sLastPresentationStart = 0;
     sPreviousPresentationDuration = 0;
@@ -339,6 +345,7 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sTextureCacheCapacity = 256;
     sResolvedNewModel = false;
     sUseIntermediatePresentation = false;
+    sSuppressNextPresentation = false;
     sHasPresentedTopFrame = false;
     sAdaptivePresentation = {};
     sLastPresentationStart = 0;
@@ -372,6 +379,13 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     Mk64Diagnostics3DSSetStage("renderer-frame-start");
     SetRendererStage("renderer-window-events");
     sInterpreter->HandleWindowEvents();
+    const bool suppressPresentation = sSuppressNextPresentation;
+    sSuppressNextPresentation = false;
+    if (suppressPresentation) {
+        Mk64FrameInterpolation3DSClearPrepared();
+        Mk64Diagnostics3DSSetStage("renderer-presentation-suppressed");
+        return;
+    }
     if (sRendererFaulted) {
         // Keep gameplay/input alive if a frame decoding exception occurs.
         // Events must still be pumped so APT suspend/exit can complete and the
@@ -434,6 +448,22 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         SetRendererStage("renderer-end-frame");
         sInterpreter->EndFrame();
         sHasPresentedTopFrame = true;
+    } catch (const std::length_error& exception) {
+        // The backend has already doubled E5's packed-vertex budget. If an
+        // unusually dense display list still exceeds it, close the partial
+        // frame and resume on the next simulation tick instead of freezing the
+        // renderer permanently. The adaptive fallback removes optional 60 Hz
+        // work while the scene remains above budget.
+        Mk64FrameInterpolation3DSClearPrepared();
+        sRenderer->EndFrame();
+        sInterpreter->mBufVboLen = 0;
+        sInterpreter->mBufVboNumTris = 0;
+        sInterpreter->mRdp->textures_changed[0] = true;
+        sInterpreter->mRdp->textures_changed[1] = true;
+        Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
+        SetRendererFault("renderer-vertex-pressure", exception.what(), true);
+        sPreviousPresentationDuration = osGetTime() - presentationStart;
+        return;
     } catch (const std::bad_alloc& exception) {
         // A full animated-texture working set used to fragment the ordinary
         // heap while rotating map/list nodes. Close the Citro3D frame, release
@@ -594,6 +624,9 @@ extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth() {
 }
 extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation() {
     return sUseIntermediatePresentation;
+}
+extern "C" void Mk64Graphics3DSSuppressNextPresentation(bool suppress) {
+    sSuppressNextPresentation = suppress;
 }
 extern "C" uint32_t OTRGetGameViewportWidth() {
     return GetViewportWidth();

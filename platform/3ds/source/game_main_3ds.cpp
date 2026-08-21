@@ -160,17 +160,26 @@ int main() {
 
     uint64_t nextSimulationDeadline = svcGetSystemTick();
     uint64_t deadlineRemainder = 0;
+    bool suppressNextPresentation = false;
     while (WindowIsRunning()) {
         if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
+            nextSimulationDeadline = svcGetSystemTick();
+            deadlineRemainder = 0;
+            suppressNextPresentation = false;
             continue;
         }
         if (Mk64Diagnostics3DSIsPaused()) {
             Mk64Diagnostics3DSSetStage("diagnostic-dump-paused");
             svcSleepThread(16000000LL);
+            nextSimulationDeadline = svcGetSystemTick();
+            deadlineRemainder = 0;
+            suppressNextPresentation = false;
             continue;
         }
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
         Mk64BottomUI3DSPrepareFrame();
+        Mk64Graphics3DSSuppressNextPresentation(suppressNextPresentation);
+        suppressNextPresentation = false;
         thread5_iteration();
         // HandleEvents() runs inside the display-list iteration and is where
         // aptMainLoop() observes HOME -> Close Software. Do not enter the
@@ -179,10 +188,11 @@ int main() {
         Mk64Diagnostics3DSSetStage("game-loop-audio");
         Mk64GameAudio3DSPump();
 
-        // Midpoint presentation is adaptive, but gameplay remains a stable
-        // 30 Hz clock. When a pressured frame omits the optional midpoint,
-        // wait outside Citro3D rather than submitting a dummy GPU frame. The
-        // remainder accumulator keeps the 30 Hz deadline exact over time.
+        // Keep the original 30 Hz simulation clock exact. If rendering falls
+        // behind, the following tick may omit only its presentation so logic,
+        // input and audio can recover instead of making the whole game run in
+        // slow motion. Long loading/diagnostic stalls reset the clock rather
+        // than replaying seconds of stale input.
         nextSimulationDeadline += SYSCLOCK_ARM11 / kSimulationRate;
         deadlineRemainder += SYSCLOCK_ARM11 % kSimulationRate;
         if (deadlineRemainder >= kSimulationRate) {
@@ -196,11 +206,14 @@ int main() {
                 remainingTicks * 1000000000ULL / SYSCLOCK_ARM11);
             if (remainingNanoseconds > 0) svcSleepThread(remainingNanoseconds);
         } else {
-            // Never compress the next logic interval after a slow resource or
-            // upload frame. Resume the 30 Hz clock from the time actually
-            // reached instead of attempting even one catch-up tick.
-            nextSimulationDeadline = now;
-            deadlineRemainder = 0;
+            const uint64_t lateness = now - nextSimulationDeadline;
+            const uint64_t tickTicks = SYSCLOCK_ARM11 / kSimulationRate;
+            if (lateness > tickTicks * 3U) {
+                nextSimulationDeadline = now;
+                deadlineRemainder = 0;
+            } else if (lateness >= tickTicks / 2U) {
+                suppressNextPresentation = true;
+            }
         }
     }
 
@@ -217,8 +230,8 @@ int main() {
 
 extern "C" void userAppExit() {
     // libctru invokes this hook before hidExit() unmaps HID shared memory.
-    // Stop the diagnostics HID poller first so abnormal exits cannot leave it
-    // dereferencing that mapping while process services are torn down.
-    Mk64Diagnostics3DSAbortForProcessExit();
+    // Quiesce the audio worker before waiting on the diagnostics HID poller so
+    // it cannot keep using services while process teardown is in progress.
     Mk64GameAudio3DSAbortForProcessExit();
+    Mk64Diagnostics3DSAbortForProcessExit();
 }

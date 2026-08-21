@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERSION="$(tr -d '\r\n' < "${ROOT}/platform/3ds/version.txt")"
 DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
-BUILD="${ROOT}/build-3ds/game"
+BUILD="${MK64_3DS_BUILD_DIR:-${ROOT}/build-3ds/game}"
 TOOLS_ROOT="${MK64_3DS_TOOLS_ROOT:-${ROOT}/../Tools/bin}"
 MAKEROM="${MAKEROM:-${TOOLS_ROOT}/makerom}"
 BANNERTOOL="${BANNERTOOL:-${TOOLS_ROOT}/bannertool}"
