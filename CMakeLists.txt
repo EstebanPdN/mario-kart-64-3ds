@@ -592,10 +592,13 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
     objectListSize = temp_v1;
     return temp_v1;
 }]=]
-        [=[s32 try_find_unused_obj_index(s32* arg0) {
+        [=[static s32 mk64_3ds_find_unused_obj_index(s32* arg0, s32 limit) {
     s32 objectIndex = objectListSize;
-    for (s32 count = 0; count < OBJECT_LIST_SIZE; ++count) {
-        if (++objectIndex == OBJECT_LIST_SIZE) {
+    if (objectIndex < 0 || objectIndex >= limit) {
+        objectIndex = limit - 1;
+    }
+    for (s32 count = 0; count < limit; ++count) {
+        if (++objectIndex == limit) {
             objectIndex = 0;
         }
         if (gObjectList[objectIndex].unk_0CA == 0) {
@@ -609,8 +612,15 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
     return NULL_OBJECT_ID;
 }
 
+s32 try_find_unused_obj_index(s32* arg0) {
+    // Particle, smoke and other optional pools use this non-fatal allocator.
+    // Keep a small tail of the vanilla object array available for mandatory
+    // race/results objects so visual pressure degrades effects, not gameplay.
+    return mk64_3ds_find_unused_obj_index(arg0, OBJECT_LIST_SIZE - 32);
+}
+
 s32 find_unused_obj_index(s32* arg0) {
-    s32 objectIndex = try_find_unused_obj_index(arg0);
+    s32 objectIndex = mk64_3ds_find_unused_obj_index(arg0, OBJECT_LIST_SIZE);
     if (objectIndex == NULL_OBJECT_ID) {
         CM_ThrowRuntimeError("[update_objects] 3DS object pool exhausted");
     }
@@ -622,6 +632,18 @@ s32 find_unused_obj_index(s32* arg0) {
     if(SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT STREQUAL
        SPAGHETTIKART_3DS_UPDATE_OBJECTS_ORIGINAL)
         message(FATAL_ERROR "The upstream object-slot allocator changed")
+    endif()
+    set(SPAGHETTIKART_3DS_OPTIONAL_OBJECT_ALLOC_ORIGINAL
+        "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT}")
+    string(REPLACE
+        "            objectIndex = find_unused_obj_index(id);"
+        "            objectIndex = try_find_unused_obj_index(id);"
+        SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT
+        "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT STREQUAL
+       SPAGHETTIKART_3DS_OPTIONAL_OBJECT_ALLOC_ORIGINAL)
+        message(FATAL_ERROR "The upstream optional object-pool allocation path changed")
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_SOURCE}"
          "${SPAGHETTIKART_3DS_UPDATE_OBJECTS_TEXT}")
@@ -1715,13 +1737,19 @@ World* World::Instance;]=]
         [=[        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns1, tick1));
         GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns2, tick2));
         GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns3, tick3));]=]
-        [=[        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns1, tick1));
-        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns2, tick2));
-        GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns3, tick3));
+        [=[        // Each of the 31 moles owns two mandatory object slots. Check
+        // the complete transaction before publishing any OMole into World;
+        // otherwise a late allocation failure leaves partial groups and
+        // dangling group pointers behind.
+        if (func_80071FBC() <= OBJECT_LIST_SIZE - 62) {
+            GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns1, tick1));
+            GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns2, tick2));
+            GetWorld()->AddObject(std::make_unique<OMoleGroup>(moleSpawns3, tick3));
 
-        for (size_t i = 0; i < gObjectParticle2_SIZE; i++) {
-            if (try_find_unused_obj_index(&gObjectParticle2[i]) == NULL_OBJECT_ID) {
-                break;
+            for (size_t i = 0; i < gObjectParticle2_SIZE; i++) {
+                if (try_find_unused_obj_index(&gObjectParticle2[i]) == NULL_OBJECT_ID) {
+                    break;
+                }
             }
         }]=]
         SPAGHETTIKART_3DS_MOO_MOO_FARM_TEXT
@@ -2023,11 +2051,6 @@ void Mk64UnloadTrackDirectory3DS(const char* root, const char* track) {
 }
 
 extern "C" void Mk64ReleaseLoadedTrackResources3DS(void) {
-    Track* selectedTrack = GetWorld()->GetTrack();
-    if (selectedTrack != nullptr &&
-        selectedTrack->ResourceName == sMk64LoadedTrackResources3DS.data()) {
-        return;
-    }
     if (std::strncmp(sMk64LoadedTrackResources3DS.data(), "mk:", 3) != 0) {
         sMk64LoadedTrackResources3DS[0] = '\0';
         return;
@@ -2067,6 +2090,32 @@ void LoadTrack() {
     if(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT STREQUAL
        SPAGHETTIKART_3DS_GAME_TRACK_RELEASE_ORIGINAL)
         message(FATAL_ERROR "The upstream track-load resource boundary changed")
+    endif()
+    set(SPAGHETTIKART_3DS_CAMERA_CLEAN_ORIGINAL
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+    string(REPLACE
+        [=[void CM_CleanCameras(void) {
+    GetWorld()->Cameras.clear();
+}]=]
+        [=[void CM_CleanCameras(void) {
+    // Screen contexts do not own these cameras. Clear every alias before the
+    // owning vector so a pending switch cannot reactivate a freed camera on
+    // the first tick of the next race or results transition.
+    for (ScreenContext& screen : gScreenContexts) {
+        screen.camera = nullptr;
+        screen.raceCamera = nullptr;
+        screen.lookBehindCamera = nullptr;
+        screen.freeCamera = nullptr;
+        screen.pendingCamera = nullptr;
+    }
+    GetWorld()->Cameras.clear();
+}]=]
+        SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
+        "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}"
+    )
+    if(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT STREQUAL
+       SPAGHETTIKART_3DS_CAMERA_CLEAN_ORIGINAL)
+        message(FATAL_ERROR "The upstream camera cleanup boundary changed")
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_GAME_BRIDGE_SOURCE}"
          "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
@@ -3622,18 +3671,15 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
         float dx2 = v3->x / (v3->w) - v2->x / (v2->w);
         float dy2 = v3->y / (v3->w) - v2->y / (v2->w);
         float cross = dx1 * dy2 - dy1 * dx2;]=]
-            [=[        float cross;
-        if (v1->w == 0.0f || v2->w == 0.0f || v3->w == 0.0f) {
-            const float dx1 = v1->x / v1->w - v2->x / v2->w;
-            const float dy1 = v1->y / v1->w - v2->y / v2->w;
-            const float dx2 = v3->x / v3->w - v2->x / v2->w;
-            const float dy2 = v3->y / v3->w - v2->y / v2->w;
-            cross = dx1 * dy2 - dy1 * dx2;
-        } else {
-            cross = ::mk64_3ds::Fast3DProjectedCross(
-                v1->x, v1->y, v1->w, v2->x, v2->y, v2->w,
-                v3->x, v3->y, v3->w);
-        }]=]
+            [=[        float cross = ::mk64_3ds::Fast3DProjectedCross(
+            v1->x, v1->y, v1->w, v2->x, v2->y, v2->w,
+            v3->x, v3->y, v3->w);]=]
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT
+            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
+        )
+        string(REPLACE
+            "    if ((mRsp->geometry_mode & cull_both) != 0) {"
+            "    if ((mRsp->geometry_mode & cull_both) != 0 &&\n        ::mk64_3ds::Fast3DCanProject(v1->w, v2->w, v3->w)) {"
             SPAGHETTIKART_3DS_INTERPRETER_TEXT
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
         )

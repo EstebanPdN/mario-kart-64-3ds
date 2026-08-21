@@ -31,6 +31,13 @@ int Sign(float value) {
 } // namespace
 
 int main() {
+    if (mk64_3ds::Fast3DCanProject(0.0f, 1.0f, 1.0f) ||
+        mk64_3ds::Fast3DCanProject(1.0e-5f, 1.0f, 1.0f) ||
+        !mk64_3ds::Fast3DCanProject(-1.0f, 1.0f, 1.0f)) {
+        std::fputs("near-plane projection guard mismatch\n", stderr);
+        return 1;
+    }
+
     uint32_t state = 0x4D4B3634U;
     for (int sample = 0; sample < 200000; ++sample) {
         const float x1 = RandomCoordinate(state);

@@ -6,6 +6,14 @@ inline float Fast3DAspectCorrection(float width, float height) {
     return width > 0.0f ? (4.0f / 3.0f) * height / width : 1.0f;
 }
 
+inline bool Fast3DCanProject(float w1, float w2, float w3) {
+    constexpr float kNearPlaneEpsilon = 1.0e-4f;
+    const auto outsideNearPlane = [](float w) {
+        return w <= -kNearPlaneEpsilon || w >= kNearPlaneEpsilon;
+    };
+    return outsideNearPlane(w1) && outsideNearPlane(w2) && outsideNearPlane(w3);
+}
+
 // Returns a value with the same sign as the perspective-divided screen-space
 // cross product. Face culling only consumes that sign, so the homogeneous form
 // removes three divisions from every culled triangle.

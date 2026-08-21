@@ -167,6 +167,7 @@ struct BottomUiState {
     bool modalOpenedFromPause = false;
     bool consumesCStick = false;
     bool bottomDirty = true;
+    bool c2dUsedSinceLastFrameEnd = false;
     uint8_t raceHudRefreshPhase = 0;
     OptionsTab tab = OptionsTab::Game;
     uint8_t selectedRow = 0;
@@ -1606,6 +1607,7 @@ void DrawBottomBatch() {
     C2D_SceneBegin(sUi.bottomTarget);
     DrawBottom();
     C2D_Flush();
+    sUi.c2dUsedSinceLastFrameEnd = true;
 }
 
 void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
@@ -1618,6 +1620,7 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
     C2D_SceneBegin(topTarget);
     DrawTopFps(topTarget);
     C2D_Flush();
+    sUi.c2dUsedSinceLastFrameEnd = true;
 }
 
 } // namespace
@@ -1834,6 +1837,12 @@ extern "C" void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget) {
         return;
     }
     DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
+}
+
+extern "C" bool Mk64BottomUI3DSConsumeC2DUsage() {
+    const bool used = sUi.c2dUsedSinceLastFrameEnd;
+    sUi.c2dUsedSinceLastFrameEnd = false;
+    return used;
 }
 
 extern "C" uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t heldKeys) {

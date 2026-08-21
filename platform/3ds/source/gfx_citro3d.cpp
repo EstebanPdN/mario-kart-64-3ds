@@ -9,6 +9,7 @@
 #include <cstring>
 #include <deque>
 #include <new>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -21,6 +22,7 @@ extern "C" bool Mk64Diagnostics3DSSupportsWideMode(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSResolvedNewModel(void) __attribute__((weak));
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation(void) __attribute__((weak));
+extern "C" bool Mk64BottomUI3DSConsumeC2DUsage(void) __attribute__((weak));
 
 namespace Fast {
 namespace {
@@ -33,7 +35,12 @@ constexpr uint32_t kNativeHeight = 240;
 constexpr uint32_t kMaxBackingTextureSize = 512;
 constexpr uint32_t kMaxSourceVertices = 256 * 3;
 constexpr uint32_t kMaxDrawVertices = 256 * 6;
-constexpr uint32_t kVertexBufferCapacity = 32 * 1024;
+// Busy GP scenes can exceed E5's original 32K budget. That backend silently
+// discarded every later batch, which manifested as missing/corrupted sprites.
+// Keep enough bounded linear memory for the measured worst class of scene and
+// fail diagnostically if a future scene exceeds it instead of drawing a
+// partially valid frame.
+constexpr uint32_t kVertexBufferCapacity = 64 * 1024;
 constexpr uint32_t kPackedVertexFloats = 12;
 constexpr size_t kPresentedTimestampCapacity = 1024;
 // The largest dimension in the vanilla MK64 O2R texture set is 320 pixels.
@@ -800,7 +807,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         vertexCount = std::min(clippedVertexCount, static_cast<size_t>(kMaxDrawVertices));
     }
     if (mImpl->packedVertexCount + vertexCount > kVertexBufferCapacity) {
-        return;
+        throw std::length_error("3DS packed vertex buffer exhausted");
     }
 
     const size_t firstVertex = mImpl->packedVertexCount;
@@ -1313,11 +1320,14 @@ void GfxRenderingAPICitro3D::EndFrame() {
     if (!mImpl->frameActive) {
         return;
     }
-    // Flush Fast3D's exact dirty range before Citro3D's frame-end hook submits
-    // any later Citro2D work. Keep flags at zero: Citro2D owns private dynamic
-    // vertex/index buffers and relies on Citro3D's final linear-heap flush.
+    // Fast3D textures and the exact dirty VBO range are already coherent.
+    // Citro2D owns private dynamic buffers and needs Citro3D's whole-heap flush
+    // only on presentations where it actually emitted a batch. Avoid scanning
+    // the complete 24 MiB linear heap on the remaining gameplay frames.
     FlushPackedVertices();
-    C3D_FrameEnd(0);
+    const bool c2dUsed = Mk64BottomUI3DSConsumeC2DUsage == nullptr ||
+                         Mk64BottomUI3DSConsumeC2DUsage();
+    C3D_FrameEnd(c2dUsed ? 0 : GX_CMDLIST_FLUSH);
     mImpl->frameActive = false;
     mImpl->activeTarget = nullptr;
 
