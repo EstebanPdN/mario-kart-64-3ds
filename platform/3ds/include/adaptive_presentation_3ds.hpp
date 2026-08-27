@@ -4,10 +4,18 @@
 
 namespace mk64_3ds {
 
-constexpr std::uint8_t kAdaptivePresentationHealthyTicksToEnable = 45;
-constexpr std::uint8_t kAdaptivePresentationProbeTicksToEnable = 8;
-constexpr std::uint8_t kAdaptivePresentationPressureCooldownTicks = 15;
-constexpr std::uint8_t kAdaptivePresentationFailedProbeCooldownTicks = 60;
+constexpr std::uint8_t kAdaptivePresentationHealthyTicksToEnable = 8;
+constexpr std::uint8_t kAdaptivePresentationProbeTicksToEnable = 4;
+constexpr std::uint8_t kAdaptivePresentationPressureCooldownTicks = 2;
+constexpr std::uint8_t kAdaptivePresentationFailedProbeCooldownTicks = 15;
+constexpr std::uint64_t kAdaptivePresentationTextureBurstBytes = 1024u * 1024u;
+constexpr std::uint64_t kAdaptivePresentationTextureBurstCount = 32;
+
+inline bool IsAdaptivePresentationTextureBurst(std::uint64_t uploadCount,
+                                                std::uint64_t uploadBytes) {
+    return uploadCount >= kAdaptivePresentationTextureBurstCount ||
+           uploadBytes >= kAdaptivePresentationTextureBurstBytes;
+}
 
 enum AdaptivePresentationPressure : std::uint32_t {
     AdaptivePressureNone = 0,
@@ -47,8 +55,9 @@ struct AdaptivePresentationDecision {
 
 // A midpoint is optional; the following keyframe is not. Require sustained
 // keyframe headroom, then validate several midpoints before committing to the
-// optional midpoint path. A failed validation gets a longer cooldown to avoid
-// oscillating between an expensive probe and an overloaded keyframe.
+// optional midpoint path. Recovery is deliberately short: occasional 30 Hz
+// scheduler jitter must not leave an otherwise healthy New 3DS session pinned
+// to keyframes for seconds at a time.
 inline AdaptivePresentationDecision UpdateAdaptivePresentation(
     AdaptivePresentationState* state, const AdaptivePresentationInputs& inputs) {
     AdaptivePresentationDecision decision = {};

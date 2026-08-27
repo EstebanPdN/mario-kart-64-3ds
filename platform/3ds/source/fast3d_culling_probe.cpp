@@ -51,6 +51,23 @@ void TestDirectRangeValidation() {
     CheckRange(mk64_3ds::ValidateFast3DCullRange(0, 0, 0), false);
 }
 
+void TestTriangleVertexValidation() {
+    CHECK(mk64_3ds::AreFast3DTriangleVerticesValid(
+        kMaximumVertices - 3, kMaximumVertices - 2, kMaximumVertices - 1,
+        false, kMaximumVertices));
+    CHECK(!mk64_3ds::AreFast3DTriangleVerticesValid(
+        kMaximumVertices, 0, 1, false, kMaximumVertices));
+
+    // Textured rectangles use the four scratch vertices immediately after the
+    // regular Fast3D range.
+    CHECK(mk64_3ds::AreFast3DTriangleVerticesValid(
+        kMaximumVertices, kMaximumVertices + 1, kMaximumVertices + 3, true,
+        kMaximumVertices));
+    CHECK(!mk64_3ds::AreFast3DTriangleVerticesValid(
+        kMaximumVertices + 4, kMaximumVertices, kMaximumVertices + 1, true,
+        kMaximumVertices));
+}
+
 void TestModernDecoder(mk64_3ds::Fast3DCullEncoding encoding,
                        std::uint32_t opcode) {
     constexpr std::uint32_t kEncodedLimit =
@@ -186,6 +203,7 @@ int main() {
                       .last == 15);
 
     TestDirectRangeValidation();
+    TestTriangleVertexValidation();
     TestModernDecoder(mk64_3ds::Fast3DCullEncoding::F3DEX, kF3DEXOpcode);
     TestModernDecoder(mk64_3ds::Fast3DCullEncoding::F3DEX2, kF3DEX2Opcode);
     TestLegacyDecoder();
