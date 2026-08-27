@@ -19,6 +19,7 @@ constexpr size_t kChannels = 2;
 struct AudioBuffer {
     ndspWaveBuf wave = {};
     int16_t* samples = nullptr;
+    bool reserved = false;
 };
 
 std::array<AudioBuffer, kBufferCount> sBuffers;
@@ -70,6 +71,7 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
         }
         std::memset(buffer.samples, 0, kFramesPerBuffer * kChannels * sizeof(int16_t));
         ResetWave(buffer, 0);
+        buffer.reserved = false;
     }
 
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
@@ -101,6 +103,7 @@ extern "C" void Mk64Audio3DSShutdown(void) {
             buffer.samples = nullptr;
         }
         std::memset(&buffer.wave, 0, sizeof(buffer.wave));
+        buffer.reserved = false;
     }
     sQueuedBuffers.store(0, std::memory_order_relaxed);
     sDroppedBuffers.store(0, std::memory_order_relaxed);
@@ -156,39 +159,72 @@ extern "C" uint32_t Mk64Audio3DSDroppedCount(void) {
     return sDroppedBuffers.load(std::memory_order_relaxed);
 }
 
-extern "C" bool Mk64Audio3DSHasReusableBuffer(void) {
-    if (!sInitialized) return false;
+extern "C" int16_t* Mk64Audio3DSAcquireStereoS16(size_t frameCount, uint32_t* bufferToken) {
+    if (bufferToken != nullptr) *bufferToken = 0;
+    if (!sInitialized || bufferToken == nullptr || frameCount == 0 ||
+        frameCount > kFramesPerBuffer) {
+        sDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+
     BufferLockGuard lock;
-    return std::any_of(sBuffers.begin(), sBuffers.end(),
-                       [](const AudioBuffer& candidate) {
-                           return IsReusable(candidate.wave);
-                       });
+    auto buffer = std::find_if(sBuffers.begin(), sBuffers.end(),
+                               [](const AudioBuffer& candidate) {
+                                   return !candidate.reserved && IsReusable(candidate.wave);
+                               });
+    if (buffer == sBuffers.end()) {
+        sDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    buffer->reserved = true;
+    *bufferToken = static_cast<uint32_t>(std::distance(sBuffers.begin(), buffer) + 1);
+    return buffer->samples;
 }
 
-extern "C" bool Mk64Audio3DSQueueStereoS16(const int16_t* samples, size_t frameCount) {
-    if (!sInitialized || samples == nullptr || frameCount == 0 || frameCount > kFramesPerBuffer) {
+extern "C" void Mk64Audio3DSReleaseStereoS16(uint32_t bufferToken) {
+    if (!sInitialized || bufferToken == 0 || bufferToken > sBuffers.size()) return;
+    BufferLockGuard lock;
+    sBuffers[bufferToken - 1].reserved = false;
+}
+
+extern "C" bool Mk64Audio3DSCommitStereoS16(uint32_t bufferToken, size_t frameCount) {
+    if (!sInitialized || bufferToken == 0 || bufferToken > sBuffers.size() ||
+        frameCount == 0 || frameCount > kFramesPerBuffer) {
         sDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
     BufferLockGuard lock;
-    auto buffer = std::find_if(sBuffers.begin(), sBuffers.end(),
-                               [](const AudioBuffer& candidate) { return IsReusable(candidate.wave); });
-    if (buffer == sBuffers.end()) {
+    AudioBuffer& buffer = sBuffers[bufferToken - 1];
+    if (!buffer.reserved || !IsReusable(buffer.wave)) {
         sDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
     const size_t byteCount = frameCount * kChannels * sizeof(int16_t);
-    std::memcpy(buffer->samples, samples, byteCount);
     // DSP_FlushDataCache is disproportionately expensive when the application
     // CPU limit is high. The kernel cache operation provides the coherency
     // NDSP needs without burning a material part of an Old 3DS frame.
-    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, reinterpret_cast<u32>(buffer->samples),
+    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, reinterpret_cast<u32>(buffer.samples),
                              static_cast<u32>(byteCount));
-    ResetWave(*buffer, frameCount);
-    ndspChnWaveBufAdd(kChannel, &buffer->wave);
+    ResetWave(buffer, frameCount);
+    buffer.reserved = false;
+    ndspChnWaveBufAdd(kChannel, &buffer.wave);
     ndspChnSetPaused(kChannel, false);
     sQueuedBuffers.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+
+extern "C" bool Mk64Audio3DSQueueStereoS16(const int16_t* samples, size_t frameCount) {
+    if (samples == nullptr) {
+        sDroppedBuffers.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    uint32_t bufferToken = 0;
+    int16_t* destination = Mk64Audio3DSAcquireStereoS16(frameCount, &bufferToken);
+    if (destination == nullptr) return false;
+    std::memcpy(destination, samples, frameCount * kChannels * sizeof(int16_t));
+    if (Mk64Audio3DSCommitStereoS16(bufferToken, frameCount)) return true;
+    Mk64Audio3DSReleaseStereoS16(bufferToken);
+    return false;
 }

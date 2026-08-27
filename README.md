@@ -31,6 +31,10 @@ https://discord.gg/SMW49UMkw
 - Dual-screen interface, bottom-screen race HUD, and touch menu navigation.
 - Hardware-aware Old 3DS and New 3DS resource, HUD, audio, and presentation
   profiles.
+- Direct-to-NDSP audio buffers, with synthesis overlapped on an auxiliary CPU
+  core when the hardware makes one safely available.
+- A compact PICA200 vertex stream, bounded texture storage, and selective
+  cache coherency for lower CPU, memory, and upload overhead.
 - Original 30 Hz game simulation on every model, with an optional adaptive
   midpoint presentation path on New 3DS systems in 400-pixel mode.
 - On-device ROM validation and resource extraction.
@@ -48,6 +52,15 @@ activity leave enough headroom. It automatically falls back to the required
 
 The midpoint path is adaptive; it is not a promise of a fixed or sustained
 60 FPS mode. The 800-pixel quality mode presents keyframes only.
+
+The renderer flushes exact Fast3D vertex and texture ranges and requests a
+broader linear-memory coherency pass only on frames that actually submit
+Citro2D interface data. Vertex colors use a GPU-native byte format, reducing
+the fixed Fast3D vertex allocation and per-frame vertex traffic by 25% without
+changing the intended color precision. Audio synthesis writes directly into a
+reserved NDSP wave buffer instead of producing and copying an intermediate
+block. These changes reduce contention and memory traffic on both hardware
+profiles; sustained performance still requires physical-hardware measurement.
 
 ## Installation
 

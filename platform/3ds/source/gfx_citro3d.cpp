@@ -40,7 +40,6 @@ constexpr uint32_t kMaxDrawVertices = 256 * 6;
 // fail diagnostically if a future scene exceeds it instead of drawing a
 // partially valid frame.
 constexpr uint32_t kVertexBufferCapacity = 64 * 1024;
-constexpr uint32_t kPackedVertexFloats = 12;
 constexpr size_t kPresentedTimestampCapacity = 1024;
 // The largest dimension in the vanilla MK64 O2R texture set is 320 pixels.
 // Advertising that real source limit reduces Fast3D's square RGBA conversion
@@ -51,6 +50,21 @@ constexpr float kClipWEpsilon = 1.0e-4f;
 constexpr float kFullscreenBoundsEpsilon = 0.03f;
 constexpr float kFullscreenCoverScale = static_cast<float>(kTopLogicalWidth) / kNativeWidth;
 constexpr size_t kMaxVertexStrideFloats = 64;
+
+struct PackedVertex {
+    float position[4];
+    float texcoord0[2];
+    float texcoord1[2];
+    uint8_t color[4];
+};
+
+static_assert(sizeof(PackedVertex) == 36, "Packed PICA vertex layout changed");
+
+uint8_t FloatColorToByte(float value) {
+    if (!(value > 0.0f)) return 0;
+    if (value >= 1.0f) return 255;
+    return static_cast<uint8_t>(value * 255.0f + 0.5f);
+}
 
 constexpr uint32_t kDisplayTransferFlags =
     GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
@@ -347,7 +361,7 @@ struct GfxRenderingAPICitro3D::Impl {
     int projectionUniform = -1;
     C3D_RenderTarget* topTarget = nullptr;
     C3D_RenderTarget* activeTarget = nullptr;
-    float* packedVertices = nullptr;
+    PackedVertex* packedVertices = nullptr;
     size_t packedVertexCount = 0;
     size_t dirtyVertexBegin = 0;
     size_t dirtyVertexEnd = 0;
@@ -379,6 +393,7 @@ struct GfxRenderingAPICitro3D::Impl {
     int scissorWidth = static_cast<int>(kTopLogicalWidth);
     int scissorHeight = static_cast<int>(kTopHeight);
     bool scissorEnabled = false;
+    bool externalLinearBuffersDirty = false;
     std::array<uint64_t, kPresentedTimestampCapacity> presentedTimestamps = {};
     size_t presentedTimestampHead = 0;
     size_t presentedTimestampCount = 0;
@@ -389,6 +404,7 @@ struct GfxRenderingAPICitro3D::Impl {
     uint64_t textureCacheUploadBytes = 0;
     uint64_t vertexUploadCount = 0;
     uint64_t vertexUploadBytes = 0;
+    uint64_t linearHeapFlushFrameCount = 0;
 
     ~Impl() {
         for (auto& slot : framebuffers) {
@@ -832,7 +848,11 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     }
 
     std::array<std::array<float, 4>, 7> constants = {};
-    int varyingInput = -1;
+    // A program with one combiner input can always source it from the primary
+    // vertex color. This is exact for both uniform and varying batches, avoids
+    // scanning every vertex to rediscover uniformity, and keeps per-draw tint
+    // changes out of the six-stage TEV rebuild path.
+    int varyingInput = program->numInputs == 1 ? 0 : -1;
     for (uint8_t input = 0; input < program->numInputs; ++input) {
         const uint8_t inputOffset = program->inputOffsets[input];
         for (int component = 0; component < 4; ++component) {
@@ -890,11 +910,11 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     }
     for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
         const float* source = drawVertices + vertex * program->strideFloats;
-        float* destination = mImpl->packedVertices + (firstVertex + vertex) * kPackedVertexFloats;
-        *destination++ = source[0] * coverScale;
-        *destination++ = source[1] * coverScale;
-        *destination++ = source[2];
-        *destination++ = source[3];
+        PackedVertex& destination = mImpl->packedVertices[firstVertex + vertex];
+        destination.position[0] = source[0] * coverScale;
+        destination.position[1] = source[1] * coverScale;
+        destination.position[2] = source[2];
+        destination.position[3] = source[3];
 
         for (int texture = 0; texture < 2; ++texture) {
             float u = 0.0f;
@@ -913,21 +933,22 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                 u *= textureScaleU[texture];
                 v *= textureScaleV[texture];
             }
-            *destination++ = u;
-            *destination++ = v;
+            float* texcoord = texture == 0 ? destination.texcoord0 : destination.texcoord1;
+            texcoord[0] = u;
+            texcoord[1] = v;
         }
 
         if (varyingInput >= 0) {
             const float* color = source + program->inputOffsets[varyingInput];
-            *destination++ = color[0];
-            *destination++ = color[1];
-            *destination++ = color[2];
-            *destination++ = program->alpha ? color[3] : 1.0f;
+            destination.color[0] = FloatColorToByte(color[0]);
+            destination.color[1] = FloatColorToByte(color[1]);
+            destination.color[2] = FloatColorToByte(color[2]);
+            destination.color[3] = program->alpha ? FloatColorToByte(color[3]) : 255;
         } else {
-            *destination++ = 1.0f;
-            *destination++ = 1.0f;
-            *destination++ = 1.0f;
-            *destination++ = 1.0f;
+            destination.color[0] = 255;
+            destination.color[1] = 255;
+            destination.color[2] = 255;
+            destination.color[3] = 255;
         }
     }
 
@@ -1105,9 +1126,8 @@ void GfxRenderingAPICitro3D::FlushPackedVertices() {
     }
 
     const size_t vertexCount = mImpl->dirtyVertexEnd - mImpl->dirtyVertexBegin;
-    const size_t byteCount = vertexCount * kPackedVertexFloats * sizeof(float);
-    GSPGPU_FlushDataCache(mImpl->packedVertices + mImpl->dirtyVertexBegin * kPackedVertexFloats,
-                          byteCount);
+    const size_t byteCount = vertexCount * sizeof(PackedVertex);
+    GSPGPU_FlushDataCache(mImpl->packedVertices + mImpl->dirtyVertexBegin, byteCount);
     ++mImpl->vertexUploadCount;
     mImpl->vertexUploadBytes += byteCount;
     mImpl->dirtyVertexBegin = mImpl->packedVertexCount;
@@ -1123,10 +1143,10 @@ void GfxRenderingAPICitro3D::RestoreFast3DState() {
     AttrInfo_AddLoader(attributeInfo, 0, GPU_FLOAT, 4);
     AttrInfo_AddLoader(attributeInfo, 1, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attributeInfo, 2, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attributeInfo, 3, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(attributeInfo, 3, GPU_UNSIGNED_BYTE, 4);
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
-    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 4, 0x3210);
+    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 4, 0x3210);
 
     C3D_Mtx depthConversion;
     Mtx_Identity(&depthConversion);
@@ -1268,7 +1288,7 @@ void GfxRenderingAPICitro3D::Init() {
     C3D_BindProgram(&mImpl->shaderProgram);
     mImpl->projectionUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "projection");
     mImpl->packedVertices =
-        static_cast<float*>(linearAlloc(kVertexBufferCapacity * kPackedVertexFloats * sizeof(float)));
+        static_cast<PackedVertex*>(linearAlloc(kVertexBufferCapacity * sizeof(PackedVertex)));
     if (mImpl->packedVertices == nullptr) {
         return;
     }
@@ -1277,10 +1297,10 @@ void GfxRenderingAPICitro3D::Init() {
     AttrInfo_AddLoader(attributeInfo, 0, GPU_FLOAT, 4);
     AttrInfo_AddLoader(attributeInfo, 1, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attributeInfo, 2, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attributeInfo, 3, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(attributeInfo, 3, GPU_UNSIGNED_BYTE, 4);
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
-    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(float) * kPackedVertexFloats, 4, 0x3210);
+    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 4, 0x3210);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
     C3D_FrameRate(useIntermediatePresentation ? 60.0f : 30.0f);
@@ -1309,6 +1329,7 @@ void GfxRenderingAPICitro3D::StartFrame() {
     mImpl->viewportWidth = static_cast<int>(mImpl->outputWidth);
     mImpl->viewportHeight = static_cast<int>(kTopHeight);
     mImpl->scissorEnabled = false;
+    mImpl->externalLinearBuffersDirty = false;
     mImpl->originalAspect = Mk64Settings3DSGetAspectRatio != nullptr &&
                             Mk64Settings3DSGetAspectRatio() != 0;
     C3D_FrameDrawOn(mImpl->topTarget);
@@ -1319,15 +1340,13 @@ void GfxRenderingAPICitro3D::EndFrame() {
     if (!mImpl->frameActive) {
         return;
     }
-    // Citro2D keeps dynamic command data in its private linear buffers. The
-    // bottom screen can remain visually unchanged for many frames, but its
-    // command state still shares Citro3D's cache-coherency contract with the
-    // top renderer. E6 skipped that flush once the bottom UI became static;
-    // subsequent Fast3D texture uploads could then reach PICA as black data.
-    // Until Citro2D exposes explicit dirty ranges, preserve the proven full
-    // frame-end flush rather than trading correct textures for a cache scan.
+    // Fast3D flushes its exact VBO and texture ranges. Citro2D owns private
+    // linear vertex/index buffers, so only frames that actually submit a C2D
+    // batch need Citro3D's broad linear-heap coherency pass.
     FlushPackedVertices();
-    C3D_FrameEnd(0);
+    const bool needsLinearHeapFlush = mImpl->externalLinearBuffersDirty;
+    C3D_FrameEnd(needsLinearHeapFlush ? 0 : GX_CMDLIST_FLUSH);
+    if (needsLinearHeapFlush) ++mImpl->linearHeapFlushFrameCount;
     mImpl->frameActive = false;
     mImpl->activeTarget = nullptr;
 
@@ -1635,6 +1654,10 @@ uint64_t GfxRenderingAPICitro3D::GetVertexUploadBytes() const {
     return mImpl->vertexUploadBytes;
 }
 
+uint64_t GfxRenderingAPICitro3D::GetLinearHeapFlushFrameCount() const {
+    return mImpl->linearHeapFlushFrameCount;
+}
+
 void* GfxRenderingAPICitro3D::PrepareForExternalDraw() {
     if (!mImpl->frameActive) {
         return nullptr;
@@ -1643,6 +1666,12 @@ void* GfxRenderingAPICitro3D::PrepareForExternalDraw() {
     // pending Fast3D VBO range coherent before handing the frame to it.
     FlushPackedVertices();
     return mImpl->topTarget;
+}
+
+void GfxRenderingAPICitro3D::MarkExternalLinearBuffersDirty() {
+    if (mImpl->frameActive) {
+        mImpl->externalLinearBuffersDirty = true;
+    }
 }
 
 } // namespace Fast

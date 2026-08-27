@@ -24,6 +24,7 @@ bool Mk64Graphics3DSResolvedNewModel(void);
 uint32_t Mk64Graphics3DSResolvedOutputWidth(void);
 bool Mk64Graphics3DSUsesIntermediatePresentation(void);
 void Mk64Graphics3DSSuppressNextPresentation(bool suppress);
+void Mk64Graphics3DSMarkExternalLinearBuffersDirty(void);
 
 #ifdef __cplusplus
 }

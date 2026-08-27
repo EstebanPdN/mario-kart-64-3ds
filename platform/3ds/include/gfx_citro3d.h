@@ -93,8 +93,10 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     uint64_t GetTextureCacheUploadBytes() const;
     uint64_t GetVertexUploadCount() const;
     uint64_t GetVertexUploadBytes() const;
+    uint64_t GetLinearHeapFlushFrameCount() const;
     void ReleaseTextureAllocations();
     void* PrepareForExternalDraw();
+    void MarkExternalLinearBuffersDirty();
 
   private:
     void FlushPackedVertices();

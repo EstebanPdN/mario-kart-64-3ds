@@ -61,6 +61,7 @@ uint64_t sLastPerformanceTriangles = 0;
 uint64_t sLastPerformanceTextureUploads = 0;
 uint64_t sLastPerformanceTextureBytes = 0;
 uint64_t sLastPerformanceVertexBytes = 0;
+uint64_t sLastPerformanceLinearHeapFlushFrames = 0;
 uint64_t sLastPerformanceSampleFrame = 0;
 
 constexpr uint32_t kAudioFramesPerGameTick = 896;
@@ -192,6 +193,7 @@ void LogPerformanceSample() {
     const uint64_t textureUploads = sRenderer->GetTextureCacheUploadCount();
     const uint64_t textureBytes = sRenderer->GetTextureCacheUploadBytes();
     const uint64_t vertexBytes = sRenderer->GetVertexUploadBytes();
+    const uint64_t linearHeapFlushFrames = sRenderer->GetLinearHeapFlushFrameCount();
     Mk64Diagnostics3DSPerformance(
         static_cast<uint32_t>(sFrameCounter),
         PositiveTenths(sRenderer->GetPresentedFps2Seconds()),
@@ -203,12 +205,14 @@ void LogPerformanceSample() {
         static_cast<uint32_t>((vertexBytes - sLastPerformanceVertexBytes) / 1024U),
         Mk64Resource3DSLoadedCount(), PositiveHundredths(C3D_GetProcessingTime()),
         PositiveHundredths(C3D_GetDrawingTime()),
-        static_cast<uint32_t>(std::lround(std::max(0.0f, C3D_GetCmdBufUsage()) * 1000.0f)));
+        static_cast<uint32_t>(std::lround(std::max(0.0f, C3D_GetCmdBufUsage()) * 1000.0f)),
+        static_cast<uint32_t>(linearHeapFlushFrames - sLastPerformanceLinearHeapFlushFrames));
     sLastPerformanceDrawCalls = drawCalls;
     sLastPerformanceTriangles = triangles;
     sLastPerformanceTextureUploads = textureUploads;
     sLastPerformanceTextureBytes = textureBytes;
     sLastPerformanceVertexBytes = vertexBytes;
+    sLastPerformanceLinearHeapFlushFrames = linearHeapFlushFrames;
     sLastPerformanceSampleFrame = sFrameCounter;
 }
 }
@@ -275,6 +279,7 @@ extern "C" bool Mk64Graphics3DSInit() {
     sLastPerformanceTextureUploads = 0;
     sLastPerformanceTextureBytes = 0;
     sLastPerformanceVertexBytes = 0;
+    sLastPerformanceLinearHeapFlushFrames = 0;
     sLastPerformanceSampleFrame = 0;
     // Diagnostics resolves the hardware model once during process startup.
     // Every graphics component consumes this same conservative answer so a
@@ -332,6 +337,7 @@ extern "C" bool Mk64Graphics3DSInit() {
     sLastPerformanceTextureUploads = sRenderer->GetTextureCacheUploadCount();
     sLastPerformanceTextureBytes = sRenderer->GetTextureCacheUploadBytes();
     sLastPerformanceVertexBytes = sRenderer->GetVertexUploadBytes();
+    sLastPerformanceLinearHeapFlushFrames = sRenderer->GetLinearHeapFlushFrameCount();
     // Desktop builds receive this rectangle from the ImGui viewport. The 3DS
     // runtime has no desktop UI, so bind the game viewport to the top LCD.
     UpdateGameViewport();
@@ -367,6 +373,7 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sLastPerformanceTextureUploads = 0;
     sLastPerformanceTextureBytes = 0;
     sLastPerformanceVertexBytes = 0;
+    sLastPerformanceLinearHeapFlushFrames = 0;
     sLastPerformanceSampleFrame = 0;
 }
 
@@ -636,6 +643,11 @@ extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation() {
 }
 extern "C" void Mk64Graphics3DSSuppressNextPresentation(bool suppress) {
     sSuppressNextPresentation = suppress;
+}
+extern "C" void Mk64Graphics3DSMarkExternalLinearBuffersDirty() {
+    if (sRenderer != nullptr) {
+        sRenderer->MarkExternalLinearBuffersDirty();
+    }
 }
 extern "C" uint32_t OTRGetGameViewportWidth() {
     return GetViewportWidth();
