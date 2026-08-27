@@ -81,37 +81,36 @@ bool sCpuLimitChanged = false;
 __3ds_u32 sPreviousCpuLimit = 0;
 
 template <int32_t Numerator, int32_t Denominator>
-void ApplyGain(std::array<int16_t, kStereoSamplesPerGameFrame>& samples) {
-    for (int16_t& sample : samples) {
-        int32_t scaled = static_cast<int32_t>(sample) * Numerator / Denominator;
+void ApplyGain(int16_t* samples, size_t sampleCount) {
+    for (size_t index = 0; index < sampleCount; ++index) {
+        int32_t scaled = static_cast<int32_t>(samples[index]) * Numerator / Denominator;
         if (scaled > INT16_MAX) {
             scaled = INT16_MAX;
         } else if (scaled < INT16_MIN) {
             scaled = INT16_MIN;
         }
-        sample = static_cast<int16_t>(scaled);
+        samples[index] = static_cast<int16_t>(scaled);
     }
 }
 
-void ApplyMasterVolume(std::array<int16_t, kStereoSamplesPerGameFrame>& samples,
-                       uint16_t volumePercent) {
+void ApplyMasterVolume(int16_t* samples, size_t sampleCount, uint16_t volumePercent) {
     // Select once per buffer so the inner loop uses only constant power-of-two
     // divisions; ARM11 does not have a hardware integer divide instruction.
     switch (volumePercent) {
         case 25:
-            ApplyGain<1, 4>(samples);
+            ApplyGain<1, 4>(samples, sampleCount);
             break;
         case 50:
-            ApplyGain<1, 2>(samples);
+            ApplyGain<1, 2>(samples, sampleCount);
             break;
         case 75:
-            ApplyGain<3, 4>(samples);
+            ApplyGain<3, 4>(samples, sampleCount);
             break;
         case 150:
-            ApplyGain<3, 2>(samples);
+            ApplyGain<3, 2>(samples, sampleCount);
             break;
         case 200:
-            ApplyGain<2, 1>(samples);
+            ApplyGain<2, 1>(samples, sampleCount);
             break;
         case 100:
         default:
@@ -148,12 +147,14 @@ bool SynthesizeAndQueue(uint16_t volumePercent) {
     // create_next_audio_buffer advances the music and SFX timeline. Check the
     // sole-producer wave pool first so an already-full queue cannot consume
     // audio state that NDSP will never play.
-    if (!Mk64Audio3DSHasReusableBuffer()) return false;
-    std::array<int16_t, kStereoSamplesPerGameFrame> samples = {};
-    create_next_audio_buffer(samples.data(), kSamplesPerSynthesisFrame);
-    create_next_audio_buffer(samples.data() + kSamplesPerSynthesisFrame * 2,
+    uint32_t bufferToken = 0;
+    int16_t* samples =
+        Mk64Audio3DSAcquireStereoS16(kStereoFramesPerGameFrame, &bufferToken);
+    if (samples == nullptr) return false;
+    create_next_audio_buffer(samples, kSamplesPerSynthesisFrame);
+    create_next_audio_buffer(samples + kSamplesPerSynthesisFrame * 2,
                              kSamplesPerSynthesisFrame);
-    ApplyMasterVolume(samples, volumePercent);
+    ApplyMasterVolume(samples, kStereoSamplesPerGameFrame, volumePercent);
     const uint32_t nextBlock = sSynthesisBlockCount + 1u;
 
     // Inspect frequently enough to diagnose startup, but keep signal scans
@@ -164,16 +165,18 @@ bool SynthesizeAndQueue(uint16_t volumePercent) {
     uint32_t peak = 0;
     uint32_t nonzero = 0;
     if (inspectSignal) {
-        for (const int16_t sample : samples) {
+        for (size_t index = 0; index < kStereoSamplesPerGameFrame; ++index) {
+            const int16_t sample = samples[index];
             const int32_t value =
                 sample < 0 ? -static_cast<int32_t>(sample) : static_cast<int32_t>(sample);
             if (value != 0) ++nonzero;
             if (static_cast<uint32_t>(value) > peak) peak = static_cast<uint32_t>(value);
         }
     }
-    const bool queued =
-        Mk64Audio3DSQueueStereoS16(samples.data(), kStereoFramesPerGameFrame);
-    if (!queued) return false;
+    if (!Mk64Audio3DSCommitStereoS16(bufferToken, kStereoFramesPerGameFrame)) {
+        Mk64Audio3DSReleaseStereoS16(bufferToken);
+        return false;
+    }
     sSynthesisBlockCount = nextBlock;
     const bool firstSignal = inspectSignal && peak != 0u && !sLoggedFirstSignal;
     if (firstSignal) sLoggedFirstSignal = true;

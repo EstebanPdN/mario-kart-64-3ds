@@ -1600,9 +1600,10 @@ void DrawBottomBatch() {
     // Clear before any Citro2D objects are queued. C2D_TargetClear after a top
     // batch used to split that pending batch and could invalidate its texture
     // state on hardware.
-    C3D_FrameSplit(0);
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
     C3D_RenderTargetClear(sUi.bottomTarget, C3D_CLEAR_ALL, C2D_Color32(0, 0, 0, 255), 0);
     PrepareC2DBatch();
+    Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(sUi.bottomTarget);
     DrawBottom();
     C2D_Flush();
@@ -1612,9 +1613,14 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
     if (topTarget == nullptr || !Mk64Settings3DSGetShowFpsEnabled()) return;
     // Preserve the completed game color buffer and clear only reverse-depth so
     // the overlay cannot be hidden behind scene geometry.
+    // A lower-screen C2D batch may already be pending in its private linear
+    // buffer. Submit it with Citro3D's coherency pass before starting the top
+    // overlay batch; this path is disabled unless the developer FPS display is
+    // explicitly enabled.
     C3D_FrameSplit(0);
     C3D_RenderTargetClear(topTarget, C3D_CLEAR_DEPTH, 0, 0);
     PrepareC2DBatch();
+    Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(topTarget);
     DrawTopFps(topTarget);
     C2D_Flush();

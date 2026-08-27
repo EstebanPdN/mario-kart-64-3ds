@@ -64,7 +64,8 @@ void Mk64Diagnostics3DSPerformance(uint32_t frame, uint32_t fps2Tenths,
                                    uint32_t triangles, uint32_t textureUploads,
                                    uint32_t textureKilobytes, uint32_t vertexKilobytes,
                                    size_t loadedResources, uint32_t processingHundredths,
-                                   uint32_t drawingHundredths, uint32_t commandPermille);
+                                   uint32_t drawingHundredths, uint32_t commandPermille,
+                                   uint32_t linearHeapFlushFrames);
 void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResources, size_t textureSlots,
                               size_t initializedTextures, size_t textureBytes,
                               size_t shaderPrograms, size_t clipScratchBytes);

@@ -996,12 +996,13 @@ extern "C" void Mk64Diagnostics3DSPerformance(uint32_t frame, uint32_t fps2Tenth
                                                 size_t loadedResources,
                                                 uint32_t processingHundredths,
                                                 uint32_t drawingHundredths,
-                                                uint32_t commandPermille) {
+                                                uint32_t commandPermille,
+                                                uint32_t linearHeapFlushFrames) {
     char value[288] = {};
     std::snprintf(value, sizeof(value),
                   "frame=%lu fps2=%lu.%lu fps10=%lu.%lu draws=%lu tris=%lu "
                   "tex_up=%lu tex_kib=%lu vtx_kib=%lu resources=%lu "
-                  "c3d_process=%lu.%02lu c3d_draw=%lu.%02lu cmd=%lu.%01lu%%",
+                  "c3d_process=%lu.%02lu c3d_draw=%lu.%02lu cmd=%lu.%01lu%% linear_full=%lu",
                   static_cast<unsigned long>(frame),
                   static_cast<unsigned long>(fps2Tenths / 10U),
                   static_cast<unsigned long>(fps2Tenths % 10U),
@@ -1018,7 +1019,8 @@ extern "C" void Mk64Diagnostics3DSPerformance(uint32_t frame, uint32_t fps2Tenth
                   static_cast<unsigned long>(drawingHundredths / 100U),
                   static_cast<unsigned long>(drawingHundredths % 100U),
                   static_cast<unsigned long>(commandPermille / 10U),
-                  static_cast<unsigned long>(commandPermille % 10U));
+                  static_cast<unsigned long>(commandPermille % 10U),
+                  static_cast<unsigned long>(linearHeapFlushFrames));
     LogLine("performance: ", value);
 }
 

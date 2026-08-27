@@ -4,7 +4,7 @@
 
 .fvec projection[4]
 
-.constf shaderConstants(1.0, 0.0, 0.0, 0.0)
+.constf shaderConstants(1.0, 0.0, 0.00392156862745, 0.0)
 
 .out outpos position
 .out outtc0 texcoord0
@@ -29,6 +29,6 @@
     mov outpos, r0
     mov outtc0, intex0
     mov outtc1, intex1
-    mov outclr, incolor
+    mul outclr, shaderConstants.zzzz, incolor
     end
 .end
