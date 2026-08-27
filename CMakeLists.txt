@@ -3657,8 +3657,12 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
             [=[void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
     struct LoadedVertex* v1 = &mRsp->loaded_vertices[vtx1_idx];]=]
             [=[void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
-    if (vtx1_idx >= MAX_VERTICES || vtx2_idx >= MAX_VERTICES ||
-        vtx3_idx >= MAX_VERTICES) {
+    // GfxDrawRectangle deliberately uses the four scratch vertices allocated
+    // after the regular Fast3D vertex range. E5's generic bounds guard rejected
+    // every textured rectangle, leaving menus black while triangle geometry
+    // such as the title flag still rendered.
+    if (!::mk64_3ds::AreFast3DTriangleVerticesValid(
+            vtx1_idx, vtx2_idx, vtx3_idx, is_rect, MAX_VERTICES)) {
         return;
     }
     struct LoadedVertex* v1 = &mRsp->loaded_vertices[vtx1_idx];]=]

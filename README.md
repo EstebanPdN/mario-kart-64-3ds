@@ -1,16 +1,21 @@
 # Mario Kart 64 for Nintendo 3DS
 
-<img width="1672" height="941" alt="mariokart2" src="https://github.com/user-attachments/assets/6b367030-2f4d-4c5d-b295-7d6d7f7d2ceb" />
-
+<img width="1672" height="941" alt="Mario Kart 64 running on Nintendo 3DS" src="https://github.com/user-attachments/assets/6b367030-2f4d-4c5d-b295-7d6d7f7d2ceb" />
 
 Native Nintendo 3DS port of Mario Kart 64, based on
-[SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart).
+[SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart). It is designed
+specifically for the 3DS family, with a dual-screen interface and hardware-aware
+rendering, audio, and memory profiles.
 
-This port is designed specifically around the Nintendo 3DS, with dual-screen
-features and performance optimizations for real hardware.
+> [!WARNING]
+> This is an experimental fan port. Save your work before launching it and
+> report crashes or rendering issues with a diagnostic dump whenever possible.
 
-No ROM or extracted Nintendo game data is distributed with this project.
-You must provide your own legally obtained USA Mario Kart 64 ROM.
+No ROM, ROM fragment, save file, or extracted Nintendo game data is distributed
+with this project. You must provide your own legally obtained USA Mario Kart 64
+ROM.
+
+Made with help from Codex.
 
 ## Community
 
@@ -21,87 +26,78 @@ https://discord.gg/SMW49UMkw
 
 ## Features
 
-- Native 400x240 gameplay and an optional 800x240 high-density top-screen
-  mode.
+- Native 400x240 gameplay and an optional 800x240 high-density top-screen mode.
+- Wide 5:3 and Original 4:3 display modes.
+- Dual-screen interface, bottom-screen race HUD, and touch menu navigation.
 - Hardware-aware Old 3DS and New 3DS resource, HUD, audio, and presentation
   profiles.
-- Original 30 Hz game simulation on every model. New 3DS systems in 400-pixel
-  mode may add an adaptive matrix-interpolated midpoint presentation only
-  after sustained frame-time headroom; this is not a fixed-FPS claim.
-- Press `SELECT` at any time to create a diagnostic dump for bug reports.
-- Wide 5:3 and Original 4:3 display modes.
-- Dual-screen interface
-- Bottom-screen race HUD
-- Touch menu
-  
-- MULTIPLAYER IS A PLANNED FEATURE
-  
+- Original 30 Hz game simulation on every model, with an optional adaptive
+  midpoint presentation path on New 3DS systems in 400-pixel mode.
+- On-device ROM validation and resource extraction.
+- Diagnostic dumps created on demand with `SELECT`.
+
+Multiplayer is planned but is not currently available.
+
+## Performance
+
+Mario Kart 64 retains its original 30 Hz game simulation. On New Nintendo 3DS
+systems using the 400-pixel top-screen mode, the port may render an additional
+matrix-interpolated midpoint frame when recent frame, GPU, audio, and resource
+activity leave enough headroom. It automatically falls back to the required
+30 Hz keyframes under pressure.
+
+The midpoint path is adaptive; it is not a promise of a fixed or sustained
+60 FPS mode. The 800-pixel quality mode presents keyframes only.
+
 ## Installation
 
-Install the CIA normally, then create:
+Download either the CIA for installation with FBI or the full 3DSX application
+for the Homebrew Launcher from the
+[latest release](https://github.com/EstebanPdN/mario-kart-64-3ds/releases/latest).
+
+Create this folder on your SD card:
 
 ```text
 sd:/3ds/MK64/
 ```
 
-Place your USA Mario Kart 64 ROM inside that folder.
-
-Name it:
+Place your USA Mario Kart 64 ROM in that folder and name it either:
 
 ```text
 mk64.z64
 ```
-OR
+
+or:
 
 ```text
 Mario Kart 64.z64
 ```
 
-The ROM must be in **`.z64` format**. If your ROM is in a different format, you can convert it using:
+The ROM must use the `.z64` byte order. ROMs in another byte order can be
+converted with the [Hack64 ROM Swapper](https://hack64.net/tools/swapper.php).
 
-[https://hack64.net/tools/swapper.php](https://hack64.net/tools/swapper.php)
+### Automatic extraction
 
-### Option 1 — Automatic Extraction
-
-Simply place the ROM in the folder and launch the game.
-
-The 3DS will validate the ROM and generate:
+Launch the port with the ROM in place. The 3DS validates it and creates:
 
 ```text
 sd:/3ds/MK64/mk64.o2r
 ```
 
-This is done entirely on the console.
+The first extraction can take a long time, so keep the console charged. You can
+close the lid while extraction continues. Press `START` to cancel, remove the
+incomplete output, and exit safely. Later launches reuse the completed archive.
 
-The first extraction can take a long time, so keep the console charged.
-You can close the lid while it is working and extraction will continue.
+### Desktop extraction
 
-Press `START` during extraction to cancel it, delete the incomplete output,
-and exit the application safely.
-
-Once extraction finishes successfully, later launches will reuse the generated
-`mk64.o2r` file.
-
-### Option 2 — Recommended
-
-For a faster and more reliable setup, use
-[SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart) on your computer
-to extract the game resources from your ROM.
-
-After SpaghettiKart creates `mk64.o2r`, copy it to:
-
-```text
-sd:/3ds/MK64/
-```
-
-Your folder should then contain both:
+For a faster setup, use
+[SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart) on a computer
+to create `mk64.o2r`, then copy it to `sd:/3ds/MK64/` alongside your ROM:
 
 ```text
 sd:/3ds/MK64/mk64.z64
 sd:/3ds/MK64/mk64.o2r
 ```
-
-Launch the port and you're ready to play.
 
 ## Controls
 
@@ -119,33 +115,25 @@ Launch the port and you're ready to play.
 | SELECT | Create diagnostic dump |
 | START | Start / Pause; cancel and exit during extraction |
 
-## Diagnostics
+## Diagnostics and bug reports
 
-If you find a crash, graphical bug, performance issue, or other problem, press:
-
-```text
-SELECT
-```
-
-The port will create a diagnostic folder under:
+If you encounter a crash, graphical bug, or performance problem, press
+`SELECT`. The port creates a diagnostic folder under:
 
 ```text
 sd:/3ds/MK64/dump/
 ```
 
-These dumps can help diagnose problems on real Nintendo 3DS hardware.
+Attach the complete folder to your bug report and describe the console model,
+display mode, game mode, and what happened immediately before the issue.
 
 ## Releases
 
-GitHub releases include:
+GitHub releases provide an installable CIA, a full Homebrew Launcher 3DSX, an
+FBI QR code, and SHA-256 checksums. GitHub also generates source archives from
+each release tag.
 
-- Installable CIA
-- Homebrew Launcher 3DSX
-- Source code archive
-
-Latest release:
-
-https://github.com/EstebanPdN/mario-kart-64-3ds/releases/latest
+[Download the latest release](https://github.com/EstebanPdN/mario-kart-64-3ds/releases/latest)
 
 ## Building
 
@@ -155,41 +143,35 @@ Requirements:
 - devkitARM
 - libctru
 - Citro3D
-- CMake 3.20+
+- CMake 3.20 or newer
 - `makerom` and `bannertool` for CIA packaging
 
-Clone the repository with its submodules and run:
+Clone the repository with its submodules, then run:
 
 ```sh
 git submodule update --init --recursive
 ./platform/3ds/build.sh
 ```
 
-Builds are generated under:
-
-```text
-build-3ds/game/
-```
+Build output is written under `build-3ds/game/` by default.
 
 ## Credits
 
 This project is based on
 [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart) and the work of
-the N64 reverse-engineering, decompilation, and Nintendo 3DS homebrew communities.
+the N64 reverse-engineering, decompilation, and Nintendo 3DS homebrew
+communities.
 
-Additional optimization and 3DS implementation techniques were studied
-from other open-source Nintendo 64 ports, including
+Additional optimization and 3DS implementation techniques were studied from
+other open-source Nintendo 64 ports, including
 [Super Mario 64 3DS Port Ultimate](https://github.com/Epic0522/Super-Mario-64-3ds-port---Ultimate).
 
 ## Legal
 
-This repository contains only source code, build tools, port-specific assets,
-and extraction logic.
-
-It does **not** distribute Mario Kart 64 ROMs, `mk64.o2r`, or extracted
-copyrighted Nintendo game assets.
+This repository contains source code, build scripts, redistributable
+port-specific artwork, and extraction logic. It does not distribute Mario Kart
+64 ROMs, `mk64.o2r`, saves, or extracted copyrighted Nintendo game assets.
 
 Users are responsible for providing their own legally obtained compatible ROM.
-
 This is an unofficial fan project and is not affiliated with or endorsed by
 Nintendo or Harbour Masters.

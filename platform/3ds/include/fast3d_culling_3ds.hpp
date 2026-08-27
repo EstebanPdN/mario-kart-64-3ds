@@ -17,6 +17,16 @@ struct Fast3DCullRange {
     bool valid = false;
 };
 
+constexpr bool AreFast3DTriangleVerticesValid(std::size_t first,
+                                               std::size_t second,
+                                               std::size_t third,
+                                               bool isRectangle,
+                                               std::size_t maximumVertices) {
+    const std::size_t vertexLimit =
+        maximumVertices + (isRectangle ? 4U : 0U);
+    return first < vertexLimit && second < vertexLimit && third < vertexLimit;
+}
+
 constexpr Fast3DCullRange ValidateFast3DCullRange(std::size_t first,
                                                   std::size_t last,
                                                   std::size_t maximumVertices) {

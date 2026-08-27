@@ -74,6 +74,13 @@ bool AdvanceUntilMidpoint(mk64_3ds::AdaptivePresentationState* state,
 
 int main() {
     static_assert(sizeof(mk64_3ds::AdaptivePresentationState) <= 4);
+    assert(!mk64_3ds::IsAdaptivePresentationTextureBurst(
+        mk64_3ds::kAdaptivePresentationTextureBurstCount - 1,
+        mk64_3ds::kAdaptivePresentationTextureBurstBytes - 1));
+    assert(mk64_3ds::IsAdaptivePresentationTextureBurst(
+        mk64_3ds::kAdaptivePresentationTextureBurstCount, 0));
+    assert(mk64_3ds::IsAdaptivePresentationTextureBurst(
+        0, mk64_3ds::kAdaptivePresentationTextureBurstBytes));
     assert(!mk64_3ds::UpdateAdaptivePresentation(nullptr, HealthyInputs()).renderMidpoint);
 
     mk64_3ds::AdaptivePresentationState state = {};
@@ -130,7 +137,7 @@ int main() {
     assert(!decision.renderMidpoint);
     assert((decision.pressureMask & mk64_3ds::AdaptivePressureSlowTick) != 0);
 
-    // A workload that becomes slow just before the long recovery threshold
+    // A workload that becomes slow just before the recovery threshold
     // never spends time on an optional midpoint.
     state = {};
     std::uint32_t oscillatingMidpoints = 0;
@@ -145,7 +152,7 @@ int main() {
     assert(oscillatingMidpoints == 0);
     assert(!state.midpointEnabled);
 
-    // If a trial midpoint overloads the following keyframe, wait two seconds
+    // If a trial midpoint overloads the following keyframe, wait briefly
     // before collecting a fresh sustained-headroom window.
     state = {};
     inputs = HealthyInputs();
