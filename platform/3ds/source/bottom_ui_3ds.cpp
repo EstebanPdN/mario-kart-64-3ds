@@ -47,6 +47,8 @@ constexpr size_t kFontGlyphCount = 42;
 constexpr float kOptionsTabY = 36.0f;
 constexpr float kOptionsRowY = 70.0f;
 constexpr float kOptionsRowStep = 39.0f;
+constexpr float kScreenOptionsRowY = 66.0f;
+constexpr float kScreenOptionsRowStep = 30.0f;
 constexpr const char* kGameSelectOptionResource = "__OTR__textures/texture_tkmk00/texture_l_option";
 constexpr const char* kGameSelectDataResource = "__OTR__textures/texture_tkmk00/texture_r_data";
 constexpr const char* kSelectionTriangleResource =
@@ -940,11 +942,17 @@ void SaveChangedSetting(const char* successText) {
 uint8_t RowCount(OptionsTab tab) {
     switch (tab) {
         case OptionsTab::Game: return sUi.modalOpenedFromPause ? 2 : 1;
-        case OptionsTab::Screen: return 2;
+        case OptionsTab::Screen: return 4;
         case OptionsTab::Gameplay: return 2;
         case OptionsTab::Developer: return 3;
         default: return 1;
     }
+}
+
+float OptionsRowY(OptionsTab tab, uint8_t row) {
+    return tab == OptionsTab::Screen
+               ? kScreenOptionsRowY + row * kScreenOptionsRowStep
+               : kOptionsRowY + row * kOptionsRowStep;
 }
 
 void OpenOptions(bool fromPause) {
@@ -1020,6 +1028,29 @@ void ActivateSelectedRow(int direction) {
                     SaveChangedSetting(enabled ? "TOP HUD ON" : "TOP HUD OFF");
                     break;
                 }
+                case 2: {
+                    constexpr std::array<uint8_t, 3> kRenderScales = { 50, 75, 100 };
+                    const uint8_t current = Mk64Settings3DSGetRenderScalePercent();
+                    size_t index = 0;
+                    for (size_t i = 0; i < kRenderScales.size(); ++i) {
+                        if (kRenderScales[i] == current) index = i;
+                    }
+                    index = direction < 0
+                                ? (index + kRenderScales.size() - 1U) % kRenderScales.size()
+                                : (index + 1U) % kRenderScales.size();
+                    Mk64Settings3DSSetRenderScalePercent(kRenderScales[index]);
+                    SaveChangedSetting("RESOLUTION SAVED");
+                    break;
+                }
+                case 3: {
+                    constexpr int kFilterCount = 3;
+                    int filter = static_cast<int>(Mk64Settings3DSGetDisplayFilter()) + step;
+                    if (filter < 0) filter = kFilterCount - 1;
+                    if (filter >= kFilterCount) filter = 0;
+                    Mk64Settings3DSSetDisplayFilter(static_cast<Mk64DisplayFilter3DS>(filter));
+                    SaveChangedSetting("FILTER SAVED");
+                    break;
+                }
             }
             break;
         case OptionsTab::Gameplay:
@@ -1092,8 +1123,9 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
     }
     const uint8_t rows = RowCount(sUi.tab);
     for (uint8_t row = 0; row < rows; ++row) {
-        const int top = static_cast<int>(kOptionsRowY + row * kOptionsRowStep);
-        if (PointInside(x, y, 12, top, 296, 33)) {
+        const int top = static_cast<int>(OptionsRowY(sUi.tab, row));
+        const int height = sUi.tab == OptionsTab::Screen ? 28 : 33;
+        if (PointInside(x, y, 12, top, 296, height)) {
             sUi.selectedRow = row;
             ActivateSelectedRow(1);
             return;
@@ -1391,6 +1423,19 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
             } else if (row == 1) {
                 *label = "TOP HUD";
                 std::snprintf(value, valueSize, "%s", Mk64Settings3DSGetTopHudEnabled() ? "ON" : "OFF");
+            } else if (row == 2) {
+                *label = "RESOLUTION";
+                const uint8_t scale = Mk64Settings3DSGetRenderScalePercent();
+                std::snprintf(value, valueSize, "%s",
+                              scale == 50 ? "LOW 0.50X"
+                                          : (scale == 75 ? "MEDIUM 0.75X" : "HIGH 1.00X"));
+            } else if (row == 3) {
+                *label = "FILTER";
+                const Mk64DisplayFilter3DS filter = Mk64Settings3DSGetDisplayFilter();
+                std::snprintf(value, valueSize, "%s",
+                              filter == MK64_DISPLAY_FILTER_3DS_BLUR
+                                  ? "BLUR"
+                                  : (filter == MK64_DISPLAY_FILTER_3DS_CRT ? "CRT" : "BILINEAR"));
             }
             break;
         case OptionsTab::Gameplay:
@@ -1439,7 +1484,7 @@ void DrawOptions() {
 
     const uint8_t rows = RowCount(sUi.tab);
     for (uint8_t row = 0; row < rows; ++row) {
-        const float y = kOptionsRowY + row * kOptionsRowStep;
+        const float y = OptionsRowY(sUi.tab, row);
         const char* label = "";
         char value[48] = {};
         GetRowText(sUi.tab, row, &label, value, sizeof(value));
@@ -1455,7 +1500,8 @@ void DrawOptions() {
                  selected ? C2D_Color32(167, 255, 151, 255)
                           : C2D_Color32(198, 222, 210, 240),
                  C2D_AlignRight, 0.74f);
-        C2D_DrawRectSolid(22.0f, y + 29.0f, 0.44f, 282.0f, 1.0f,
+        const float separatorY = y + (sUi.tab == OptionsTab::Screen ? 26.0f : 29.0f);
+        C2D_DrawRectSolid(22.0f, separatorY, 0.44f, 282.0f, 1.0f,
                           C2D_Color32(255, 255, 255, selected ? 75 : 35));
     }
     DrawText(sUi.modalOpenedFromPause ? "START OR B  CONTINUE" : "B BACK",

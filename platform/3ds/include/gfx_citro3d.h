@@ -100,6 +100,9 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
 
   private:
     void FlushPackedVertices();
+    bool EnsurePresentationResources();
+    void UploadProjectionForActiveTarget();
+    void PresentSceneToTopTarget();
     void RestoreFast3DState();
     float GetPresentedFps(uint64_t windowMilliseconds) const;
 

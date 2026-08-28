@@ -27,6 +27,8 @@ https://discord.gg/SMW49UMkw
 ## Features
 
 - Native 400x240 gameplay and an optional 800x240 high-density top-screen mode.
+- Selectable Low (0.50x), Medium (0.75x), and High (1.00x) internal resolution.
+- Bilinear, Blur, and lightweight CRT display filters.
 - Wide 5:3 and Original 4:3 display modes.
 - Dual-screen interface, bottom-screen race HUD, and touch menu navigation.
 - Hardware-aware Old 3DS and New 3DS resource, HUD, audio, and presentation
@@ -52,6 +54,13 @@ activity leave enough headroom. It automatically falls back to the required
 
 The midpoint path is adaptive; it is not a promise of a fixed or sustained
 60 FPS mode. The 800-pixel quality mode presents keyframes only.
+
+The Screen menu can render the game at half, three-quarter, or full internal
+resolution and scale it to the complete top screen. Bilinear uses a single GPU
+presentation pass, Blur uses four lightweight samples, and CRT combines
+bilinear scaling with a small procedural scanline and shadow-mask pattern.
+High resolution with Bilinear selected keeps the original direct presentation
+path and does not allocate the intermediate target.
 
 The renderer flushes exact Fast3D vertex and texture ranges and requests a
 broader linear-memory coherency pass only on frames that actually submit

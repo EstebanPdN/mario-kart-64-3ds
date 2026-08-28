@@ -16,6 +16,8 @@ struct Settings {
     Mk64AspectRatio3DS aspectRatio;
     bool topHudEnabled;
     uint16_t resolutionWidth;
+    uint8_t renderScalePercent;
+    Mk64DisplayFilter3DS displayFilter;
     uint8_t turboMultiplier;
     uint16_t masterVolumePercent;
     bool showFpsEnabled;
@@ -26,6 +28,8 @@ constexpr Settings kDefaults = {
     MK64_ASPECT_RATIO_3DS_WIDE,
     false,
     400,
+    100,
+    MK64_DISPLAY_FILTER_3DS_BILINEAR,
     1,
     100,
     false,
@@ -110,6 +114,27 @@ uint16_t SanitizeResolution(long width) {
     return width < 600 ? 400 : 800;
 }
 
+uint8_t SanitizeRenderScale(long percent) {
+    if (percent <= 62) {
+        return 50;
+    }
+    if (percent <= 87) {
+        return 75;
+    }
+    return 100;
+}
+
+Mk64DisplayFilter3DS SanitizeDisplayFilter(Mk64DisplayFilter3DS filter) {
+    switch (filter) {
+        case MK64_DISPLAY_FILTER_3DS_BLUR:
+        case MK64_DISPLAY_FILTER_3DS_CRT:
+            return filter;
+        case MK64_DISPLAY_FILTER_3DS_BILINEAR:
+        default:
+            return MK64_DISPLAY_FILTER_3DS_BILINEAR;
+    }
+}
+
 uint8_t SanitizeTurboMultiplier(long multiplier) {
     if (multiplier < 1) {
         return 1;
@@ -153,6 +178,16 @@ void ApplySetting(const char* key, const char* value) {
         }
         return;
     }
+    if (std::strcmp(key, "display_filter") == 0) {
+        if (EqualsIgnoreCase(value, "blur")) {
+            sSettings.displayFilter = MK64_DISPLAY_FILTER_3DS_BLUR;
+        } else if (EqualsIgnoreCase(value, "crt")) {
+            sSettings.displayFilter = MK64_DISPLAY_FILTER_3DS_CRT;
+        } else if (EqualsIgnoreCase(value, "bilinear")) {
+            sSettings.displayFilter = MK64_DISPLAY_FILTER_3DS_BILINEAR;
+        }
+        return;
+    }
     if (std::strcmp(key, "show_fps") == 0) {
         if (ParseBoolean(value, &booleanValue)) {
             sSettings.showFpsEnabled = booleanValue;
@@ -172,6 +207,8 @@ void ApplySetting(const char* key, const char* value) {
     }
     if (std::strcmp(key, "resolution") == 0) {
         sSettings.resolutionWidth = SanitizeResolution(integerValue);
+    } else if (std::strcmp(key, "render_scale") == 0) {
+        sSettings.renderScalePercent = SanitizeRenderScale(integerValue);
     } else if (std::strcmp(key, "turbo_speed") == 0) {
         sSettings.turboMultiplier = SanitizeTurboMultiplier(integerValue);
     } else if (std::strcmp(key, "master_volume") == 0) {
@@ -243,6 +280,8 @@ extern "C" bool Mk64Settings3DSSave(void) {
         "aspect_ratio=%s\n"
         "top_hud=%s\n"
         "resolution=%u\n"
+        "render_scale=%u\n"
+        "display_filter=%s\n"
         "turbo_speed=%u\n"
         "master_volume=%u\n"
         "show_fps=%s\n"
@@ -250,6 +289,10 @@ extern "C" bool Mk64Settings3DSSave(void) {
         sSettings.aspectRatio == MK64_ASPECT_RATIO_3DS_ORIGINAL ? "original" : "wide",
         sSettings.topHudEnabled ? "on" : "off",
         static_cast<unsigned int>(sSettings.resolutionWidth),
+        static_cast<unsigned int>(sSettings.renderScalePercent),
+        sSettings.displayFilter == MK64_DISPLAY_FILTER_3DS_BLUR
+            ? "blur"
+            : (sSettings.displayFilter == MK64_DISPLAY_FILTER_3DS_CRT ? "crt" : "bilinear"),
         static_cast<unsigned int>(sSettings.turboMultiplier),
         static_cast<unsigned int>(sSettings.masterVolumePercent),
         sSettings.showFpsEnabled ? "on" : "off", sSettings.overlayEnabled ? "on" : "off");
@@ -310,6 +353,26 @@ extern "C" uint16_t Mk64Settings3DSGetResolutionWidth(void) {
 extern "C" void Mk64Settings3DSSetResolutionWidth(uint16_t width) {
     EnsureLoaded();
     sSettings.resolutionWidth = SanitizeResolution(width);
+}
+
+extern "C" uint8_t Mk64Settings3DSGetRenderScalePercent(void) {
+    EnsureLoaded();
+    return sSettings.renderScalePercent;
+}
+
+extern "C" void Mk64Settings3DSSetRenderScalePercent(uint8_t percent) {
+    EnsureLoaded();
+    sSettings.renderScalePercent = SanitizeRenderScale(percent);
+}
+
+extern "C" Mk64DisplayFilter3DS Mk64Settings3DSGetDisplayFilter(void) {
+    EnsureLoaded();
+    return sSettings.displayFilter;
+}
+
+extern "C" void Mk64Settings3DSSetDisplayFilter(Mk64DisplayFilter3DS filter) {
+    EnsureLoaded();
+    sSettings.displayFilter = SanitizeDisplayFilter(filter);
 }
 
 extern "C" uint8_t Mk64Settings3DSGetTurboMultiplier(void) {
