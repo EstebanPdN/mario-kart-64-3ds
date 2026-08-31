@@ -35,8 +35,9 @@ https://discord.gg/SMW49UMkw
   profiles.
 - Direct-to-NDSP audio buffers, with synthesis overlapped on an auxiliary CPU
   core when the hardware makes one safely available.
-- A compact PICA200 vertex stream, bounded texture storage, and selective
-  cache coherency for lower CPU, memory, and upload overhead.
+- A compact PICA200 vertex stream, bounded texture storage, and direct ARM11
+  cache cleaning with a compatibility fallback for lower CPU, memory, IPC,
+  and upload overhead.
 - Original 30 Hz game simulation on every model, with an optional adaptive
   midpoint presentation path on New 3DS systems in 400-pixel mode.
 - On-device ROM validation and resource extraction.
@@ -62,14 +63,19 @@ bilinear scaling with a small procedural scanline and shadow-mask pattern.
 High resolution with Bilinear selected keeps the original direct presentation
 path and does not allocate the intermediate target.
 
-The renderer flushes exact Fast3D vertex and texture ranges and requests a
-broader linear-memory coherency pass only on frames that actually submit
-Citro2D interface data. Vertex colors use a GPU-native byte format, reducing
-the fixed Fast3D vertex allocation and per-frame vertex traffic by 25% without
-changing the intended color precision. Audio synthesis writes directly into a
-reserved NDSP wave buffer instead of producing and copying an intermediate
-block. These changes reduce contention and memory traffic on both hardware
-profiles; sustained performance still requires physical-hardware measurement.
+The renderer cleans exact Fast3D vertex and texture ranges through the local
+ARM11 kernel path, with the established GSP service call retained as a
+compatibility fallback. Citro2D frames capture and clean only their bounded
+linear vertex/index allocation span through the same local path instead of
+flushing the complete linear heap through a blocking GSP round trip. Unchanged
+filter-presentation geometry is retained between frames.
+Vertex colors use a GPU-native byte format, reducing the fixed Fast3D vertex
+allocation and per-frame vertex traffic by 25% without changing the intended
+color precision. Audio synthesis writes directly into a reserved NDSP wave
+buffer and uses the same clean-only ownership transfer instead of producing and
+copying an intermediate block. These changes reduce contention and memory
+traffic on both hardware profiles; sustained performance still requires
+physical-hardware measurement.
 
 ## Installation
 

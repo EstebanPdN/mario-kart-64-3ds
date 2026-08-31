@@ -644,6 +644,12 @@ extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation() {
 extern "C" void Mk64Graphics3DSSuppressNextPresentation(bool suppress) {
     sSuppressNextPresentation = suppress;
 }
+extern "C" void Mk64Graphics3DSSetExternalLinearBufferRange(const void* address,
+                                                              size_t size) {
+    if (sRenderer != nullptr) {
+        sRenderer->SetExternalLinearBufferRange(address, size);
+    }
+}
 extern "C" void Mk64Graphics3DSMarkExternalLinearBuffersDirty() {
     if (sRenderer != nullptr) {
         sRenderer->MarkExternalLinearBuffersDirty();

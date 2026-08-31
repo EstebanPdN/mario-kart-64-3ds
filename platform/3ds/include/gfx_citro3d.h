@@ -96,6 +96,7 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     uint64_t GetLinearHeapFlushFrameCount() const;
     void ReleaseTextureAllocations();
     void* PrepareForExternalDraw();
+    void SetExternalLinearBufferRange(const void* address, size_t size);
     void MarkExternalLinearBuffersDirty();
 
   private:
