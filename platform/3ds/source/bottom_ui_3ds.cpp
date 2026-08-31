@@ -6,6 +6,7 @@
 #include "input_policy_3ds.hpp"
 #include "resource_runtime_3ds.h"
 #include "settings_3ds.h"
+#include "system_3ds.h"
 
 #include <3ds.h>
 #include <citro2d.h>
@@ -583,7 +584,12 @@ bool LoadTexture(const char* resourceName, UiTexture& destination, const char* p
             }
         }
     }
-    C3D_TexFlush(&decoded.texture);
+    if (!Mk64System3DSCleanDataCache(
+            decoded.texture.data,
+            static_cast<size_t>(backingWidth) * backingHeight * sizeof(uint32_t))) {
+        DeleteTexture(decoded);
+        return false;
+    }
     C3D_TexSetFilter(&decoded.texture, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&decoded.texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     decoded.subTexture = {
@@ -649,7 +655,12 @@ bool LoadFontAtlas() {
         glyph.loaded = true;
         ++loadedCount;
     }
-    C3D_TexFlush(&font.texture);
+    if (!Mk64System3DSCleanDataCache(
+            font.texture.data,
+            static_cast<size_t>(kFontAtlasWidth) * kFontAtlasHeight * sizeof(uint32_t))) {
+        C3D_TexDelete(&font.texture);
+        return false;
+    }
     C3D_TexSetFilter(&font.texture, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&font.texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     font.initialized = loadedCount >= 36;
@@ -1677,7 +1688,18 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
 extern "C" bool Mk64BottomUI3DSInit() {
     if (sUi.initialized) return true;
     sUi = {};
-    if (!C2D_Init(kC2DObjectCapacity)) return false;
+    Mk64System3DSBeginLinearAllocationCapture();
+    const bool c2dInitialized = C2D_Init(kC2DObjectCapacity);
+    const void* c2dLinearBase = nullptr;
+    size_t c2dLinearBytes = 0;
+    const bool c2dRangeCaptured =
+        Mk64System3DSEndLinearAllocationCapture(&c2dLinearBase,
+                                                &c2dLinearBytes);
+    if (!c2dInitialized) return false;
+    if (c2dRangeCaptured) {
+        Mk64Graphics3DSSetExternalLinearBufferRange(c2dLinearBase,
+                                                    c2dLinearBytes);
+    }
     sUi.bottomTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH16);
     if (sUi.bottomTarget == nullptr) {
         C2D_Fini();

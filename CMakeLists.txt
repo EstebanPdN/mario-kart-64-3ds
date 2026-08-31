@@ -2302,6 +2302,7 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
     )
     target_link_libraries(mk64-3ds-fast3d-renderer PUBLIC
         mk64-3ds-fast3d-shader-bin
+        mk64-3ds-platform
         citro3d
         ctru
         m
@@ -3877,6 +3878,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         platform/3ds/source/bottom_ui_3ds.cpp
         platform/3ds/source/diagnostics_3ds.cpp
         platform/3ds/source/game_main_3ds.cpp
+        platform/3ds/source/linear_allocation_capture_3ds.cpp
     )
     target_include_directories(mk64-3ds-game PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/include"
@@ -3908,7 +3910,11 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         -include
         engine_3ds_prelude.h
     )
-    target_link_options(mk64-3ds-game PRIVATE -Wl,--gc-sections -Wl,--allow-multiple-definition)
+    target_link_options(mk64-3ds-game PRIVATE
+        -Wl,--gc-sections
+        -Wl,--allow-multiple-definition
+        -Wl,--wrap=linearAlloc
+    )
     target_link_libraries(mk64-3ds-game PRIVATE
         mk64-3ds-game-runtime
         -Wl,--start-group

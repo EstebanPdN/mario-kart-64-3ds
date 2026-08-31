@@ -1,4 +1,5 @@
 #include "diagnostics_3ds.h"
+#include "system_3ds.h"
 
 #include <3ds.h>
 
@@ -560,6 +561,10 @@ void WriteQuickDump(const char* trigger) {
         std::fprintf(info, "Keys held: 0x%08lX\n",
                      static_cast<unsigned long>(sKeysHeld.load(std::memory_order_relaxed)));
         std::fprintf(info, "Model: %s\n", sIsNew3DS ? "New 3DS" : "Old 3DS / unknown");
+        std::fprintf(info, "Data cache clean path: %s\n", Mk64System3DSDataCacheMode());
+        std::fprintf(info, "Captured Citro2D linear span: %lu bytes\n",
+                     static_cast<unsigned long>(
+                         Mk64System3DSCapturedLinearAllocationSize()));
         std::fprintf(info, "Kernel / FIRM / system core: 0x%08lX / 0x%08lX / 0x%08lX\n",
                      static_cast<unsigned long>(osGetKernelVersion()),
                      static_cast<unsigned long>(osGetFirmVersion()),

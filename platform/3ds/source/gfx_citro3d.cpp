@@ -1,4 +1,5 @@
 #include "gfx_citro3d.h"
+#include "system_3ds.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -24,6 +25,10 @@ extern "C" bool Mk64Diagnostics3DSSupportsWideMode(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSResolvedNewModel(void) __attribute__((weak));
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation(void) __attribute__((weak));
+extern "C" {
+extern u32 __ctru_linear_heap;
+extern u32 __ctru_linear_heap_size;
+}
 
 namespace Fast {
 namespace {
@@ -400,6 +405,11 @@ struct GfxRenderingAPICitro3D::Impl {
     bool postprocessActive = false;
     bool scenePresented = false;
     PackedVertex* packedVertices = nullptr;
+    uint32_t postprocessVertexOutputWidth = 0;
+    uint32_t postprocessVertexRenderWidth = 0;
+    uint32_t postprocessVertexRenderHeight = 0;
+    int postprocessVertexFilter = -1;
+    size_t postprocessVertexCount = 0;
     size_t packedVertexCount = 0;
     size_t dirtyVertexBegin = 0;
     size_t dirtyVertexEnd = 0;
@@ -432,6 +442,8 @@ struct GfxRenderingAPICitro3D::Impl {
     int scissorHeight = static_cast<int>(kTopHeight);
     bool scissorEnabled = false;
     bool externalLinearBuffersDirty = false;
+    const void* externalLinearBufferBase = nullptr;
+    size_t externalLinearBufferSize = 0;
     std::array<uint64_t, kPresentedTimestampCapacity> presentedTimestamps = {};
     size_t presentedTimestampHead = 0;
     size_t presentedTimestampCount = 0;
@@ -719,7 +731,9 @@ void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t wi
     }
     slot.hasTransparency = combinedAlpha != 0xFF;
 
-    C3D_TexFlush(&slot.texture);
+    if (!Mk64System3DSCleanDataCache(slot.texture.data, slot.allocatedBytes)) {
+        throw std::runtime_error("3DS texture cache clean failed");
+    }
     ++mImpl->textureCacheUploadCount;
     mImpl->textureCacheUploadBytes += slot.allocatedBytes;
     // TextureCacheValue is value-initialized with linear_filter=false on a
@@ -1221,7 +1235,10 @@ void GfxRenderingAPICitro3D::FlushPackedVertices() {
 
     const size_t vertexCount = mImpl->dirtyVertexEnd - mImpl->dirtyVertexBegin;
     const size_t byteCount = vertexCount * sizeof(PackedVertex);
-    GSPGPU_FlushDataCache(mImpl->packedVertices + mImpl->dirtyVertexBegin, byteCount);
+    if (!Mk64System3DSCleanDataCache(
+            mImpl->packedVertices + mImpl->dirtyVertexBegin, byteCount)) {
+        throw std::runtime_error("3DS vertex cache clean failed");
+    }
     ++mImpl->vertexUploadCount;
     mImpl->vertexUploadBytes += byteCount;
     mImpl->dirtyVertexBegin = mImpl->packedVertexCount;
@@ -1251,6 +1268,11 @@ bool GfxRenderingAPICitro3D::EnsurePresentationResources() {
             linearFree(mImpl->postprocessVertices);
             mImpl->postprocessVertices = nullptr;
         }
+        mImpl->postprocessVertexOutputWidth = 0;
+        mImpl->postprocessVertexRenderWidth = 0;
+        mImpl->postprocessVertexRenderHeight = 0;
+        mImpl->postprocessVertexFilter = -1;
+        mImpl->postprocessVertexCount = 0;
     };
 
     const uint16_t backingWidth = mImpl->outputWidth == kTopWideWidth ? 1024 : 512;
@@ -1301,7 +1323,12 @@ bool GfxRenderingAPICitro3D::EnsurePresentationResources() {
             maskPixels[MortonOffset8x8(x, y)] = __builtin_bswap32(rgba);
         }
     }
-    C3D_TexFlush(&mImpl->crtMaskTexture);
+    if (!Mk64System3DSCleanDataCache(
+            mImpl->crtMaskTexture.data,
+            static_cast<size_t>(kCrtMaskSize) * kCrtMaskSize * sizeof(uint32_t))) {
+        releasePartialResources();
+        return false;
+    }
     C3D_TexSetFilter(&mImpl->crtMaskTexture, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&mImpl->crtMaskTexture, GPU_REPEAT, GPU_REPEAT);
     return true;
@@ -1434,32 +1461,50 @@ void GfxRenderingAPICitro3D::PresentSceneToTopTarget() {
         }
     };
 
-    size_t quadCount = 1;
+    const size_t quadCount = mImpl->displayFilter == DisplayFilterBlur ? 4U : 1U;
+    const bool rebuildVertices =
+        mImpl->postprocessVertexOutputWidth != mImpl->outputWidth ||
+        mImpl->postprocessVertexRenderWidth != mImpl->renderWidth ||
+        mImpl->postprocessVertexRenderHeight != mImpl->renderHeight ||
+        mImpl->postprocessVertexFilter != mImpl->displayFilter ||
+        mImpl->postprocessVertexCount != quadCount * 6U;
     if (mImpl->displayFilter == DisplayFilterBlur) {
         constexpr std::array<std::array<float, 2>, 4> kBlurOffsets = {{
             {{ -0.35f, -0.35f }}, {{ 0.35f, -0.35f }},
             {{ -0.35f, 0.35f }}, {{ 0.35f, 0.35f }},
         }};
-        quadCount = kBlurOffsets.size();
-        for (size_t quad = 0; quad < quadCount; ++quad) {
-            const float offsetU = kBlurOffsets[quad][0] / backingWidth;
-            const float offsetV = kBlurOffsets[quad][1] / backingHeight;
-            writeQuad(quad * 6, uMinimum + offsetU, vMinimum + offsetV,
-                      uMaximum + offsetU, vMaximum + offsetV, 64);
+        if (rebuildVertices) {
+            for (size_t quad = 0; quad < quadCount; ++quad) {
+                const float offsetU = kBlurOffsets[quad][0] / backingWidth;
+                const float offsetV = kBlurOffsets[quad][1] / backingHeight;
+                writeQuad(quad * 6, uMinimum + offsetU, vMinimum + offsetV,
+                          uMaximum + offsetU, vMaximum + offsetV, 64);
+            }
         }
         C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE,
                        GPU_ONE, GPU_ONE);
     } else {
-        writeQuad(0, uMinimum, vMinimum, uMaximum, vMaximum, 255);
+        if (rebuildVertices) {
+            writeQuad(0, uMinimum, vMinimum, uMaximum, vMaximum, 255);
+        }
         C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO,
                        GPU_ONE, GPU_ZERO);
     }
 
     const size_t vertexCount = quadCount * 6;
-    const size_t byteCount = vertexCount * sizeof(PackedVertex);
-    GSPGPU_FlushDataCache(mImpl->postprocessVertices, byteCount);
-    ++mImpl->vertexUploadCount;
-    mImpl->vertexUploadBytes += byteCount;
+    if (rebuildVertices) {
+        const size_t byteCount = vertexCount * sizeof(PackedVertex);
+        if (!Mk64System3DSCleanDataCache(mImpl->postprocessVertices, byteCount)) {
+            throw std::runtime_error("3DS presentation cache clean failed");
+        }
+        mImpl->postprocessVertexOutputWidth = mImpl->outputWidth;
+        mImpl->postprocessVertexRenderWidth = mImpl->renderWidth;
+        mImpl->postprocessVertexRenderHeight = mImpl->renderHeight;
+        mImpl->postprocessVertexFilter = mImpl->displayFilter;
+        mImpl->postprocessVertexCount = vertexCount;
+        ++mImpl->vertexUploadCount;
+        mImpl->vertexUploadBytes += byteCount;
+    }
     C3D_DrawArrays(GPU_TRIANGLES, 0, static_cast<int>(vertexCount));
     ++mImpl->drawCallCount;
     mImpl->triangleCount += vertexCount / 3;
@@ -1592,7 +1637,7 @@ void GfxRenderingAPICitro3D::Init() {
     if (bottomFramebuffer != nullptr) {
         const size_t bottomBytes = static_cast<size_t>(bottomWidth) * bottomHeight * 3;
         std::memset(bottomFramebuffer, 0, bottomBytes);
-        GSPGPU_FlushDataCache(bottomFramebuffer, bottomBytes);
+        Mk64System3DSCleanDataCache(bottomFramebuffer, bottomBytes);
     }
     aptSetHomeAllowed(true);
     aptSetSleepAllowed(true);
@@ -1703,13 +1748,29 @@ void GfxRenderingAPICitro3D::EndFrame() {
     if (!mImpl->frameActive) {
         return;
     }
-    // Fast3D flushes its exact VBO and texture ranges. Citro2D owns private
+    // Fast3D cleans its exact VBO and texture ranges. Citro2D owns private
     // linear vertex/index buffers, so only frames that actually submit a C2D
-    // batch need Citro3D's broad linear-heap coherency pass.
+    // batch need the separately captured range below.
     PresentSceneToTopTarget();
     FlushPackedVertices();
     const bool needsLinearHeapFlush = mImpl->externalLinearBuffersDirty;
-    C3D_FrameEnd(needsLinearHeapFlush ? 0 : GX_CMDLIST_FLUSH);
+    // Citro3D's default C3D_FrameEnd(0) path asks the GSP sysmodule to flush
+    // the entire linear heap. Citro2D's vertex and index allocations are
+    // captured during its initialization, so normal UI frames can clean only
+    // that bounded span and avoid both the broad scan and the blocking service
+    // round trip.
+    const void* linearCleanBase = mImpl->externalLinearBufferBase;
+    size_t linearCleanSize = mImpl->externalLinearBufferSize;
+    if (linearCleanBase == nullptr || linearCleanSize == 0) {
+        linearCleanBase =
+            reinterpret_cast<void*>(static_cast<uintptr_t>(__ctru_linear_heap));
+        linearCleanSize = __ctru_linear_heap_size;
+    }
+    const bool linearHeapClean = !needsLinearHeapFlush ||
+        Mk64System3DSCleanDataCache(linearCleanBase, linearCleanSize);
+    // If both direct and fallback cleaning unexpectedly failed, retain
+    // Citro3D's established full-heap path as a final correctness fallback.
+    C3D_FrameEnd(linearHeapClean ? GX_CMDLIST_FLUSH : 0);
     if (needsLinearHeapFlush) ++mImpl->linearHeapFlushFrameCount;
     mImpl->frameActive = false;
     mImpl->activeTarget = nullptr;
@@ -2038,6 +2099,26 @@ void GfxRenderingAPICitro3D::MarkExternalLinearBuffersDirty() {
     if (mImpl->frameActive) {
         mImpl->externalLinearBuffersDirty = true;
     }
+}
+
+void GfxRenderingAPICitro3D::SetExternalLinearBufferRange(const void* address,
+                                                           size_t size) {
+    if (!mImpl) return;
+    mImpl->externalLinearBufferBase = nullptr;
+    mImpl->externalLinearBufferSize = 0;
+    if (address == nullptr || size == 0) return;
+
+    const uintptr_t heapBegin = static_cast<uintptr_t>(__ctru_linear_heap);
+    const uintptr_t heapEnd = heapBegin + __ctru_linear_heap_size;
+    const uintptr_t rangeBegin = reinterpret_cast<uintptr_t>(address);
+    if (heapEnd < heapBegin || rangeBegin < heapBegin ||
+        size > std::numeric_limits<uintptr_t>::max() - rangeBegin) {
+        return;
+    }
+    const uintptr_t rangeEnd = rangeBegin + size;
+    if (rangeEnd > heapEnd) return;
+    mImpl->externalLinearBufferBase = address;
+    mImpl->externalLinearBufferSize = size;
 }
 
 } // namespace Fast
