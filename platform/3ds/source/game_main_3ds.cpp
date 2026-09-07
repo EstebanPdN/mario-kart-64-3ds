@@ -5,19 +5,25 @@
 #include "game_runtime_3ds.h"
 #include "game_state_3ds.h"
 #include "input_3ds.h"
+#include "performance_trace_3ds.hpp"
+#include "audio_ndsp_3ds.h"
 #include "resource_runtime_3ds.h"
 #include "settings_3ds.h"
 
 #include <3ds.h>
 
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <new>
+#include <malloc.h>
 
 extern "C" {
 extern int32_t gMenuSelection;
+extern int32_t gGamestate, gRaceState;
+extern float gCourseTimer;
 void initialize_memory_pool(void);
 int Mk64MemoryArena3DSIsReady(void);
 void audio_init(void);
@@ -43,6 +49,13 @@ uint32_t __ctru_linear_heap_size = 24 * 1024 * 1024;
 namespace {
 constexpr int32_t kLogoIntroMenu = 8;
 constexpr uint64_t kSimulationRate = 30;
+
+void ArchiveLoadProgress(unsigned percent) {
+    static unsigned previous = 101;
+    if (percent == previous) return;
+    previous = percent;
+    Mk64BottomUI3DSShowLoadingProgress("LOADING GAME", "LOADING RESOURCES", percent);
+}
 
 [[noreturn]] void TerminateHandler() noexcept {
     const char* reason = "std::terminate without an active exception";
@@ -78,6 +91,8 @@ constexpr uint64_t kSimulationRate = 30;
 int main() {
     std::set_terminate(TerminateHandler);
     Mk64Diagnostics3DSStart();
+    Mk64Settings3DSSetHardwareModel(Mk64Diagnostics3DSIsNewModel());
+    Mk64Settings3DSLoad();
     Mk64Diagnostics3DSCheckpoint("game-data-init");
     const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
     if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
@@ -86,7 +101,6 @@ int main() {
         ExitWithError(data.message);
     }
     Mk64Diagnostics3DSCheckpoint("game-data-ready");
-    Mk64Settings3DSLoad();
 
     // First-run extraction needs the regular heap for Torch's ROM buffer and
     // per-file YAML data. Reserve the vanilla arena only after mk64.o2r is
@@ -152,6 +166,27 @@ int main() {
     }
     Mk64Diagnostics3DSCheckpoint("bottom-ui-ready");
 
+    // Retain the compressed archive, not every decoded/GPU texture. CIA
+    // metadata requests expanded memory on both Old and New models. Reserve
+    // headroom for later course objects and transient decompression buffers.
+    const auto used = static_cast<size_t>(mallinfo().uordblks);
+    const size_t heapSize = envGetHeapSize();
+    constexpr size_t reserve = 8u * 1024u * 1024u;
+    const size_t budget = heapSize > used && heapSize - used > reserve
+        ? heapSize - used - reserve : 0;
+    Mk64Diagnostics3DSCheckpoint("archive-ram-loading");
+    if (!Mk64Resource3DSMakeResident(budget, ArchiveLoadProgress)) {
+        Mk64Diagnostics3DSFailure("archive-ram-loading", "insufficient RAM or archive read failed");
+        Mk64BottomUI3DSShutdown();
+        Mk64GameAudio3DSShutdown();
+        Mk64Graphics3DSShutdown();
+        Mk64Resource3DSShutdown();
+        Mk64Diagnostics3DSStop();
+        ExitWithError("Could not load mk64.o2r into RAM.\nUse the installed CIA for expanded memory\non Old/New 3DS. Check the SD archive if\nalready using the CIA.");
+    }
+    Mk64Diagnostics3DSCheckpoint("archive-ram-ready-sd-closed");
+    Mk64Diagnostics3DSBufferRuntimeLog();
+
     // Skip the desktop-only Harbour Masters splash and enter the stock logo.
     gMenuSelection = kLogoIntroMenu;
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-init");
@@ -163,6 +198,9 @@ int main() {
     bool suppressNextPresentation = false;
     while (WindowIsRunning()) {
         if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
+            Mk64Graphics3DSResumeAfterDiagnosticPause();
+            Mk64BottomUI3DSResetFps();
+            mk64_3ds::PerformanceResume();
             nextSimulationDeadline = svcGetSystemTick();
             deadlineRemainder = 0;
             suppressNextPresentation = false;
@@ -176,17 +214,29 @@ int main() {
             suppressNextPresentation = false;
             continue;
         }
+        mk64_3ds::PerformanceBegin();
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
-        Mk64BottomUI3DSPrepareFrame();
+        auto& perf = mk64_3ds::PerformanceCurrent();
+        { mk64_3ds::PerformanceTimer timer(perf.prepare_us); Mk64BottomUI3DSPrepareFrame(); }
+        perf.game_state = static_cast<uint32_t>(gGamestate);
+        mk64_3ds::PerformanceRaceState(gGamestate == 4, static_cast<uint32_t>(gRaceState),
+            gCourseTimer > 0.0f ? static_cast<uint32_t>(gCourseTimer * 1000.0f) : 0);
+        perf.scale = Mk64Settings3DSGetRenderScalePercent();
+        perf.distance = Mk64Settings3DSGetRenderDistance();
+        perf.layout = Mk64Settings3DSGetHudLayout();
+        perf.filter = Mk64Settings3DSGetDisplayFilter();
+        perf.profile = Mk64Graphics3DSResolvedNewModel();
+        perf.width = Mk64Graphics3DSResolvedOutputWidth();
         Mk64Graphics3DSSuppressNextPresentation(suppressNextPresentation);
         suppressNextPresentation = false;
-        thread5_iteration();
+        { mk64_3ds::PerformanceTimer timer(perf.iteration_us); thread5_iteration(); }
         // HandleEvents() runs inside the display-list iteration and is where
         // aptMainLoop() observes HOME -> Close Software. Do not enter the
         // audio worker wait or frame pacer after that close request.
         if (!WindowIsRunning()) break;
         Mk64Diagnostics3DSSetStage("game-loop-audio");
-        Mk64GameAudio3DSPump();
+        { mk64_3ds::PerformanceTimer timer(perf.audio_pump_us); Mk64GameAudio3DSPump(); }
+        perf.audio_after = Mk64Audio3DSBufferedFrames();
 
         // Keep the original 30 Hz simulation clock exact. If rendering falls
         // behind, the following tick may omit only its presentation so logic,
@@ -204,17 +254,23 @@ int main() {
             const uint64_t remainingTicks = nextSimulationDeadline - now;
             const int64_t remainingNanoseconds = static_cast<int64_t>(
                 remainingTicks * 1000000000ULL / SYSCLOCK_ARM11);
-            if (remainingNanoseconds > 0) svcSleepThread(remainingNanoseconds);
+            if (remainingNanoseconds > 0) {
+                mk64_3ds::PerformanceTimer timer(perf.sleep_us);
+                svcSleepThread(remainingNanoseconds);
+            }
         } else {
             const uint64_t lateness = now - nextSimulationDeadline;
+            perf.lateness_us = static_cast<uint32_t>(std::min<uint64_t>(lateness * 1000000ULL / SYSCLOCK_ARM11, UINT32_MAX));
             const uint64_t tickTicks = SYSCLOCK_ARM11 / kSimulationRate;
             if (lateness > tickTicks * 3U) {
+                perf.pacer_reset = 1;
                 nextSimulationDeadline = now;
                 deadlineRemainder = 0;
             } else if (lateness >= tickTicks / 2U) {
                 suppressNextPresentation = true;
             }
         }
+        mk64_3ds::PerformanceEnd();
     }
 
     // WindowIsRunning becomes false after aptMainLoop reports the HOME-menu
@@ -234,4 +290,10 @@ extern "C" void userAppExit() {
     // it cannot keep using services while process teardown is in progress.
     Mk64GameAudio3DSAbortForProcessExit();
     Mk64Diagnostics3DSAbortForProcessExit();
+    // _Exit still invokes libctru's heap unmapping. Its default __appExit
+    // does not stop GSP: the event thread's heap-backed stack would disappear
+    // while it is running (hardware dump 114). gfxExit joins that thread
+    // before the heap is released, and skips its VBlank wait after APT has
+    // returned GPU ownership to HOME. Do not run the renderer destructors here.
+    gfxExit();
 }

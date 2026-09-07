@@ -11,6 +11,11 @@
 
 namespace Fast {
 
+struct CompiledTevOperation3DS {
+    uint8_t function = 0;
+    std::array<uint8_t, 3> source = {};
+};
+
 struct ShaderProgram {
     uint64_t shaderId0 = 0;
     uint64_t shaderId1 = 0;
@@ -30,6 +35,9 @@ struct ShaderProgram {
     bool invisible = false;
     bool twoCycle = false;
     int combiner[2][2][4] = {};
+    // Immutable combiner plans, compiled once when the shader is created.
+    CompiledTevOperation3DS tevOperations[2][2][2] = {};
+    uint8_t tevOperationCount[2][2] = {};
 };
 
 class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
@@ -38,6 +46,7 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     ~GfxRenderingAPICitro3D() override;
 
     bool IsInitialized() const;
+    void* GetTopRenderTarget() const;
     const char* GetName() override;
     int GetMaxTextureSize() override;
     GfxClipParameters GetClipParameters() override;
@@ -85,6 +94,8 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void SetCurrentPrimDepth(float depth) override;
     void GetDebugStats(size_t* textureSlots, size_t* initializedTextures, size_t* textureBytes,
                        size_t* shaderPrograms, size_t* clipScratchBytes) const;
+    uint32_t GetFrameBeginWaitMicroseconds() const;
+    void ResetPresentedFps();
     float GetPresentedFps2Seconds() const;
     float GetPresentedFps10Seconds() const;
     uint64_t GetDrawCallCount() const;

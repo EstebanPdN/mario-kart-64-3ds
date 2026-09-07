@@ -1,3 +1,5 @@
+#include "hud_layout_3ds.hpp"
+#include "render_policy_3ds.hpp"
 #include "bottom_ui_3ds.h"
 #include "game_runtime_3ds.h"
 
@@ -49,7 +51,7 @@ constexpr float kOptionsTabY = 36.0f;
 constexpr float kOptionsRowY = 70.0f;
 constexpr float kOptionsRowStep = 39.0f;
 constexpr float kScreenOptionsRowY = 66.0f;
-constexpr float kScreenOptionsRowStep = 30.0f;
+constexpr float kScreenOptionsRowStep = 23.0f;
 constexpr const char* kGameSelectOptionResource = "__OTR__textures/texture_tkmk00/texture_l_option";
 constexpr const char* kGameSelectDataResource = "__OTR__textures/texture_tkmk00/texture_r_data";
 constexpr const char* kSelectionTriangleResource =
@@ -107,6 +109,7 @@ enum TextureType : uint32_t {
 };
 
 struct UiTexture {
+    bool redBackground = false;
     C3D_Tex texture = {};
     Tex3DS_SubTexture subTexture = {};
     bool initialized = false;
@@ -155,11 +158,22 @@ struct BottomUiState {
     bool initialized = false;
     C3D_RenderTarget* bottomTarget = nullptr;
     UiFontAtlas font;
+    std::array<UiFontAtlas, 5> dataFonts;
+    C3D_RenderTarget* lastTopTarget = nullptr;
     UiTexture menuBackground;
     UiTexture coursePreview;
     UiTexture minimap;
     UiTexture gameSelectOption;
     UiTexture gameSelectData;
+    std::array<UiTexture, 16> dataPreviews;
+    std::array<UiTexture, 16> dataTitles;
+    UiTexture dataHeading;
+    char dataMapResource[192] = {};
+    float dataMapX=0,dataMapY=0,dataMapWidth=0,dataMapHeight=0;
+    int dataAction = 0;
+    float dataScroll = 0;
+    uint32_t dataDirection = 0;
+    uint64_t dataRepeatAt = 0;
     UiTexture selectionTriangle;
     RaceHudTextures raceHud;
     std::array<UiTexture, kRetiredTextureCapacity> retiredTextures = {};
@@ -190,6 +204,7 @@ struct BottomUiState {
 };
 
 BottomUiState sUi;
+bool sRenderSliderDragging = false;
 
 constexpr std::array<const char*, kFontGlyphCount> kFontResources = {
     "__OTR__textures/texture_data_2/font_letter_A",
@@ -505,8 +520,9 @@ uint32_t DecodeTexturePixel(const Mk64TextureResource3DS& resource, size_t pixel
 }
 
 void RememberMissingTexture(const char* resourceName, const char* paletteName,
-                            UiTexture& destination) {
+                            UiTexture& destination, bool redBackground) {
     UiTexture missing;
+    missing.redBackground = redBackground;
     std::snprintf(missing.resourceName, sizeof(missing.resourceName), "%s",
                   resourceName == nullptr ? "" : resourceName);
     std::snprintf(missing.paletteName, sizeof(missing.paletteName), "%s",
@@ -514,11 +530,13 @@ void RememberMissingTexture(const char* resourceName, const char* paletteName,
     ReplaceTexture(destination, missing);
 }
 
-bool LoadTexture(const char* resourceName, UiTexture& destination, const char* paletteName = nullptr) {
+bool LoadTexture(const char* resourceName, UiTexture& destination, const char* paletteName = nullptr,
+                 bool redBackground = false) {
     if (resourceName == nullptr || resourceName[0] == '\0') return false;
     const char* normalizedPaletteName = paletteName == nullptr ? "" : paletteName;
     if (std::strcmp(destination.resourceName, resourceName) == 0 &&
-        std::strcmp(destination.paletteName, normalizedPaletteName) == 0) {
+        std::strcmp(destination.paletteName, normalizedPaletteName) == 0 &&
+        destination.redBackground == redBackground) {
         return destination.initialized;
     }
 
@@ -526,12 +544,12 @@ bool LoadTexture(const char* resourceName, UiTexture& destination, const char* p
     if (!Mk64Resource3DSGetTexture(resourceName, &resource) || resource.data == nullptr ||
         resource.width == 0 || resource.height == 0 || resource.width > kMaxUiTextureDimension ||
         resource.height > kMaxUiTextureDimension) {
-        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination, redBackground);
         return false;
     }
     const size_t required = RequiredTextureBytes(resource);
     if (required == 0 || resource.size < required) {
-        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination, redBackground);
         return false;
     }
 
@@ -542,11 +560,12 @@ bool LoadTexture(const char* resourceName, UiTexture& destination, const char* p
         (normalizedPaletteName[0] == '\0' ||
          !Mk64Resource3DSGetTexture(normalizedPaletteName, &palette) || palette.data == nullptr ||
          palette.type != TextureRgba16 || palette.size < paletteEntries * 2U)) {
-        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination, redBackground);
         return false;
     }
 
     UiTexture decoded;
+    decoded.redBackground = redBackground;
     decoded.width = resource.width;
     decoded.height = resource.height;
     std::snprintf(decoded.resourceName, sizeof(decoded.resourceName), "%s", resourceName);
@@ -557,7 +576,7 @@ bool LoadTexture(const char* resourceName, UiTexture& destination, const char* p
     decoded.backingHeight = backingHeight;
     if (backingWidth < resource.width || backingHeight < resource.height ||
         !C3D_TexInit(&decoded.texture, backingWidth, backingHeight, GPU_RGBA8)) {
-        RememberMissingTexture(resourceName, normalizedPaletteName, destination);
+        RememberMissingTexture(resourceName, normalizedPaletteName, destination, redBackground);
         return false;
     }
     decoded.initialized = true;
@@ -577,9 +596,18 @@ bool LoadTexture(const char* resourceName, UiTexture& destination, const char* p
                 for (uint32_t column = 0; column < 8U; ++column) {
                     const uint32_t sourceX = std::min<uint32_t>(tileX + column, resource.width - 1U);
                     const size_t sourceIndex = static_cast<size_t>(sourceY) * resource.width + sourceX;
-                    tile[MortonOffset8x8(column, row)] =
-                        __builtin_bswap32(DecodeTexturePixel(
-                            resource, sourceIndex, paletteRequired ? &palette : nullptr));
+                    uint32_t rgba = DecodeTexturePixel(
+                        resource, sourceIndex, paletteRequired ? &palette : nullptr);
+                    if (redBackground) {
+                        // Bake the original Data grayscale/red filter once per
+                        // texture load, independent of Citro2D tint state.
+                        const uint32_t luma = ((rgba & 255U) * 299U +
+                            ((rgba >> 8U) & 255U) * 587U +
+                            ((rgba >> 16U) & 255U) * 114U + 500U) / 1000U;
+                        const uint32_t tinted = (luma * 175U + 127U) / 255U;
+                        rgba = (rgba & 0xff000000U) | luma | (tinted << 8U) | (tinted << 16U);
+                    }
+                    tile[MortonOffset8x8(column, row)] = __builtin_bswap32(rgba);
                 }
             }
         }
@@ -618,8 +646,7 @@ void WriteTiledPixel(C3D_Tex& texture, uint16_t backingWidth, uint16_t x, uint16
     pixels[tile + MortonOffset8x8(x & 7U, y & 7U)] = __builtin_bswap32(rgba);
 }
 
-bool LoadFontAtlas() {
-    UiFontAtlas& font = sUi.font;
+bool LoadFontAtlas(UiFontAtlas& font, int palette = -1) {
     if (font.initialized) return true;
     if (!C3D_TexInit(&font.texture, kFontAtlasWidth, kFontAtlasHeight, GPU_RGBA8)) return false;
     std::memset(font.texture.data, 0,
@@ -638,8 +665,24 @@ bool LoadFontAtlas() {
         for (uint16_t y = 0; y < resource.height; ++y) {
             for (uint16_t x = 0; x < resource.width; ++x) {
                 const size_t pixel = static_cast<size_t>(y) * resource.width + x;
-                WriteTiledPixel(font.texture, kFontAtlasWidth, atlasX + x, atlasY + y,
-                                DecodeTexturePixel(resource, pixel));
+                uint32_t rgba = DecodeTexturePixel(resource, pixel);
+                if (palette >= 0) {
+                    // Native menu lettering uses a vertical colored gradient.
+                    // Store it with the glyph mask so the same colors survive
+                    // the Fast3D/Citro2D transition on both graphics backends.
+                    constexpr uint8_t colors[5][2][3] = {
+                        {{255,255,120},{255,130,0}}, {{190,255,140},{0,175,40}},
+                        {{255,185,185},{235,30,45}}, {{150,185,255},{45,65,180}},
+                        {{0,0,0},{0,0,0}}
+                    };
+                    uint32_t rgb = 0;
+                    for (int channel = 0; channel < 3; ++channel) {
+                        const int top = colors[palette][0][channel], bottom = colors[palette][1][channel];
+                        rgb |= uint32_t(top + (bottom - top) * y / 15) << (channel * 8);
+                    }
+                    rgba = (rgba & 0xff000000u) | rgb;
+                }
+                WriteTiledPixel(font.texture, kFontAtlasWidth, atlasX + x, atlasY + y, rgba);
             }
         }
         FontGlyph& glyph = font.glyphs[index];
@@ -722,6 +765,20 @@ void DrawSpecialCharacter(char character, float x, float y, float scale, uint32_
     }
 }
 
+float sDrawOpacity = 1.0f;
+int sDataFontPalette = -1;
+void DrawImageWithOpacity(C2D_Image image, const C2D_DrawParams* params, const C2D_ImageTint* original) {
+    if (sDrawOpacity >= 1.0f) { C2D_DrawImage(image, params, original); return; }
+    C2D_ImageTint tint{};
+    if (original) tint = *original;
+    else C2D_AlphaImageTint(&tint, 1.0f);
+    for (auto& corner : tint.corners) {
+        const uint32_t alpha = static_cast<uint32_t>((corner.color >> 24) * sDrawOpacity);
+        corner.color = (corner.color & 0xffffffu) | (alpha << 24);
+    }
+    C2D_DrawImage(image, params, &tint);
+}
+
 void DrawText(const char* value, float x, float y, float scale, uint32_t color,
               uint32_t alignment = C2D_AlignLeft, float depth = 0.8f, bool shadow = false) {
     if (value == nullptr || !sUi.font.initialized) return;
@@ -738,8 +795,10 @@ void DrawText(const char* value, float x, float y, float scale, uint32_t color,
             const float advance = CharacterAdvance(*character) * scale;
             const int glyphIndex = GlyphIndexForCharacter(*character);
             if (glyphIndex >= 0 && sUi.font.glyphs[static_cast<size_t>(glyphIndex)].loaded) {
-                FontGlyph& glyph = sUi.font.glyphs[static_cast<size_t>(glyphIndex)];
-                C2D_Image image = { .tex = &sUi.font.texture, .subtex = &glyph.subTexture };
+                UiFontAtlas& atlas = sDataFontPalette < 0 ? sUi.font :
+                    sUi.dataFonts[(passColor & 0xffffffu) == 0 ? 4 : sDataFontPalette];
+                FontGlyph& glyph = atlas.glyphs[static_cast<size_t>(glyphIndex)];
+                C2D_Image image = { .tex = &atlas.texture, .subtex = &glyph.subTexture };
                 const C2D_DrawParams params = {
                     .pos = { .x = glyphX + offsetX, .y = y + offsetY,
                              .w = 26.0f * scale, .h = 16.0f * scale },
@@ -747,7 +806,7 @@ void DrawText(const char* value, float x, float y, float scale, uint32_t color,
                     .depth = passDepth,
                     .angle = 0.0f,
                 };
-                C2D_DrawImage(image, &params, &tint);
+                DrawImageWithOpacity(image, &params, sDataFontPalette >= 0 ? nullptr : &tint);
             } else if (*character != ' ') {
                 DrawSpecialCharacter(*character, glyphX + offsetX, y + offsetY,
                                      scale, passColor, passDepth);
@@ -775,14 +834,15 @@ void DrawTexture(UiTexture& texture, float x, float y, float width, float height
         std::swap(flippedSubTexture.left, flippedSubTexture.right);
         image.subtex = &flippedSubTexture;
     }
-    C2D_DrawImage(image, &params, tint);
+    DrawImageWithOpacity(image, &params, tint);
 }
 
 void DrawTextureRotated(UiTexture& texture, float centerX, float centerY, float width,
                         float height, float depth, float angle) {
     if (!texture.initialized || texture.width == 0 || texture.height == 0) return;
     const C2D_Image image = TextureImage(texture);
-    C2D_DrawImageAtRotated(image, centerX, centerY, depth, angle, nullptr,
+    C2D_ImageTint alpha{}; C2D_AlphaImageTint(&alpha, sDrawOpacity);
+    C2D_DrawImageAtRotated(image, centerX, centerY, depth, angle, &alpha,
                            width / texture.width, height / texture.height);
 }
 
@@ -809,7 +869,7 @@ void DrawTextureRegion(UiTexture& texture, float sourceX, float sourceY, float s
         .depth = depth,
         .angle = 0.0f,
     };
-    C2D_DrawImage(image, &params, tint);
+    DrawImageWithOpacity(image, &params, tint);
 }
 
 void DrawTextureCover(UiTexture& texture, float x, float y, float width, float height, float depth,
@@ -830,6 +890,7 @@ void DeleteTextures(std::array<UiTexture, Count>& textures) {
 void DeleteFontAtlas() {
     if (sUi.font.initialized) C3D_TexDelete(&sUi.font.texture);
     sUi.font = {};
+    for (auto& font : sUi.dataFonts) { if (font.initialized) C3D_TexDelete(&font.texture); font = {}; }
 }
 
 void LoadRaceHudTextures() {
@@ -890,7 +951,9 @@ void DrawDimMenuBackground() {
         // Select green, and Course Select blue-purple.
         uint32_t tintColor = C2D_Color32(255, 255, 255, 255);
         bool filtered = true;
-        if (sUi.game.menuSelection == 11) {
+        if (sUi.menuBackground.redBackground) {
+            filtered = false;
+        } else if (sUi.game.menuSelection == 11) {
             tintColor = C2D_Color32(255, 175, 175, 255);
         } else if (sUi.game.menuSelection == 12) {
             tintColor = C2D_Color32(175, 255, 175, 255);
@@ -953,14 +1016,15 @@ void SaveChangedSetting(const char* successText) {
 uint8_t RowCount(OptionsTab tab) {
     switch (tab) {
         case OptionsTab::Game: return sUi.modalOpenedFromPause ? 2 : 1;
-        case OptionsTab::Screen: return 4;
+        case OptionsTab::Screen: return 6;
         case OptionsTab::Gameplay: return 2;
-        case OptionsTab::Developer: return 3;
+        case OptionsTab::Developer: return 4;
         default: return 1;
     }
 }
 
 float OptionsRowY(OptionsTab tab, uint8_t row) {
+    if (tab == OptionsTab::Developer) return kOptionsRowY + row * 32.0f;
     return tab == OptionsTab::Screen
                ? kScreenOptionsRowY + row * kScreenOptionsRowStep
                : kOptionsRowY + row * kOptionsRowStep;
@@ -975,6 +1039,10 @@ void OpenOptions(bool fromPause) {
 }
 
 void CloseOptions() {
+    if (sRenderSliderDragging) {
+        sRenderSliderDragging = false;
+        SaveChangedSetting("RENDER SCALE SAVED");
+    }
     if (Mk64Settings3DSGetOverlayEnabled()) {
         Mk64Settings3DSSetOverlayEnabled(false);
         Mk64Settings3DSSave();
@@ -1002,6 +1070,10 @@ void DismissOptions(mk64_3ds::ModalDismissAction3DS action) {
 }
 
 void SetTab(OptionsTab tab) {
+    if (sRenderSliderDragging) {
+        sRenderSliderDragging = false;
+        SaveChangedSetting("RENDER SCALE SAVED");
+    }
     sUi.tab = tab;
     sUi.selectedRow = 0;
     sUi.bottomDirty = true;
@@ -1033,27 +1105,25 @@ void ActivateSelectedRow(int direction) {
                     break;
                 }
                 case 1: {
-                    const bool enabled = !Mk64Settings3DSGetTopHudEnabled();
-                    Mk64Settings3DSSetTopHudEnabled(enabled);
-                    Mk64GameState3DSSetTopHudEnabled(enabled);
-                    SaveChangedSetting(enabled ? "TOP HUD ON" : "TOP HUD OFF");
+                    const int layout = (static_cast<int>(Mk64Settings3DSGetHudLayout()) + step + 5) % 5;
+                    Mk64Settings3DSSetHudLayout(static_cast<Mk64HudLayout3DS>(layout));
+                    Mk64GameState3DSSetTopHudEnabled(Mk64Settings3DSGetTopHudEnabled());
+                    SaveChangedSetting("HUD LAYOUT SAVED");
                     break;
                 }
                 case 2: {
-                    constexpr std::array<uint8_t, 3> kRenderScales = { 50, 75, 100 };
-                    const uint8_t current = Mk64Settings3DSGetRenderScalePercent();
-                    size_t index = 0;
-                    for (size_t i = 0; i < kRenderScales.size(); ++i) {
-                        if (kRenderScales[i] == current) index = i;
-                    }
-                    index = direction < 0
-                                ? (index + kRenderScales.size() - 1U) % kRenderScales.size()
-                                : (index + 1U) % kRenderScales.size();
-                    Mk64Settings3DSSetRenderScalePercent(kRenderScales[index]);
-                    SaveChangedSetting("RESOLUTION SAVED");
+                    const int current = Mk64Settings3DSGetRenderScalePercent();
+                    Mk64Settings3DSSetRenderScalePercent(std::clamp(current + step * 5, 50, 100));
+                    SaveChangedSetting("RENDER SCALE SAVED");
                     break;
                 }
                 case 3: {
+                    const int distance = (static_cast<int>(Mk64Settings3DSGetRenderDistance()) + step + 3) % 3;
+                    Mk64Settings3DSSetRenderDistance(static_cast<Mk64RenderDistance3DS>(distance));
+                    SaveChangedSetting("RENDER DISTANCE SAVED");
+                    break;
+                }
+                case 4: {
                     constexpr int kFilterCount = 3;
                     int filter = static_cast<int>(Mk64Settings3DSGetDisplayFilter()) + step;
                     if (filter < 0) filter = kFilterCount - 1;
@@ -1062,6 +1132,10 @@ void ActivateSelectedRow(int direction) {
                     SaveChangedSetting("FILTER SAVED");
                     break;
                 }
+                case 5:
+                    Mk64Settings3DSSetShowLoadingScreens(!Mk64Settings3DSGetShowLoadingScreens());
+                    SaveChangedSetting("LOADING SCREENS SAVED");
+                    break;
             }
             break;
         case OptionsTab::Gameplay:
@@ -1090,6 +1164,9 @@ void ActivateSelectedRow(int direction) {
             break;
         case OptionsTab::Developer:
             switch (sUi.selectedRow) {
+                case 3:
+                    SetStatus(Mk64Diagnostics3DSRequestCleanDumps() ? "CLEAN DUMPS REQUESTED" : "DUMP ALREADY QUEUED", 2400);
+                    break;
                 case 0:
                     SetStatus(Mk64Diagnostics3DSRequestDump() ? "MEMORY DUMP REQUESTED"
                                                               : "DUMP ALREADY QUEUED", 2400);
@@ -1135,10 +1212,16 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
     const uint8_t rows = RowCount(sUi.tab);
     for (uint8_t row = 0; row < rows; ++row) {
         const int top = static_cast<int>(OptionsRowY(sUi.tab, row));
-        const int height = sUi.tab == OptionsTab::Screen ? 28 : 33;
+        const int height = sUi.tab == OptionsTab::Screen ? 23 : 33;
         if (PointInside(x, y, 12, top, 296, height)) {
             sUi.selectedRow = row;
-            ActivateSelectedRow(1);
+            if (sUi.tab == OptionsTab::Screen && row == 2) {
+                Mk64Settings3DSSetRenderScalePercent(mk64_3ds::RenderScaleFromTouch(x));
+                sUi.bottomDirty = true;
+                sRenderSliderDragging = true;
+            } else {
+                ActivateSelectedRow(1);
+            }
             return;
         }
     }
@@ -1149,6 +1232,15 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
 }
 
 void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
+    if (sRenderSliderDragging) {
+        if (input.touchHeld) {
+            Mk64Settings3DSSetRenderScalePercent(mk64_3ds::RenderScaleFromTouch(input.touchX));
+            sUi.bottomDirty = true;
+        } else {
+            sRenderSliderDragging = false;
+            SaveChangedSetting("RENDER SCALE SAVED");
+        }
+    }
     const mk64_3ds::ModalDismissAction3DS dismissAction =
         mk64_3ds::ResolveModalDismissAction(
             (input.downMask & (KEY_B | KEY_START)) != 0,
@@ -1264,12 +1356,9 @@ void DrawTimerDigits(float x, float y, float scale) {
     }
 }
 
-void DrawMinimap() {
+void DrawMinimap(float areaX = 165.0f, float areaY = 48.0f,
+                 float areaWidth = 149.0f, float areaHeight = 184.0f) {
     if (!sUi.minimap.initialized) return;
-    constexpr float areaX = 165.0f;
-    constexpr float areaY = 48.0f;
-    constexpr float areaWidth = 149.0f;
-    constexpr float areaHeight = 184.0f;
     const float scale = std::min(areaWidth / sUi.minimap.width, areaHeight / sUi.minimap.height);
     const float mapWidth = sUi.minimap.width * scale;
     const float mapHeight = sUi.minimap.height * scale;
@@ -1316,41 +1405,23 @@ void DrawMinimap() {
     }
 }
 
-void DrawRaceHud() {
-    DrawRaceBackground(204.0f);
-    const bool positionLapOnTop =
-        sUi.game.topHudRenderMode == MK64_TOP_HUD_RENDER_POSITION_LAP;
+bool UsesSplitHud() {
+    const auto layout = Mk64Settings3DSGetHudLayout();
+    return layout >= MK64_HUD_LAYOUT_3DS_MK7 && layout <= MK64_HUD_LAYOUT_3DS_MKDS_2;
+}
 
-    // Preserve the original 320x240 HUD scale: lap at upper left, the live
-    // item-window/roulette state in the center, and time at upper right.
-    if (sUi.game.gameMode != 3 && !positionLapOnTop) {
-        DrawTexture(sUi.raceHud.lapLabel, 13.0f, 15.0f, 40.0f, 10.0f, 0.7f);
-        const int lap = std::clamp<int>(sUi.game.currentLap, 1, 3) - 1;
-        DrawTexture(sUi.raceHud.lapCounts[static_cast<size_t>(lap)],
-                    56.0f, 12.0f, 34.0f, 17.0f, 0.7f);
-    }
-    if (sUi.game.itemWindowVisible) {
-        const int item = std::clamp<int>(sUi.game.itemTextureIndex, 0,
-                                         static_cast<int>(sUi.raceHud.items.size()) - 1);
-        DrawTexture(sUi.raceHud.items[static_cast<size_t>(item)],
-                    140.0f, 5.0f, 40.0f, 32.0f, 0.7f);
-    }
-    DrawTexture(sUi.raceHud.timeLabel, 197.0f, 13.0f, 32.0f, 16.0f, 0.7f);
-    DrawTimerDigits(231.0f, 13.0f, 1.0f);
+bool DrawsTopRaceHud() {
+    return sUi.game.racing && !sUi.game.paused && !sUi.game.multiplayer &&
+           Mk64Settings3DSGetHudLayout() != MK64_HUD_LAYOUT_3DS_CLEAN;
+}
 
+void DrawStandings(bool top = false, float topLeft = 8.0f) {
     for (size_t rank = 0; rank < sUi.game.standingCount; ++rank) {
         const int character = sUi.game.standingCharacterIds[rank];
-        if (character < 0 || character >= 8 || sUi.game.standingNativeY[rank] < 0.0f) continue;
-        // Native X/Y and direction are the same animated values consumed by
-        // func_80050320. Only shift Y below the new top row.
-        const bool expanded = positionLapOnTop && !sUi.game.raceFinished;
-        const float portraitSize = expanded ? 40.0f : 32.0f;
-        const float portraitHalf = portraitSize * 0.5f;
-        const float centerX = sUi.game.standingNativeX[rank];
-        const float centerY = sUi.game.standingNativeY[rank] +
-                              (sUi.game.raceFinished ? 8.0f : (expanded ? 28.0f : 24.0f));
-        const float x = centerX - portraitHalf;
-        const float y = centerY - portraitHalf;
+        if (character < 0 || character >= 8) continue;
+        const auto box = top ? mk64_3ds::HudRect{topLeft, 50.0f + rank * 34.0f, 30, 30}
+                             : mk64_3ds::BottomStandingRect(rank, sUi.game.raceFinished);
+        const float x = box.x, y = box.y, portraitSize = box.width;
         const bool isPlayer = sUi.game.standingPlayerIds[rank] == 0;
         const bool unknown = sUi.game.standingUnknown[rank];
         const uint8_t portraitAlpha = unknown ? sUi.game.standingAlpha
@@ -1377,28 +1448,60 @@ void DrawRaceHud() {
             DrawTexture(sUi.raceHud.portraitBorder, x, y, portraitSize, portraitSize, 0.64f,
                         &borderTint);
         }
-        const float rankSize = expanded ? 20.0f : 16.0f;
-        const float rankX = sUi.game.standingNativeDirection[rank] < 0.0f
-                                ? centerX + portraitSize * 0.28f
-                                : centerX - portraitSize * 0.28f;
-        DrawTexture(sUi.raceHud.standingRanks[rank], rankX - rankSize * 0.5f,
-                    centerY - rankSize * 0.0625f, rankSize, rankSize, 0.66f,
-                    &portraitTint);
+        const float rankSize = portraitSize * 0.5f;
+        DrawTexture(sUi.raceHud.standingRanks[rank], x + 1.0f,
+                    y + portraitSize - rankSize, rankSize, rankSize, 0.66f, &portraitTint);
     }
 
-    if (sUi.game.gameMode != 3 && !positionLapOnTop && sUi.game.currentPlaceVisible) {
-        const size_t place = std::min<size_t>(sUi.game.currentPlaceIndex,
-                                              sUi.raceHud.places.size() - 1U);
-        const float scale = std::clamp(sUi.game.currentPlaceScale, 0.25f, 1.0f);
-        const float width = 128.0f * scale;
-        const float height = 64.0f * scale;
-        C2D_ImageTint placeTint = {};
-        C2D_PlainImageTint(&placeTint,
-                           C2D_Color32(255, sUi.game.currentPlaceGreen, 0, 255), 1.0f);
-        DrawTexture(sUi.raceHud.places[place],
-                    sUi.game.currentPlaceNativeX - width * 0.5f,
-                    sUi.game.currentPlaceNativeY - height * 0.5f,
-                    width, height, 0.68f, &placeTint);
+}
+
+void DrawItemFrame(const mk64_3ds::HudRect& box) {
+    // Frame zero is the game's empty item box; retain it between pickups.
+    const size_t item = sUi.game.itemWindowVisible
+        ? std::clamp<int>(sUi.game.itemTextureIndex, 0, sUi.raceHud.items.size() - 1) : 0;
+    DrawTexture(sUi.raceHud.items[item], box.x, box.y, box.width, box.height, 0.8f);
+}
+
+void DrawPlace(const mk64_3ds::HudRect& box) {
+    if (sUi.game.gameMode == 3 || !sUi.game.currentPlaceVisible) return;
+    const size_t place = std::min<size_t>(sUi.game.currentPlaceIndex, sUi.raceHud.places.size() - 1);
+    C2D_ImageTint shadow = {}, color = {};
+    C2D_PlainImageTint(&shadow, C2D_Color32(0, 0, 0, 220), 1.0f);
+    DrawTexture(sUi.raceHud.places[place], box.x + 2, box.y + 2, box.width, box.height, 0.77f, &shadow);
+    C2D_PlainImageTint(&color, C2D_Color32(255, sUi.game.currentPlaceGreen, 0, 255), 1.0f);
+    DrawTexture(sUi.raceHud.places[place], box.x, box.y, box.width, box.height, 0.8f, &color);
+}
+
+void DrawLap(float x, float y, float scale) {
+    if (sUi.game.gameMode == 3) return;
+    DrawTexture(sUi.raceHud.lapLabel, x, y + 4 * scale, 40 * scale, 10 * scale, 0.8f);
+    DrawTexture(sUi.raceHud.lapCounts[std::clamp<int>(sUi.game.currentLap, 1, 3) - 1],
+                x + 44 * scale, y, 34 * scale, 17 * scale, 0.8f);
+}
+
+void DrawRaceHud() {
+    DrawRaceBackground(204.0f);
+    const bool positionLapOnTop =
+        sUi.game.topHudRenderMode == MK64_TOP_HUD_RENDER_POSITION_LAP;
+    const bool split = UsesSplitHud();
+    const bool lapOnTop = positionLapOnTop || Mk64Settings3DSGetHudLayout() == MK64_HUD_LAYOUT_3DS_MKDS;
+
+    // Preserve the original 320x240 HUD scale: lap at upper left, the live
+    // item-window/roulette state in the center, and time at upper right.
+    if (sUi.game.gameMode != 3 && !lapOnTop) {
+        DrawTexture(sUi.raceHud.lapLabel, 13.0f, 15.0f, 40.0f, 10.0f, 0.7f);
+        const int lap = std::clamp<int>(sUi.game.currentLap, 1, 3) - 1;
+        DrawTexture(sUi.raceHud.lapCounts[static_cast<size_t>(lap)],
+                    56.0f, 12.0f, 34.0f, 17.0f, 0.7f);
+    }
+    if (!split) DrawItemFrame({140, 5, 40, 32});
+    DrawTexture(sUi.raceHud.timeLabel, 197.0f, 13.0f, 32.0f, 16.0f, 0.7f);
+    DrawTimerDigits(231.0f, 13.0f, 1.0f);
+
+    DrawStandings();
+
+    if (!positionLapOnTop && !split && !sUi.game.raceFinished) {
+        DrawPlace({76, 188, 80, 40});
     }
     DrawMinimap();
 }
@@ -1406,7 +1509,7 @@ void DrawRaceHud() {
 const char* TabName(OptionsTab tab) {
     switch (tab) {
         case OptionsTab::Game: return "GAME";
-        case OptionsTab::Screen: return "SCREEN";
+        case OptionsTab::Screen: return "DISPLAY";
         case OptionsTab::Gameplay: return "GAMEPLAY";
         case OptionsTab::Developer: return "DEVELOPER";
         default: return "";
@@ -1432,15 +1535,22 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
                               Mk64Settings3DSGetAspectRatio() == MK64_ASPECT_RATIO_3DS_WIDE
                                   ? "WIDE" : "ORIGINAL 4:3");
             } else if (row == 1) {
-                *label = "TOP HUD";
-                std::snprintf(value, valueSize, "%s", Mk64Settings3DSGetTopHudEnabled() ? "ON" : "OFF");
+                *label = "HUD LAYOUT";
+                constexpr const char* names[] = { "CLEAN", "MK7", "MKDS", "MKDS 2", "CLASSIC" };
+                std::snprintf(value, valueSize, "%s", names[Mk64Settings3DSGetHudLayout()]);
             } else if (row == 2) {
-                *label = "RESOLUTION";
+                *label = "RENDER";
                 const uint8_t scale = Mk64Settings3DSGetRenderScalePercent();
-                std::snprintf(value, valueSize, "%s",
-                              scale == 50 ? "LOW 0.50X"
-                                          : (scale == 75 ? "MEDIUM 0.75X" : "HIGH 1.00X"));
+                std::snprintf(value, valueSize, "%u.%02u", scale / 100, scale % 100);
             } else if (row == 3) {
+                *label = "DISTANCE";
+                const auto distance = Mk64Settings3DSGetRenderDistance();
+                std::snprintf(value, valueSize, "%s", distance == MK64_RENDER_DISTANCE_3DS_LOW ? "LOW" :
+                    (distance == MK64_RENDER_DISTANCE_3DS_NORMAL ? "NORMAL" : "HIGH"));
+            } else if (row == 5) {
+                *label = "SHOW LOADING SCREENS";
+                std::snprintf(value, valueSize, "%s", Mk64Settings3DSGetShowLoadingScreens() ? "YES" : "NO");
+            } else if (row == 4) {
                 *label = "FILTER";
                 const Mk64DisplayFilter3DS filter = Mk64Settings3DSGetDisplayFilter();
                 std::snprintf(value, valueSize, "%s",
@@ -1465,9 +1575,12 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
             } else if (row == 1) {
                 *label = "SHOW FPS";
                 std::snprintf(value, valueSize, "%s", Mk64Settings3DSGetShowFpsEnabled() ? "ON" : "OFF");
-            } else {
+            } else if (row == 2) {
                 *label = "OVERLAY";
                 std::snprintf(value, valueSize, "%s", Mk64Settings3DSGetOverlayEnabled() ? "OPEN" : "CLOSED");
+            } else {
+                *label = "CLEAN DUMPS";
+                std::snprintf(value, valueSize, "DELETE ALL");
             }
             break;
         default:
@@ -1511,7 +1624,21 @@ void DrawOptions() {
                  selected ? C2D_Color32(167, 255, 151, 255)
                           : C2D_Color32(198, 222, 210, 240),
                  C2D_AlignRight, 0.74f);
-        const float separatorY = y + (sUi.tab == OptionsTab::Screen ? 26.0f : 29.0f);
+        if (sUi.tab == OptionsTab::Screen && row == 2) {
+            // Original racing-style rail: yellow lane, eleven markers and a
+            // red/white chequered grip. No external slider artwork is used.
+            C2D_DrawRectSolid(141, y + 9, 0.75f, 110, 8, C2D_Color32(20, 20, 20, 255));
+            C2D_DrawRectSolid(146, y + 12, 0.76f, 100, 2, C2D_Color32(255, 219, 66, 255));
+            for (int tick = 0; tick <= 10; ++tick)
+                C2D_DrawRectSolid(146 + tick * 10, y + 10, 0.77f, 1, 6, C2D_Color32(235, 235, 215, 255));
+            const float grip = 146 + (Mk64Settings3DSGetRenderScalePercent() - 50) * 2;
+            C2D_DrawRectSolid(grip - 4, y + 7, 0.78f, 9, 12, C2D_Color32(235, 45, 35, 255));
+            for (int cell = 0; cell < 6; ++cell)
+                if ((cell / 2 + cell % 2) % 2 == 0)
+                    C2D_DrawRectSolid(grip - 3 + (cell % 2) * 4, y + 8 + (cell / 2) * 3,
+                                      0.79f, 3, 3, C2D_Color32(255, 250, 220, 255));
+        }
+        const float separatorY = y + (sUi.tab == OptionsTab::Screen ? 22.0f : 29.0f);
         C2D_DrawRectSolid(22.0f, separatorY, 0.44f, 282.0f, 1.0f,
                           C2D_Color32(255, 255, 255, selected ? 75 : 35));
     }
@@ -1609,18 +1736,261 @@ void DrawDeveloperOverlay() {
              C2D_AlignCenter, 0.82f, true);
 }
 
+void DrawTopRaceHud() {
+    if (!DrawsTopRaceHud()) return;
+    const auto layout = Mk64Settings3DSGetHudLayout();
+    const bool original = Mk64Settings3DSGetAspectRatio() == MK64_ASPECT_RATIO_3DS_ORIGINAL;
+    const float left = original ? 48.0f : 8.0f;
+    const float right = 400.0f - left;
+    DrawItemFrame(mk64_3ds::TopItemRect(layout, original));
+    DrawPlace(mk64_3ds::TopPlaceRect(layout, original));
+    if (layout == MK64_HUD_LAYOUT_3DS_MKDS) DrawLap(right - 94, 8, 1.2f);
+    if (layout == MK64_HUD_LAYOUT_3DS_CLASSIC) {
+        DrawLap(left, 8, 1.2f);
+        DrawTexture(sUi.raceHud.timeLabel, right - 102, 12, 32, 16, 0.8f);
+        DrawTimerDigits(right - 68, 12, 1.0f);
+        DrawStandings(true, left);
+        DrawMinimap(right - 116, 88, 110, 140);
+    }
+}
+
 void DrawTopFps(C3D_RenderTarget* topTarget) {
     if (topTarget == nullptr || !Mk64Settings3DSGetShowFpsEnabled()) return;
     // Citro2D keeps a 400x240 logical projection for the top screen even when
     // Fast3D renders into the 800-wide high-density target.
     constexpr float topWidth = 400.0f;
     char fps[32] = {};
-    std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.currentFps);
-    DrawText(fps, topWidth - 8.0f, 6.0f, 0.62f,
+    if (sUi.fpsHistorySize == 0) std::snprintf(fps, sizeof(fps), "FPS --");
+    else std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.currentFps);
+    DrawText(fps, topWidth - 8.0f, DrawsTopRaceHud() ? mk64_3ds::TopHudFpsY(Mk64Settings3DSGetHudLayout()) : 6.0f, 0.62f,
              C2D_Color32(125, 255, 145, 255), C2D_AlignRight, 0.9f, true);
 }
 
+
+void DrawFittedText(const char* text, float x, float y, float width, float scale, uint32_t color,
+                    uint32_t alignment = C2D_AlignLeft) {
+    const float measured = MeasureText(text, scale);
+    if (measured > width) scale *= width / measured;
+    DrawText(text, x, y, scale, color, alignment, 0.8f, true);
+}
+
+bool DataActive() { return sUi.game.dataGrid || sUi.game.dataCourse; }
+bool DataActionEnabled(int row) {
+    return row == 0 || (row == 1 ? sUi.game.dataHasRecords : sUi.game.dataHasGhost);
+}
+
+void HandleDataInput(const Mk64DiagnosticsInput3DS& input) {
+    uint32_t directions = input.heldMask & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT);
+    if (input.circleY > 40) directions |= KEY_UP;
+    if (input.circleY < -40) directions |= KEY_DOWN;
+    if (input.circleX > 40) directions |= KEY_RIGHT;
+    if (input.circleX < -40) directions |= KEY_LEFT;
+    uint32_t pressed = input.downMask;
+    const uint64_t now = osGetTime();
+    if (directions != sUi.dataDirection) { pressed |= directions; sUi.dataRepeatAt = now + 320; }
+    else if (directions && now >= sUi.dataRepeatAt) { pressed |= directions; sUi.dataRepeatAt = now + 130; }
+    sUi.dataDirection = directions;
+    if (sUi.game.dataGrid) {
+        int delta = pressed & KEY_UP ? -2 : pressed & KEY_DOWN ? 2 :
+                    pressed & KEY_LEFT ? -1 : pressed & KEY_RIGHT ? 1 : 0;
+        if (delta) Mk64GameState3DSDataMove(delta);
+        if (pressed & KEY_B) Mk64GameState3DSDataAction(-1);
+        else if (pressed & (KEY_A | KEY_START)) { sUi.dataAction = 0; Mk64GameState3DSDataAction(0); }
+    } else if (sUi.game.dataSubmenu != 11) {
+        Mk64GameState3DSDataConfirm(pressed & KEY_UP ? -1 : pressed & KEY_DOWN ? 1 : 0,
+            (pressed & (KEY_A | KEY_START)) != 0, (pressed & KEY_B) != 0);
+    } else {
+        if (pressed & KEY_LEFT) Mk64GameState3DSDataMove(-1);
+        if (pressed & KEY_RIGHT) Mk64GameState3DSDataMove(1);
+        int direction = pressed & KEY_UP ? -1 : pressed & KEY_DOWN ? 1 : 0;
+        if (direction) {
+            int row = sUi.dataAction;
+            do { row += direction; } while (row >= 0 && row < 4 && !DataActionEnabled(row));
+            if (row >= 0 && row < 4) sUi.dataAction = row;
+        }
+        if (!DataActionEnabled(sUi.dataAction)) sUi.dataAction = 0;
+        if (pressed & KEY_TOUCH) {
+            for (int row = 0; row < 4; ++row)
+                if (PointInside(input.touchX, input.touchY, 18, 79 + row * 30, 284, 28) && DataActionEnabled(row)) {
+                    sUi.dataAction = row; pressed |= KEY_A; break;
+                }
+        }
+        if (pressed & KEY_B) Mk64GameState3DSDataAction(-1);
+        else if (pressed & (KEY_A | KEY_START)) Mk64GameState3DSDataAction(sUi.dataAction);
+    }
+    sUi.bottomDirty = true;
+}
+
+uint32_t DataSelectionColor() {
+    constexpr uint8_t colors[3][3] = {{0,243,243},{255,168,195},{255,255,0}};
+    const uint64_t now = osGetTime();
+    const int first = (now / 600) % 3, next = (first + 1) % 3;
+    const int phase = now % 600;
+    return C2D_Color32((colors[first][0]*(600-phase)+colors[next][0]*phase)/600,
+        (colors[first][1]*(600-phase)+colors[next][1]*phase)/600,
+        (colors[first][2]*(600-phase)+colors[next][2]*phase)/600,255);
+}
+
+void DrawDataText(const char* text, float x, float y, float scale, uint32_t color,
+                  uint32_t alignment = C2D_AlignLeft, float depth = 0.8f, bool shadow = true) {
+    const int r = color & 255, g = (color >> 8) & 255, b = (color >> 16) & 255;
+    const int palette = r > 200 && g > 180 ? 0 : g > r ? 1 : r > g ? 2 : 3;
+    sDataFontPalette = sUi.dataFonts[palette].initialized && sUi.dataFonts[4].initialized ? palette : -1;
+    DrawText(text,x,y,scale,color,alignment,depth,shadow);
+    sDataFontPalette = -1;
+}
+
+void DrawDataFittedText(const char* text, float x, float y, float width, float scale, uint32_t color,
+                        uint32_t alignment = C2D_AlignLeft) {
+    const float measured = MeasureText(text,scale);
+    if (measured > width) scale *= width / measured;
+    DrawDataText(text,x,y,scale,color,alignment);
+}
+
+void LoadDataTextures() {
+    if (!DataActive()) return;
+    for (int palette=0;palette<5;++palette) LoadFontAtlas(sUi.dataFonts[palette],palette);
+    LoadTexture("__OTR__textures/texture_tkmk00/texture_data",sUi.dataHeading);
+    if (sUi.game.dataCourse && std::strcmp(sUi.dataMapResource,sUi.minimap.resourceName)!=0) {
+        std::snprintf(sUi.dataMapResource,sizeof(sUi.dataMapResource),"%s",sUi.minimap.resourceName);
+        sUi.dataMapX=sUi.dataMapY=0;
+        sUi.dataMapWidth=sUi.minimap.width;sUi.dataMapHeight=sUi.minimap.height;
+        Mk64TextureResource3DS resource{};
+        if (Mk64Resource3DSGetTexture(sUi.dataMapResource,&resource) && resource.data &&
+            resource.size>=RequiredTextureBytes(resource)) {
+            int left=resource.width,top=resource.height,right=-1,bottom=-1;
+            for (uint32_t y=0;y<resource.height;++y) for (uint32_t x=0;x<resource.width;++x) {
+                if ((DecodeTexturePixel(resource,y*resource.width+x)>>24)>16) {
+                    left=std::min(left,int(x));right=std::max(right,int(x));
+                    top=std::min(top,int(y));bottom=std::max(bottom,int(y));
+                }
+            }
+            if (right>=left && bottom>=top) {
+                sUi.dataMapX=left;sUi.dataMapY=top;
+                sUi.dataMapWidth=right-left+1;sUi.dataMapHeight=bottom-top+1;
+            }
+        }
+    }
+    for (int i=0;i<16;++i) {
+        if (sUi.game.dataGrid) LoadTexture(Mk64GameState3DSDataPreview(i),sUi.dataPreviews[i]);
+        const char* suffix = std::strstr(Mk64GameState3DSDataPreview(i),"gTextureCoursePreview");
+        if (suffix) {
+            char resource[192];
+            std::snprintf(resource,sizeof(resource),"__OTR__textures/texture_tkmk00/gTextureTitle%s",
+                          suffix+std::strlen("gTextureCoursePreview"));
+            LoadTexture(resource,sUi.dataTitles[i]);
+        }
+    }
+    if (sUi.game.dataGrid) {
+        const float target = (sUi.game.dataIndex/2)*140.0f;
+        sUi.dataScroll += (target-sUi.dataScroll)*0.35f;
+    }
+}
+
+// Crop the scrolling grid at the title strip without changing the renderer's
+// rotated framebuffer/scissor state or allowing one row to cover the heading.
+void DrawDataGridTexture(UiTexture& texture,float x,float y,float width,float height,float depth) {
+    const float top=std::max(32.0f,y), bottom=std::min(240.0f,y+height);
+    if (bottom<=top) return;
+    DrawTextureRegion(texture,0,(top-y)/height*texture.height,texture.width,
+        (bottom-top)/height*texture.height,x,top,width,bottom-top,depth);
+}
+
+void DrawDataBottom() {
+    DrawDimMenuBackground();
+    const auto white = C2D_Color32(255,255,255,255), yellow = C2D_Color32(255,225,80,255);
+    DrawDataFittedText(sUi.game.trackName,160,22,292,1.0f,DataSelectionColor(),C2D_AlignCenter);
+    char distance[48]; std::snprintf(distance,sizeof(distance),"DISTANCE  %s",sUi.game.trackLength);
+    DrawDataText(distance,160,48,0.72f,C2D_Color32(255,80,80,255),C2D_AlignCenter,0.8f,true);
+    if (sUi.game.dataGrid) {
+        DrawDataText("A  VIEW COURSE DATA",160,106,0.9f,white,C2D_AlignCenter,0.8f,true);
+        DrawDataText("B  EXIT",160,144,0.9f,white,C2D_AlignCenter,0.8f,true);
+        DrawDataText("D-PAD OR STICK  SCROLL",160,202,0.68f,yellow,C2D_AlignCenter,0.8f,true);
+    } else if (sUi.game.dataSubmenu == 12) {
+        DrawDataText(sUi.game.dataEraseOption == 1 ? "ERASE COURSE RECORDS?" : "ERASE SAVED GHOST?",
+                 160,88,0.78f,yellow,C2D_AlignCenter,0.8f,true);
+        DrawDataText("THIS CANNOT BE UNDONE",160,111,0.65f,white,C2D_AlignCenter,0.8f,true);
+        for (int row=0;row<2;++row) {
+            if (row==sUi.game.dataConfirm) DrawTexture(sUi.selectionTriangle,50,149+row*30,12,8,0.8f);
+            DrawDataText(row==0 ? "KEEP DATA" : "ERASE DATA",160,144+row*30,0.9f,
+                row==sUi.game.dataConfirm ? C2D_Color32(100,255,100,255) : yellow,C2D_AlignCenter,0.8f,true);
+        }
+        DrawDataText("A  CONFIRM     B  CANCEL",160,214,0.64f,white,C2D_AlignCenter,0.8f,true);
+    } else if (sUi.game.dataSubmenu != 11) {
+        DrawDataText("COULD NOT ERASE DATA",160,108,0.82f,yellow,C2D_AlignCenter,0.8f,true);
+        DrawDataText("A OR B  BACK",160,164,0.8f,white,C2D_AlignCenter,0.8f,true);
+    } else {
+        const char* labels[]={"RETURN TO MENU","ERASE RECORDS","ERASE GHOST","RACE GHOST"};
+        for (int row=0;row<4;++row) {
+            const auto color=!DataActionEnabled(row) ? C2D_Color32(100,100,180,255) : row==sUi.dataAction ? DataSelectionColor() : C2D_Color32(100,255,100,255);
+            if (row==sUi.dataAction) DrawTexture(sUi.selectionTriangle,20,89+row*30,12,8,0.8f);
+            DrawDataText(labels[row],43,83+row*30,0.85f,color,C2D_AlignLeft,0.8f,true);
+        }
+        DrawDataText("A  SELECT     B  BACK",160,214,0.68f,white,C2D_AlignCenter,0.8f,true);
+    }
+}
+
+void DrawDataTop() {
+    const auto yellow=C2D_Color32(255,225,80,255), white=C2D_Color32(255,255,255,255);
+    if (sUi.game.dataGrid) {
+        for (int index=0;index<16;++index) {
+            const bool selected=index==sUi.game.dataIndex;
+            const float zoom=selected ? 1.035f+0.012f*std::sin(osGetTime()*0.006f) : 1.0f;
+            const float w=176*zoom,h=132*zoom;
+            const float x=12+(index%2)*194-(w-176)/2;
+            const float y=39+(index/2)*140-sUi.dataScroll-(h-132)/2;
+            if (y+h<32 || y>=240) continue;
+            if (selected) {
+                const float top=std::max(32.0f,y-3),bottom=std::min(240.0f,y+h+3);
+                C2D_DrawRectSolid(x-3,top,0.3f,w+6,bottom-top,DataSelectionColor());
+            }
+            const float top=std::max(32.0f,y),bottom=std::min(240.0f,y+h);
+            C2D_DrawRectSolid(x,top,0.35f,w,bottom-top,C2D_Color32(0,0,0,255));
+            DrawDataGridTexture(sUi.dataPreviews[index],x,y,w,107.25f*zoom,0.4f);
+            DrawDataGridTexture(sUi.dataTitles[index],x,y+107.25f*zoom,w,24.75f*zoom,0.5f);
+        }
+        C2D_DrawRectSolid(12,4,0.85f,96,27,C2D_Color32(0,0,0,255));
+        DrawTexture(sUi.dataHeading,12,4,96,27,0.9f);
+        if (sUi.game.dataIndex>=2) C2D_DrawTriangle(374,8,white,366,18,white,382,18,white,0.9f);
+        if (sUi.game.dataIndex<14) C2D_DrawTriangle(374,233,white,366,223,white,382,223,white,0.9f);
+    } else {
+        // Preserve the original red-filtered menu background rendered below.
+        C2D_DrawRectSolid(0,0,0.1f,400,240,C2D_Color32(0,0,0,90));
+        DrawTexture(sUi.dataHeading,12,7,96,27,0.9f);
+        DrawTexture(sUi.coursePreview,12,49,156,95,0.4f);
+        DrawDataText("BEST LAP",22,169,0.86f,yellow);
+        DrawDataText("BEST RECORDS",190,46,0.76f,yellow);
+        // A dedicated full-height column gives tall circuits useful scale.
+        // Wide circuits still preserve their shape within the same bounds.
+        if (sUi.dataMapWidth>0 && sUi.dataMapHeight>0) {
+            // Fit the visible course outline, excluding transparent padding.
+            const float scale=std::min(68.0f/sUi.dataMapWidth,176.0f/sUi.dataMapHeight);
+            const float w=sUi.dataMapWidth*scale,h=sUi.dataMapHeight*scale;
+            DrawTextureRegion(sUi.minimap,sUi.dataMapX,sUi.dataMapY,sUi.dataMapWidth,sUi.dataMapHeight,
+                356-w/2,136-h/2,w,h,0.6f);
+        }
+        for (int row=0;row<6;++row) {
+            const uint32_t record=sUi.game.dataTimes[row],centis=record&0xfffff;
+            char time[32];
+            if (centis>=600000) std::snprintf(time,sizeof(time),"--'--''--");
+            else std::snprintf(time,sizeof(time),"%02lu'%02lu''%02lu",(unsigned long)(centis/6000),
+                (unsigned long)(centis/100%60),(unsigned long)(centis%100));
+            const float y=row<5 ? 76+row*29 : 195;
+            const float x=row<5 ? 204 : 22;
+            if (row<5) {
+                char rank[4];std::snprintf(rank,sizeof(rank),"%d",row+1);
+                DrawDataText(rank,187,y,0.75f,C2D_Color32(100,255,100,255));
+            }
+            DrawDataText(time,x,y,row<5 ? 0.83f : 0.9f,yellow);
+            const auto character=record>>20;
+            if (centis<600000 && character<8)
+                DrawTexture(sUi.raceHud.portraits[character],row<5 ? 304 : 145,y-2,18,18,0.8f);
+        }
+    }
+}
+
 void DrawBottom() {
+    if (DataActive() && !sUi.modalOpen) { DrawDataBottom(); return; }
     if (Mk64Settings3DSGetOverlayEnabled()) {
         DrawDeveloperOverlay();
     } else if (sUi.modalOpen) {
@@ -1667,18 +2037,20 @@ void DrawBottomBatch() {
 }
 
 void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
-    if (topTarget == nullptr || !Mk64Settings3DSGetShowFpsEnabled()) return;
+    if (topTarget == nullptr || (!Mk64Settings3DSGetShowFpsEnabled() && !DrawsTopRaceHud() && !DataActive())) return;
     // Preserve the completed game color buffer and clear only reverse-depth so
     // the overlay cannot be hidden behind scene geometry.
-    // A lower-screen C2D batch may already be pending in its private linear
-    // buffer. Submit it with Citro3D's coherency pass before starting the top
-    // overlay batch; this path is disabled unless the developer FPS display is
-    // explicitly enabled.
+    // Split the queued lower-screen commands before clearing top depth.
+    // EndFrame cleans the captured C2D buffers before the GPU queue runs.
     C3D_FrameSplit(0);
     C3D_RenderTargetClear(topTarget, C3D_CLEAR_DEPTH, 0, 0);
     PrepareC2DBatch();
     Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(topTarget);
+    sDrawOpacity = sUi.game.topHudOpacity;
+    if (sDrawOpacity > 0) DrawTopRaceHud();
+    sDrawOpacity = 1.0f;
+    if (DataActive()) DrawDataTop();
     DrawTopFps(topTarget);
     C2D_Flush();
 }
@@ -1706,7 +2078,7 @@ extern "C" bool Mk64BottomUI3DSInit() {
         return false;
     }
     C3D_RenderTargetSetOutput(sUi.bottomTarget, GFX_BOTTOM, GFX_LEFT, kTransferFlags);
-    if (!LoadFontAtlas()) {
+    if (!LoadFontAtlas(sUi.font)) {
         C3D_RenderTargetDelete(sUi.bottomTarget);
         sUi.bottomTarget = nullptr;
         C2D_Fini();
@@ -1719,7 +2091,7 @@ extern "C" bool Mk64BottomUI3DSInit() {
     sUi.modalOpen = Mk64Settings3DSGetOverlayEnabled();
     Mk64GameState3DSGetBottomUISnapshot(&sUi.game);
     sUi.view = GetBaseView(sUi.game);
-    LoadTexture(sUi.game.mainBackgroundTexture, sUi.menuBackground);
+    LoadTexture(sUi.game.mainBackgroundTexture, sUi.menuBackground, nullptr, sUi.game.dataCourse);
     LoadTexture(kGameSelectOptionResource, sUi.gameSelectOption);
     LoadTexture(kGameSelectDataResource, sUi.gameSelectData);
     LoadTexture(kSelectionTriangleResource, sUi.selectionTriangle);
@@ -1731,6 +2103,8 @@ extern "C" bool Mk64BottomUI3DSInit() {
     // allocate or decode these lower-screen textures on its first frame.
     LoadTexture(sUi.game.coursePreviewTexture, sUi.coursePreview);
     LoadTexture(sUi.game.minimapTexture, sUi.minimap);
+    LoadDataTextures();
+    if (!DataActive()) { sUi.dataDirection=0; sUi.dataAction=0; }
     Mk64GameState3DSSetTopHudEnabled(Mk64Settings3DSGetTopHudEnabled());
     return true;
 }
@@ -1748,6 +2122,9 @@ extern "C" void Mk64BottomUI3DSShutdown() {
     DeleteTexture(sUi.coursePreview);
     DeleteTexture(sUi.menuBackground);
     DeleteTexture(sUi.gameSelectData);
+    for (auto& preview : sUi.dataPreviews) DeleteTexture(preview);
+    for (auto& title : sUi.dataTitles) DeleteTexture(title);
+    DeleteTexture(sUi.dataHeading);
     DeleteTexture(sUi.gameSelectOption);
     DeleteTexture(sUi.selectionTriangle);
     DeleteFontAtlas();
@@ -1775,13 +2152,15 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
         oldBackground != sUi.game.mainBackgroundTexture) {
         sUi.bottomDirty = true;
     }
-    LoadTexture(sUi.game.mainBackgroundTexture, sUi.menuBackground);
+    LoadTexture(sUi.game.mainBackgroundTexture, sUi.menuBackground, nullptr, sUi.game.dataCourse);
     // The selected track usually changes while still in Map Select, before
     // the RACING edge. Compare the actual resource names every frame so a
     // second race can never retain the previous course art. LoadTexture's
     // strcmp fast path makes the steady state allocation- and I/O-free.
     LoadTexture(sUi.game.coursePreviewTexture, sUi.coursePreview);
     LoadTexture(sUi.game.minimapTexture, sUi.minimap);
+    LoadDataTextures();
+    if (!DataActive()) { sUi.dataDirection=0; sUi.dataAction=0; }
 
     Mk64DiagnosticsInput3DS input = {};
     if (!Mk64Diagnostics3DSConsumeInput(&input)) {
@@ -1816,7 +2195,8 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
     sUi.injectedGameKeys = 0;
     sUi.blockedGameKeys &= input.heldMask;
 
-    const bool capturedAtFrameStart = sUi.modalOpen || Mk64Settings3DSGetOverlayEnabled();
+    if (DataActive()) HandleDataInput(input);
+    const bool capturedAtFrameStart = DataActive() || sUi.modalOpen || Mk64Settings3DSGetOverlayEnabled();
     bool openedThisFrame = false;
     if (!sUi.modalOpen && !Mk64Settings3DSGetOverlayEnabled()) {
         if (!wasPaused && sUi.game.paused) {
@@ -1868,10 +2248,9 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
     sUi.consumesCStick = turboAvailable;
     Mk64GameState3DSApplyTurbo(turboAvailable && cstickHeld, turbo);
 
-    // The game snapshot remains 30 Hz on both profiles. New 3DS redraws every
-    // snapshot; Old 3DS redraws the secondary race HUD at 10 Hz to reserve CPU
-    // and GPU bandwidth for the top-screen race. Menu and modal changes still
-    // mark the target dirty immediately above.
+    // Snapshots follow the 30 Hz simulation. The resolved profile redraws the
+    // lower race HUD at 10 Hz, or 15 Hz with sustained New-400 headroom. Menu
+    // and modal changes mark the target dirty immediately above.
     if (sUi.view == BaseView::RaceHud) {
         const uint32_t divisor = Mk64Graphics3DSBottomHudRefreshDivisor();
         if (sUi.raceHudRefreshPhase == 0) sUi.bottomDirty = true;
@@ -1882,19 +2261,72 @@ extern "C" void Mk64BottomUI3DSPrepareFrame() {
 }
 
 extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
+    sUi.lastTopTarget = static_cast<C3D_RenderTarget*>(existingTopTarget);
     if (!sUi.initialized || sUi.bottomTarget == nullptr || existingTopTarget == nullptr) return;
     // The renderer enters this function from a SYNCDRAW frame. Previous GPU
     // work is complete, so textures replaced during PrepareFrame are now safe
     // to release before issuing any new Citro2D commands.
     DrainRetiredTextures();
     Mk64BottomUI3DSRecordPresentation();
-    const bool drawTopFps = existingTopTarget != nullptr && Mk64Settings3DSGetShowFpsEnabled();
+    const bool drawTopFps = Mk64Settings3DSGetShowFpsEnabled() || DrawsTopRaceHud() || DataActive();
     if (!sUi.bottomDirty && !drawTopFps) return;
     if (sUi.bottomDirty) {
         DrawBottomBatch();
         sUi.bottomDirty = false;
     }
     DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
+}
+
+static void ShowProgress(const char* title, const char* detail, unsigned percent, bool showArtwork) {
+    if (!sUi.initialized || !C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return;
+    percent = std::min(percent, 100U);
+    const bool firstTopImage = sUi.lastTopTarget == nullptr;
+    if (firstTopImage) {
+        sUi.lastTopTarget = static_cast<C3D_RenderTarget*>(Mk64Graphics3DSGetTopRenderTarget());
+    }
+    // Re-present the unchanged upper image as well. Some display consumers
+    // refresh the pair only on a top-screen swap during a paused operation.
+    if (sUi.lastTopTarget != nullptr) {
+        C3D_FrameDrawOn(sUi.lastTopTarget);
+        if (!showArtwork || firstTopImage) C3D_RenderTargetClear(sUi.lastTopTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    }
+    C3D_RenderTargetClear(sUi.bottomTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+    C3D_FrameDrawOn(sUi.bottomTarget);
+    if (showArtwork) {
+        PrepareC2DBatch();
+        C2D_SceneBegin(sUi.bottomTarget);
+        if (sUi.game.racing) DrawRaceBackground(); else DrawDimMenuBackground();
+        DrawText(title, 160, 66, 0.9f, C2D_Color32(255, 225, 80, 255), C2D_AlignCenter, 0.8f, true);
+        DrawText(detail, 160, 105, 0.65f, C2D_Color32(235, 245, 255, 255), C2D_AlignCenter, 0.8f, true);
+        C2D_DrawRectSolid(32, 140, 0.7f, 256, 14, C2D_Color32(35, 45, 58, 255));
+        C2D_DrawRectSolid(34, 142, 0.8f, 252.0f * percent / 100, 10, C2D_Color32(125, 255, 145, 255));
+        char value[24];
+        std::snprintf(value, sizeof(value), "%u PCT", percent);
+        DrawText(value, 160, 171, 0.75f, C2D_Color32(125, 255, 145, 255), C2D_AlignCenter, 0.9f, true);
+        C2D_Flush();
+    }
+    // Paused diagnostic frames may use Citro3D's full cache-clean path.
+    C3D_FrameEnd(0);
+    if (C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    sUi.bottomDirty = true;
+}
+
+extern "C" void Mk64BottomUI3DSShowProgress(const char* title, const char* detail, unsigned percent) {
+    ShowProgress(title, detail, percent, true);
+}
+
+extern "C" void Mk64BottomUI3DSShowLoadingProgress(const char* title, const char* detail, unsigned percent) {
+    ShowProgress(title, detail, percent, Mk64Settings3DSGetShowLoadingScreens());
+}
+
+extern "C" void Mk64BottomUI3DSResetFps() {
+    sUi.fpsWindowStartedAt = 0;
+    sUi.fpsWindowFrames = 0;
+    sUi.fpsHistory = {};
+    sUi.fpsHistoryNext = 0;
+    sUi.fpsHistorySize = 0;
+    sUi.currentFps = 0;
+    sUi.averageFps = 0;
 }
 
 extern "C" void Mk64BottomUI3DSRecordPresentation() {
@@ -1904,7 +2336,7 @@ extern "C" void Mk64BottomUI3DSRecordPresentation() {
 
 extern "C" void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget) {
     if (!sUi.initialized || existingTopTarget == nullptr ||
-        !Mk64Settings3DSGetShowFpsEnabled()) {
+        (!Mk64Settings3DSGetShowFpsEnabled() && !DrawsTopRaceHud())) {
         return;
     }
     DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));

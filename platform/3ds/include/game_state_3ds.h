@@ -38,12 +38,18 @@ typedef struct Mk64BottomUIRacer3DS {
 } Mk64BottomUIRacer3DS;
 
 typedef struct Mk64BottomUIGameState3DS {
+    float topHudOpacity;
+    bool dataGrid, dataCourse, dataHasGhost, dataHasRecords;
+    int dataIndex, dataSubmenu, dataConfirm, dataEraseOption;
+    const char* trackLength;
+    uint32_t dataTimes[6];
     int32_t gameState;
     int32_t gameMode;
     int32_t menuSelection;
     int32_t mainMenuSelection;
     bool gameSelectVisible;
     bool racing;
+    bool multiplayer;
     bool paused;
     bool mirrorMode;
     int8_t topHudRenderMode;
@@ -94,6 +100,11 @@ typedef struct Mk64BottomUIGameState3DS {
     uint8_t minimapBlue;
 } Mk64BottomUIGameState3DS;
 
+const char* Mk64GameState3DSDataPreview(int index);
+const char* Mk64GameState3DSDataName(int index);
+void Mk64GameState3DSDataMove(int delta);
+void Mk64GameState3DSDataAction(int action);
+void Mk64GameState3DSDataConfirm(int direction, bool activate, bool back);
 void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* snapshot);
 void Mk64GameState3DSSetTopHudEnabled(bool enabled);
 void Mk64GameState3DSApplyTurbo(bool active, uint8_t multiplier);

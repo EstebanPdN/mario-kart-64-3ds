@@ -14,6 +14,26 @@ constexpr uint64_t kTexelZero = uint64_t{8};
 constexpr uint64_t kTexelZeroAlpha = uint64_t{9};
 constexpr uint64_t kPrimaryColorCombiner = (kInputOne << 12U) | (kInputOne << 28U);
 constexpr uint64_t kTextureCombiner = (kTexelZero << 12U) | (kTexelZeroAlpha << 28U);
+// The stock kart formula: (1 - environment) * texture + primitive,
+// with primitive alpha * texture alpha. Both inputs are uniform per draw.
+constexpr uint64_t kKartCombiner = 12U | (1U << 4U) | (8U << 8U) | (2U << 12U) |
+                                     (1U << 16U) | (9U << 24U);
+
+std::array<float, 6 * 14> KartRegressionVertices(float left, float environment,
+                                               float primitive, float alpha) {
+    std::array<float, 6 * 14> vertices = {};
+    constexpr std::array<std::array<float, 2>, 6> corners = {{{0,0},{1,0},{1,1},{0,0},{1,1},{0,1}}};
+    for (size_t i = 0; i < corners.size(); ++i) {
+        float* v = vertices.data() + i * 14;
+        v[0] = left + corners[i][0] * 0.52f;
+        v[1] = -0.94f + corners[i][1] * 0.32f;
+        v[2] = 0.2f; v[3] = 1;
+        v[4] = corners[i][0]; v[5] = corners[i][1];
+        v[6] = v[7] = v[8] = environment; v[9] = alpha;
+        v[10] = primitive; v[11] = v[12] = 0; v[13] = 1;
+    }
+    return vertices;
+}
 
 constexpr std::array<float, 6 * 8> kVertices = {
     -0.90f, -0.75f, 0.50f, 1.0f, 0.95f, 0.12f, 0.16f, 1.0f,
@@ -55,6 +75,12 @@ int main() {
     renderer.Init();
     Fast::ShaderProgram* colorProgram = renderer.CreateAndLoadNewShader(kPrimaryColorCombiner, kAlphaOption);
     Fast::ShaderProgram* textureProgram = renderer.CreateAndLoadNewShader(kTextureCombiner, kAlphaOption);
+    Fast::ShaderProgram* kartProgram = renderer.CreateAndLoadNewShader(kKartCombiner, kAlphaOption);
+    // Bottom row: unchanged checkerboard, half intensity, red tint at half
+    // opacity. None may become a solid black tile when all inputs are uniform.
+    auto kartNormal = KartRegressionVertices(-0.9f, 0, 0, 1);
+    auto kartDim = KartRegressionVertices(-0.26f, 0.5f, 0, 1);
+    auto kartTint = KartRegressionVertices(0.38f, 0, 0.5f, 0.5f);
     renderer.SetUseAlpha(true);
     renderer.SetDepthTestAndMask(false, false);
     const auto checkerboard = MakeCheckerboard();
@@ -75,6 +101,10 @@ int main() {
         renderer.LoadShader(textureProgram);
         renderer.SelectTexture(0, texture);
         renderer.DrawTriangles(const_cast<float*>(kTextureVertices.data()), kTextureVertices.size(), 2);
+        renderer.LoadShader(kartProgram);
+        renderer.DrawTriangles(kartNormal.data(), kartNormal.size(), 2);
+        renderer.DrawTriangles(kartDim.data(), kartDim.size(), 2);
+        renderer.DrawTriangles(kartTint.data(), kartTint.size(), 2);
         renderer.EndFrame();
     }
 

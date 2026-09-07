@@ -7,10 +7,6 @@ Native Nintendo 3DS port of Mario Kart 64, based on
 specifically for the 3DS family, with a dual-screen interface and hardware-aware
 rendering, audio, and memory profiles.
 
-> [!WARNING]
-> This is an experimental fan port. Save your work before launching it and
-> report crashes or rendering issues with a diagnostic dump whenever possible.
-
 No ROM, ROM fragment, save file, or extracted Nintendo game data is distributed
 with this project. You must provide your own legally obtained USA Mario Kart 64
 ROM.
@@ -27,7 +23,10 @@ https://discord.gg/SMW49UMkw
 ## Features
 
 - Native 400x240 gameplay and an optional 800x240 high-density top-screen mode.
-- Selectable Low (0.50x), Medium (0.75x), and High (1.00x) internal resolution.
+- Internal render scale from 0.50x to 1.00x in 0.05 steps, with a touch slider.
+- Low, Normal, and High render distance. High retains the stock course range.
+- Clean, MK7, MKDS, MKDS 2, and Classic HUD layouts in Display.
+  First-launch defaults use MKDS 2; saved layout choices are preserved.
 - Bilinear, Blur, and lightweight CRT display filters.
 - Wide 5:3 and Original 4:3 display modes.
 - Dual-screen interface, bottom-screen race HUD, and touch menu navigation.
@@ -56,11 +55,11 @@ activity leave enough headroom. It automatically falls back to the required
 The midpoint path is adaptive; it is not a promise of a fixed or sustained
 60 FPS mode. The 800-pixel quality mode presents keyframes only.
 
-The Screen menu can render the game at half, three-quarter, or full internal
-resolution and scale it to the complete top screen. Bilinear uses a single GPU
+The Display menu adjusts internal resolution from 0.50x through 1.00x and
+scales it to the complete top screen. Bilinear uses a single GPU
 presentation pass, Blur uses four lightweight samples, and CRT combines
 bilinear scaling with a small procedural scanline and shadow-mask pattern.
-High resolution with Bilinear selected keeps the original direct presentation
+A 1.00x render scale with Bilinear selected keeps the original direct presentation
 path and does not allocate the intermediate target.
 
 The renderer cleans exact Fast3D vertex and texture ranges through the local
@@ -76,6 +75,46 @@ buffer and uses the same clean-only ownership transfer instead of producing and
 copying an intermediate block. These changes reduce contention and memory
 traffic on both hardware profiles; sustained performance still requires
 physical-hardware measurement.
+
+Render distance is independent of scale: Normal uses 75% and Low uses 50% of
+that course's far distance, with a fog transition over the final quarter.
+Only fully distant depth-tested triangles are rejected; intersecting polygons
+remain to avoid holes. High disables this additional fog/culling pass. Gains
+are scene-dependent and must be measured separately on Old and New hardware.
+
+HUD layouts are selectable without restarting:
+
+| Layout | Top screen | Bottom screen |
+| --- | --- | --- |
+| Clean | Clear race view; optional Y HUD cycle | Existing complete race HUD |
+| MK7 | Item left, position upper right | Lap, time, standings, map |
+| MKDS | Item left, lap upper right, position lower left | Time, standings, map |
+| MKDS 2 | Item left, position lower left | Lap, time, standings, map |
+| Classic | Rebalanced complete HUD at native display resolution | Complete race HUD |
+
+Top-screen race widgets fade in over one second after the countdown. The empty
+item frame remains visible between pickups. Top-screen item, lap,
+and position elements are larger, with a dark position shadow. Lower standings
+use separated portraits and a larger two-column finish layout. Multiplayer
+keeps the native per-viewport HUD.
+
+The renderer compiles immutable combiner plans once per material. Distance fog
+skips batches entirely before the start of its ramp and avoids redundant fog
+texture binds within a 3D pass. These changes reduce repeated CPU/state work;
+real-hardware FPS gains have not yet been measured.
+
+Extraction buffers archive writes and stores tiny entries without deflation.
+All payload/CRC validation and atomic completion remain enabled. The progress
+screen redraws at most ten times per second while retaining every log message.
+
+Course Data uses an enlarged scrolling course list and a dual-screen details
+view with records, preview and map above, and course actions below. Time Trial
+and Grand Prix results use centered text and shadows. Time Trial ghosts use the
+two original save slots in `sd:/3ds/MK64/controller-pak.bin`.
+
+Loading screens are optional under Display > Show loading screens. They are
+disabled by default: both screens stay black during loading. Enabling them
+shows progress during startup and course changes. Errors remain visible.
 
 ## Installation
 
@@ -152,8 +191,56 @@ If you encounter a crash, graphical bug, or performance problem, press
 sd:/3ds/MK64/dump/
 ```
 
-Attach the complete folder to your bug report and describe the console model,
-display mode, game mode, and what happened immediately before the issue.
+Performance captures include `performance.csv` and `performance.txt` with the
+latest 256 simulation ticks: CPU/wait/audio timings, submitted images, adaptive
+presentation reasons, resource reads, uploads and active settings. Dump pauses
+are excluded from the next FPS measurement; `FPS --` indicates its warmup.
+
+New captures are numbered `000-dump-...`, `001-dump-...`, and so on. The
+sequence survives restarts while captures remain. An empty dump collection
+restarts at `000`, including after manual deletion or Clean dumps. Older
+captures retain their original names. A paused progress screen appears on the lower screen,
+using the current race/menu background and the same font as the FPS counter,
+without a separate dark panel.
+
+Developer > Clean dumps deletes all contents of the diagnostic folder, including
+expanded RAM captures, and starts a fresh runtime log. The next capture restarts at `000`; game data, settings and saves are unaffected.
+
+Before entering the game, the port loads every compressed resource from the
+owner-generated O2R archive into RAM and closes its SD file handle. ZIP names
+and headers are not duplicated in the payload buffer. Kart angles, course
+resources and effects then use RAM, with decompression and CRC validation.
+The CIA requests expanded application memory on Old 3DS (80MB system mode)
+and New 3DS (124MB system mode). Old-model launch/exit can take longer while
+the system changes memory mode. The ordinary heap retains at least an 8 MiB
+reserve at preload time for later game allocations; this is not a guarantee
+of sustained frame rate or a bound on every future allocation.
+
+Use the installed CIA for this path. A 3DSX launcher must grant enough memory;
+if the archive cannot fit with the reserve, startup stops with an actionable
+message instead of silently returning to SD streaming. Existing O2R archives
+work without re-extraction. Save data and controller pak reads happen at boot;
+intentional save writes and requested diagnostics still use the SD card.
+
+During the game, diagnostic logging uses a bounded 64 KiB RAM ring. Automatic
+heartbeats and buffer overflow do not write to SD. Explicit dumps and orderly
+shutdown flush it; overflow drops the oldest complete lines with a marker in
+the next written log. Resource decoding, texture conversion and GPU work still
+have CPU/GPU costs even when physical archive I/O is zero.
+
+The trace includes interpolation acceptance/rejection reasons and matrix counts.
+`interpolation.txt` and `matrices-current.csv` / `matrices-previous.csv` describe
+the recorder state. `race-start.csv` retains the latest race's initial driving
+ticks plus up to 32 countdown ticks even after the rolling trace has moved on.
+Do not calculate frame rates across diagnostic-pause epochs.
+
+Hold `L` while pressing `SELECT` for an expanded application RAM snapshot with a
+region manifest. This additionally captures readable application-owned code,
+heaps and stacks; it excludes device registers, VRAM and service shared mappings.
+It is larger and slower than a normal capture, and is not a whole-system snapshot.
+
+Share diagnostic folders privately and describe the console model, display mode,
+game mode, and what happened immediately before the issue.
 
 ## Releases
 
@@ -181,7 +268,10 @@ git submodule update --init --recursive
 ./platform/3ds/build.sh
 ```
 
-Build output is written under `build-3ds/game/` by default.
+Build output is written under `build-3ds/game/` by default. Local CIA packaging
+may use `MK64_3DS_BANNER_CGFX=/absolute/model.cgfx` and
+`MK64_3DS_BANNER_AUDIO=/absolute/sound.wav` to supply a 3D banner and audio.
+The assets are packaging inputs and do not need to be added to the source tree.
 
 ## Credits
 

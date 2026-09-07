@@ -4,6 +4,7 @@
 #include "audio_ndsp_3ds.h"
 #include "diagnostics_3ds.h"
 #include "settings_3ds.h"
+#include "performance_trace_3ds.hpp"
 
 #include "audio/data.h"
 #include "audio/heap.h"
@@ -74,6 +75,7 @@ LightEvent sWorkerDone;
 std::atomic<bool> sWorkerRunning{ false };
 std::atomic<bool> sJobOutstanding{ false };
 std::atomic<bool> sLastJobQueued{ false };
+std::atomic<uint32_t> sLastJobMicroseconds{ 0 };
 std::atomic<bool> sPaused{ false };
 std::atomic<uint16_t> sVolumePercent{ 100 };
 int sWorkerCore = -1;
@@ -219,9 +221,12 @@ void AudioWorkerMain(void*) {
         // worker consumes them, and the main thread waits for completion
         // before beginning the next logic tick, so libultraship's emulated
         // N64 message queues are never accessed concurrently across ticks.
+        const auto synthesisStart = mk64_3ds::PerformanceNow();
         sLastJobQueued.store(
             SynthesizeAndQueue(sVolumePercent.load(std::memory_order_relaxed)),
             std::memory_order_release);
+        sLastJobMicroseconds.store(static_cast<uint32_t>(
+            mk64_3ds::PerformanceNow() - synthesisStart), std::memory_order_relaxed);
         LightEvent_Signal(&sWorkerDone);
     }
 }
@@ -299,7 +304,12 @@ bool ScheduleWorkerJob() {
 
 bool WaitForWorkerJob() {
     if (!sJobOutstanding.load(std::memory_order_acquire)) return true;
-    LightEvent_Wait(&sWorkerDone);
+    {
+        mk64_3ds::PerformanceTimer timer(mk64_3ds::PerformanceCurrent().audio_wait_us);
+        LightEvent_Wait(&sWorkerDone);
+    }
+    mk64_3ds::PerformanceCurrent().audio_synth_us +=
+        sLastJobMicroseconds.load(std::memory_order_relaxed);
     sJobOutstanding.store(false, std::memory_order_release);
     return sLastJobQueued.load(std::memory_order_acquire);
 }
@@ -376,11 +386,16 @@ extern "C" void Mk64GameAudio3DSPump() {
     bool queueFailedThisPump = false;
     while (NeedsSynthesis() && synthesizedThisPump < kMaxSynthesisBlocksPerPump) {
         bool queued = false;
-        if (ScheduleWorkerJob()) {
+        // Core 1 on Old 3DS is shared with the OS. A catch-up job has no
+        // rendering left to overlap, so dispatching it there only adds a
+        // scheduling round trip. The previous worker job has completed;
+        // synthesis here remains strictly serialized with game audio state.
+        if (sWorkerCore != 1 && ScheduleWorkerJob()) {
             queued = WaitForWorkerJob();
         } else {
             // Old 3DS systems that cannot reserve core 1 retain the safe
             // single-threaded path rather than losing audio entirely.
+            mk64_3ds::PerformanceTimer timer(mk64_3ds::PerformanceCurrent().audio_synth_us);
             queued = SynthesizeAndQueue(Mk64Settings3DSGetMasterVolumePercent());
         }
         // Synthesis advances the game's audio timeline. If NDSP has no
@@ -393,6 +408,7 @@ extern "C" void Mk64GameAudio3DSPump() {
         }
         ++synthesizedThisPump;
     }
+    mk64_3ds::PerformanceCurrent().audio_blocks = synthesizedThisPump;
     FinishPumpTelemetry(bufferedBefore, synthesizedThisPump, queueFailedThisPump);
 }
 

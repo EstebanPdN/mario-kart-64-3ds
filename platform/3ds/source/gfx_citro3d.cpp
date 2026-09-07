@@ -1,5 +1,6 @@
 #include "gfx_citro3d.h"
 #include "system_3ds.h"
+#include "render_policy_3ds.hpp"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -28,6 +29,16 @@ extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation(void) __attribute__(
 extern "C" {
 extern u32 __ctru_linear_heap;
 extern u32 __ctru_linear_heap_size;
+}
+
+extern "C" float Mk64GameState3DSDistanceFog(uint32_t*) __attribute__((weak));
+extern "C" {
+float gMk64DistanceFar3DS = 0.0f;
+uint32_t gMk64DistanceCulled3DS = 0;
+uint32_t gMk64DistanceFogDraws3DS = 0;
+uint32_t gMk64DistanceFogSkipped3DS = 0;
+uint32_t gMk64DistanceFogBypassed3DS = 0;
+uint32_t gMk64DistanceFogBinds3DS = 0;
 }
 
 namespace Fast {
@@ -389,6 +400,12 @@ struct GfxRenderingAPICitro3D::Impl {
     DVLB_s* shaderBinary = nullptr;
     shaderProgram_s shaderProgram = {};
     int projectionUniform = -1;
+    int distanceFogUniform = -1;
+    C3D_Tex distanceFogTexture = {};
+    bool distanceFogTextureInitialized = false;
+    bool distanceFogTextureBound = false;
+    uint32_t distanceFogColor = 0;
+    bool tevStateDistanceFog = false;
     C3D_RenderTarget* topTarget = nullptr;
     C3D_Tex sceneTexture = {};
     C3D_RenderTarget* sceneTarget = nullptr;
@@ -404,6 +421,8 @@ struct GfxRenderingAPICitro3D::Impl {
     int displayFilter = DisplayFilterBilinear;
     bool postprocessActive = false;
     bool scenePresented = false;
+    bool hasSubmittedFrame = false;
+    uint32_t submittedVBlank[2] = {};
     PackedVertex* packedVertices = nullptr;
     uint32_t postprocessVertexOutputWidth = 0;
     uint32_t postprocessVertexRenderWidth = 0;
@@ -456,6 +475,8 @@ struct GfxRenderingAPICitro3D::Impl {
     uint64_t vertexUploadBytes = 0;
     uint64_t linearHeapFlushFrameCount = 0;
 
+    uint32_t frameBeginWaitMicroseconds = 0;
+
     ~Impl() {
         for (auto& slot : framebuffers) {
             if (slot == nullptr) {
@@ -485,6 +506,7 @@ struct GfxRenderingAPICitro3D::Impl {
         if (sceneTextureInitialized) {
             C3D_TexDelete(&sceneTexture);
         }
+        if (distanceFogTextureInitialized) C3D_TexDelete(&distanceFogTexture);
         if (crtMaskTextureInitialized) {
             C3D_TexDelete(&crtMaskTexture);
         }
@@ -511,6 +533,10 @@ bool GfxRenderingAPICitro3D::IsInitialized() const {
     return mImpl->ready;
 }
 
+void* GfxRenderingAPICitro3D::GetTopRenderTarget() const {
+    return mImpl->topTarget;
+}
+
 const char* GfxRenderingAPICitro3D::GetName() {
     return "Citro3D";
 }
@@ -535,6 +561,8 @@ void GfxRenderingAPICitro3D::LoadShader(ShaderProgram* newPrg) {
 
 void GfxRenderingAPICitro3D::ClearShaderCache() {
     mImpl->currentProgram = nullptr;
+    mImpl->tevStateValid = false;
+    mImpl->tevStateProgram = nullptr;
     mImpl->shaderPrograms.clear();
 }
 
@@ -604,6 +632,19 @@ ShaderProgram* GfxRenderingAPICitro3D::CreateAndLoadNewShader(uint64_t shaderId0
         offset += program->alpha ? 4 : 3;
     }
     program->strideFloats = offset;
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        for (int channel = 0; channel < 2; ++channel) {
+            const auto plan = channel == 1 && !program->alpha
+                ? SingleOperationPlan(PassPrevious()) : BuildChannelPlan(program->combiner[cycle][channel]);
+            program->tevOperationCount[cycle][channel] = plan.count;
+            for (size_t i = 0; i < plan.size(); ++i) {
+                auto& encoded = program->tevOperations[cycle][channel][i];
+                encoded.function = static_cast<uint8_t>(plan[i].function);
+                for (int term = 0; term < 3; ++term) encoded.source[term] = plan[i].source[term];
+            }
+        }
+    }
+
 
     ShaderProgram* result = program.get();
     mImpl->shaderPrograms[key] = std::move(program);
@@ -890,11 +931,12 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     const float* drawVertices = bufVbo;
     size_t vertexCount = sourceVertexCount;
     bool needsClipping = false;
+    bool reachesDistanceFog = false;
+    const float fogStart = gMk64DistanceFar3DS * 0.75f;
     for (size_t vertex = 0; vertex < sourceVertexCount; ++vertex) {
-        if (bufVbo[vertex * program->strideFloats + 3] < kClipWEpsilon) {
-            needsClipping = true;
-            break;
-        }
+        const float w = bufVbo[vertex * program->strideFloats + 3];
+        needsClipping |= w < kClipWEpsilon;
+        reachesDistanceFog |= w > fogStart;
     }
     if (needsClipping) {
         mImpl->clipScratch.resize(sourceTriangleCount * 6 * program->strideFloats);
@@ -965,7 +1007,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         const uint8_t inputOffset = program->inputOffsets[input];
         for (int component = 0; component < 4; ++component) {
             constants[input][component] =
-                component == 3 && !program->alpha ? 1.0f : drawVertices[inputOffset + std::min(component, 2)];
+                component == 3 && !program->alpha ? 1.0f : drawVertices[inputOffset + component];
         }
         // PICA exposes one primary vertex color to the TEV pipeline. Once that
         // varying input is chosen, every later input is necessarily represented
@@ -989,6 +1031,12 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
             varyingInput = input;
         }
     }
+
+    // Uniform inputs still need distinct TEV sources. In particular, karts
+    // use (1 - environment) * texture + primitive: mapping both 1 and a
+    // uniform environment to GPU_CONSTANT turns the subtraction into zero.
+    // Keep the primary-color slot occupied even when every input is uniform.
+    if (varyingInput < 0 && program->numInputs > 0) varyingInput = 0;
 
     // Scale an opaque 320x240 full-screen backdrop uniformly to 400x300 and
     // let the top screen crop 30 pixels at the top and bottom. This gives it a
@@ -1075,7 +1123,19 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     }
     const uint32_t packedTevGrayscale =
         program->grayscale ? PackColor(grayscaleColor) : 0;
+    const bool fogEligible = gMk64DistanceFar3DS > 0 && mImpl->depthTest &&
+                             mImpl->activeTarget == mImpl->gameTarget;
+    // The ramp is exactly zero before fogStart. A triangle whose vertices are
+    // all nearer cannot cross that plane, so omit its texture read/TEV stage.
+    const bool distanceFog = fogEligible && reachesDistanceFog;
+    if (fogEligible && !distanceFog) ++gMk64DistanceFogBypassed3DS;
+    if (distanceFog && !mImpl->distanceFogTextureBound) {
+        C3D_TexBind(2, &mImpl->distanceFogTexture);
+        mImpl->distanceFogTextureBound = true;
+        ++gMk64DistanceFogBinds3DS;
+    }
     const bool updateTevState = !mImpl->tevStateValid ||
+                                mImpl->tevStateDistanceFog != distanceFog ||
                                 mImpl->tevStateProgram != program ||
                                 mImpl->tevStateVaryingInput != varyingInput ||
                                 mImpl->tevStateConstants != packedTevConstants ||
@@ -1092,15 +1152,18 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     int stage = 0;
     const int cycleCount = program->twoCycle ? 2 : 1;
     for (int cycle = 0; cycle < cycleCount && stage < 6; ++cycle) {
-        const ChannelPlan rgbPlan = BuildChannelPlan(program->combiner[cycle][0]);
-        const ChannelPlan alphaPlan = program->alpha ? BuildChannelPlan(program->combiner[cycle][1])
-                                                      : SingleOperationPlan(PassPrevious());
-        const size_t operationCount = std::max(rgbPlan.size(), alphaPlan.size());
+        const auto decode = [](const CompiledTevOperation3DS& operation) {
+            return ChannelOperation{static_cast<GPU_COMBINEFUNC>(operation.function),
+                                    {operation.source[0], operation.source[1], operation.source[2]}};
+        };
+        const size_t rgbCount = program->tevOperationCount[cycle][0];
+        const size_t alphaCount = program->tevOperationCount[cycle][1];
+        const size_t operationCount = std::max(rgbCount, alphaCount);
         for (size_t operationIndex = 0; operationIndex < operationCount && stage < 6; ++operationIndex, ++stage) {
-            const ChannelOperation rgbOperation =
-                operationIndex < rgbPlan.size() ? rgbPlan[operationIndex] : PassPrevious();
-            const ChannelOperation alphaOperation =
-                operationIndex < alphaPlan.size() ? alphaPlan[operationIndex] : PassPrevious();
+            const auto rgbOperation = operationIndex < rgbCount
+                ? decode(program->tevOperations[cycle][0][operationIndex]) : PassPrevious();
+            const auto alphaOperation = operationIndex < alphaCount
+                ? decode(program->tevOperations[cycle][1][operationIndex]) : PassPrevious();
             C3D_TexEnv* environment = C3D_GetTexEnv(stage);
             C3D_TexEnvInit(environment);
             ConfigureChannel(environment, C3D_RGB, rgbOperation, varyingInput, cycle);
@@ -1201,6 +1264,19 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                                    std::clamp(grayscaleColor[1], 0.0f, 1.0f),
                                    std::clamp(grayscaleColor[2], 0.0f, 1.0f), 1.0f }));
     }
+    if (distanceFog) {
+        if (stage < 6) {
+            C3D_TexEnv* environment = C3D_GetTexEnv(stage++);
+            C3D_TexEnvInit(environment);
+            C3D_TexEnvSrc(environment, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_TEXTURE2);
+            C3D_TexEnvFunc(environment, C3D_RGB, GPU_INTERPOLATE);
+            C3D_TexEnvColor(environment, mImpl->distanceFogColor);
+            ConfigureAlphaPass(environment);
+            ++gMk64DistanceFogDraws3DS;
+        } else {
+            ++gMk64DistanceFogSkipped3DS;
+        }
+    }
     for (; stage < 6; ++stage) {
         C3D_TexEnv* environment = C3D_GetTexEnv(stage);
         C3D_TexEnvInit(environment);
@@ -1217,6 +1293,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         mImpl->tevStateGrayscale = packedTevGrayscale;
         mImpl->tevStateDepthTest = mImpl->depthTest;
         mImpl->tevStateDepthWrite = mImpl->depthWrite;
+        mImpl->tevStateDistanceFog = distanceFog;
     }
     if (mImpl->dirtyVertexBegin == mImpl->dirtyVertexEnd) {
         mImpl->dirtyVertexBegin = firstVertex;
@@ -1515,6 +1592,7 @@ void GfxRenderingAPICitro3D::PresentSceneToTopTarget() {
 
 void GfxRenderingAPICitro3D::RestoreFast3DState() {
     mImpl->tevStateValid = false;
+    mImpl->distanceFogTextureBound = false;
     C3D_BindProgram(&mImpl->shaderProgram);
 
     C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
@@ -1670,6 +1748,21 @@ void GfxRenderingAPICitro3D::Init() {
     shaderProgramSetVsh(&mImpl->shaderProgram, &mImpl->shaderBinary->DVLE[0]);
     C3D_BindProgram(&mImpl->shaderProgram);
     mImpl->projectionUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "projection");
+    mImpl->distanceFogUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "distanceFog");
+    // An independently generated 8x8 intensity ramp, shared by all courses.
+    // It blends the final textured RGB while leaving alpha and depth intact.
+    mImpl->distanceFogTextureInitialized = C3D_TexInit(&mImpl->distanceFogTexture, 8, 8, GPU_RGBA8);
+    if (!mImpl->distanceFogTextureInitialized) return;
+    auto* fogPixels = static_cast<uint32_t*>(mImpl->distanceFogTexture.data);
+    for (uint32_t y = 0; y < 8; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+            const uint32_t value = (x * 255 + 3) / 7;
+            fogPixels[MortonOffset8x8(x, y)] = __builtin_bswap32(0xFF000000U | value * 0x010101U);
+        }
+    }
+    if (!Mk64System3DSCleanDataCache(fogPixels, 8 * 8 * sizeof(uint32_t))) return;
+    C3D_TexSetFilter(&mImpl->distanceFogTexture, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&mImpl->distanceFogTexture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     mImpl->packedVertices =
         static_cast<PackedVertex*>(linearAlloc(kVertexBufferCapacity * sizeof(PackedVertex)));
     if (mImpl->packedVertices == nullptr) {
@@ -1686,7 +1779,10 @@ void GfxRenderingAPICitro3D::Init() {
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 4, 0x3210);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
-    C3D_FrameRate(useIntermediatePresentation ? 60.0f : 30.0f);
+    // The simulation pacer owns the 30 Hz game clock on both models. A
+    // second 30 Hz gate here can add an entire refresh after that deadline.
+    // Old 3DS still submits at most one image per simulation tick.
+    C3D_FrameRate(60.0f);
     SetUseAlpha(false);
     SetDepthTestAndMask(false, false);
     mImpl->ready = true;
@@ -1703,9 +1799,7 @@ void GfxRenderingAPICitro3D::StartFrame() {
     const uint8_t requestedScale = Mk64Settings3DSGetRenderScalePercent != nullptr
                                        ? Mk64Settings3DSGetRenderScalePercent()
                                        : 100;
-    mImpl->renderScalePercent = requestedScale == 50 || requestedScale == 75
-                                    ? requestedScale
-                                    : 100;
+    mImpl->renderScalePercent = mk64_3ds::NormalizeRenderScale(requestedScale);
     const int requestedFilter = Mk64Settings3DSGetDisplayFilter != nullptr
                                     ? Mk64Settings3DSGetDisplayFilter()
                                     : DisplayFilterBilinear;
@@ -1723,10 +1817,32 @@ void GfxRenderingAPICitro3D::StartFrame() {
                               ? ScaledDimension(kTopHeight, mImpl->renderScalePercent)
                               : kTopHeight;
     mImpl->gameTarget = mImpl->postprocessActive ? mImpl->sceneTarget : mImpl->topTarget;
-    if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) {
+    const uint64_t beginTick = svcGetSystemTick();
+    mImpl->frameBeginWaitMicroseconds = 0;
+    // Honor an already elapsed display interval instead of unconditionally
+    // waiting for another one. FrameBegin still waits for the GPU queue;
+    // same-interval midpoint/key frames retain the VBlank synchronization.
+    const bool displayAdvanced = mImpl->hasSubmittedFrame &&
+        C3D_FrameCounter(0) != mImpl->submittedVBlank[0] &&
+        C3D_FrameCounter(1) != mImpl->submittedVBlank[1];
+    if (!C3D_FrameBegin(displayAdvanced ? 0 : C3D_FRAME_SYNCDRAW)) {
         return;
     }
+    mImpl->frameBeginWaitMicroseconds = static_cast<uint32_t>((svcGetSystemTick() - beginTick) * 1000000ULL / SYSCLOCK_ARM11);
     mImpl->frameActive = true;
+    gMk64DistanceFar3DS = Mk64GameState3DSDistanceFog != nullptr
+                            ? Mk64GameState3DSDistanceFog(&mImpl->distanceFogColor) : 0.0f;
+    gMk64DistanceCulled3DS = 0;
+    gMk64DistanceFogDraws3DS = 0;
+    gMk64DistanceFogSkipped3DS = 0;
+    gMk64DistanceFogBypassed3DS = 0;
+    gMk64DistanceFogBinds3DS = 0;
+    mImpl->distanceFogTextureBound = false;
+    // Fog starts at 75% of the chosen cutoff. Half-texel correction makes
+    // the ramp's endpoint centres exactly 0 and 1 at the requested distances.
+    const float fogSlope = gMk64DistanceFar3DS > 0 ? 3.5f / gMk64DistanceFar3DS : 0.0f;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->distanceFogUniform, fogSlope, -2.5625f, 0.5f, 0.0f);
+    mImpl->tevStateValid = false;
     mImpl->activeTarget = mImpl->gameTarget;
     mImpl->scenePresented = false;
     mImpl->packedVertexCount = 0;
@@ -1771,6 +1887,9 @@ void GfxRenderingAPICitro3D::EndFrame() {
     // If both direct and fallback cleaning unexpectedly failed, retain
     // Citro3D's established full-heap path as a final correctness fallback.
     C3D_FrameEnd(linearHeapClean ? GX_CMDLIST_FLUSH : 0);
+    mImpl->submittedVBlank[0] = C3D_FrameCounter(0);
+    mImpl->submittedVBlank[1] = C3D_FrameCounter(1);
+    mImpl->hasSubmittedFrame = true;
     if (needsLinearHeapFlush) ++mImpl->linearHeapFlushFrameCount;
     mImpl->frameActive = false;
     mImpl->activeTarget = nullptr;
@@ -2046,6 +2165,16 @@ float GfxRenderingAPICitro3D::GetPresentedFps(uint64_t windowMilliseconds) const
     }
     return static_cast<float>(framesInWindow) * 1000.0f /
            static_cast<float>(windowMilliseconds);
+}
+
+uint32_t GfxRenderingAPICitro3D::GetFrameBeginWaitMicroseconds() const {
+    return mImpl->frameBeginWaitMicroseconds;
+}
+
+void GfxRenderingAPICitro3D::ResetPresentedFps() {
+    mImpl->presentedTimestampCount = 0;
+    mImpl->presentedTimestampHead = 0;
+    mImpl->firstPresentedTimestamp = 0;
 }
 
 float GfxRenderingAPICitro3D::GetPresentedFps2Seconds() const {

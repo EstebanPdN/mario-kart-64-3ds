@@ -14,8 +14,12 @@ extern "C" {
  */
 bool Mk64BottomUI3DSInit(void);
 void Mk64BottomUI3DSShutdown(void);
+/* Paused main-thread operation; owns and drains its Citro3D frame. */
+void Mk64BottomUI3DSShowProgress(const char* title, const char* detail, unsigned percent);
+void Mk64BottomUI3DSShowLoadingProgress(const char* title, const char* detail, unsigned percent);
 void Mk64BottomUI3DSPrepareFrame(void);
 void Mk64BottomUI3DSRecordPresentation(void);
+void Mk64BottomUI3DSResetFps(void);
 void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget);
 void Mk64BottomUI3DSDraw(void* existingTopTarget);
 

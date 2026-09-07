@@ -27,7 +27,7 @@ AccessControlInfo:
     - DirectSdmc
     - DirectSdmcWrite
   MemoryType: Application
-  SystemMode: 64MB
+  SystemMode: 80MB
   IdealProcessor: 0
   AffinityMask: 1
   Priority: 16
@@ -39,7 +39,7 @@ AccessControlInfo:
   CanShareDeviceMemory: true
   RunnableOnSleep: false
   SpecialMemoryArrange: true
-  SystemModeExt: Legacy
+  SystemModeExt: 124MB
   CpuSpeed: 804MHz
   EnableL2Cache: true
   IORegisterMapping:

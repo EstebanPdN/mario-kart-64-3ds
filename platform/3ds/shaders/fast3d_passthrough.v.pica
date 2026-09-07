@@ -3,6 +3,7 @@
 ; the perspective divide and perspective-correct texture interpolation.
 
 .fvec projection[4]
+.fvec distanceFog[1]
 
 .constf shaderConstants(1.0, 0.0, 0.00392156862745, 0.0)
 
@@ -10,6 +11,7 @@
 .out outtc0 texcoord0
 .out outtc1 texcoord1
 .out outclr color
+.out outtc2 texcoord2
 
 .in inpos v0
 .in intex0 v1
@@ -29,6 +31,13 @@
     mov outpos, r0
     mov outtc0, intex0
     mov outtc1, intex1
+    ; Perspective w is eye-space distance in the game cameras. Generate a
+    ; third texture coordinate without increasing the packed vertex size.
+    mov r1, shaderConstants.yyyy
+    mul r1.x, distanceFog[0].x, inpos.w
+    add r1.x, distanceFog[0].y, r1.x
+    mov r1.y, distanceFog[0].z
+    mov outtc2, r1
     mul outclr, shaderConstants.zzzz, incolor
     end
 .end

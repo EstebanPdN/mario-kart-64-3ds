@@ -1,4 +1,5 @@
 #include "game_data_3ds.h"
+#include "settings_3ds.h"
 #include "game_data_archive_3ds.hpp"
 #include "install_progress_3ds.hpp"
 #include "install_log_3ds.h"
@@ -352,6 +353,15 @@ void DrawLoadingTopScreen(int percent) {
 }
 
 void PrepareInstallScreensLocked() {
+    if (!Mk64Settings3DSGetShowLoadingScreens()) {
+        for (const auto screen : { GFX_TOP, GFX_BOTTOM }) {
+            u16 width = 0, height = 0;
+            u8* buffer = gfxGetFramebuffer(screen, GFX_LEFT, &width, &height);
+            if (buffer != nullptr) std::memset(buffer, 0, static_cast<size_t>(width) * height * 2);
+        }
+        gfxFlushBuffers();
+        return;
+    }
     DrawLoadingTopScreen(gInstallProgressPercent.load(std::memory_order_relaxed));
     consoleSelect(&gBottomConsole);
     consoleClear();
@@ -441,15 +451,21 @@ void ExtractionLidWatcherMain(void*) {
 
 void OnInstallLogLine(const char* message) {
     PushInstallConsoleLine("%s", message != nullptr ? message : "");
+    static uint64_t lastRedrawMs = 0;
+    const uint64_t now = osGetTime();
+    const bool refresh = now - lastRedrawMs >= 100;
+    if (refresh) lastRedrawMs = now;
 
     int entries = 0;
     if (message != nullptr && std::sscanf(message, "O2R progress: %d entries", &entries) == 1) {
         const std::uint32_t completedEntries =
             entries > 0 ? static_cast<std::uint32_t>(entries) : 0;
-        RedrawInstallScreens(mk64_3ds::install_progress::MapGeneratedEntries(completedEntries));
+        const int percent = mk64_3ds::install_progress::MapGeneratedEntries(completedEntries);
+        AdvanceInstallProgress(percent);
+        if (refresh) RedrawInstallScreens(percent);
         return;
     }
-    RedrawInstallScreens(gInstallProgressPercent.load(std::memory_order_relaxed));
+    if (refresh) RedrawInstallScreens(gInstallProgressPercent.load(std::memory_order_relaxed));
 }
 
 struct ValidationProgressRange {

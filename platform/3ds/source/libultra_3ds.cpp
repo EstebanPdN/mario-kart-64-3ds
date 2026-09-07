@@ -4,6 +4,7 @@
 #include "audio_ndsp_3ds.h"
 #include "input_3ds.h"
 #include "system_3ds.h"
+#include "save_file_3ds.hpp"
 
 #include <cstdarg>
 #include <cstdio>
@@ -52,23 +53,7 @@ uint64_t RawN64Time() {
 }
 
 bool FinishAtomicWrite(FILE* file, const char* temporaryPath, const char* destinationPath, bool ok) {
-    if (file == nullptr) {
-        return false;
-    }
-    if (ok && std::fflush(file) != 0) {
-        ok = false;
-    }
-    if (ok && fsync(fileno(file)) != 0) {
-        ok = false;
-    }
-    if (std::fclose(file) != 0) {
-        ok = false;
-    }
-    if (!ok || rename(temporaryPath, destinationPath) != 0) {
-        std::remove(temporaryPath);
-        return false;
-    }
-    return true;
+    return mk64_3ds::FinishSaveWrite(file, temporaryPath, destinationPath, ok);
 }
 
 void LoadEeprom() {
@@ -77,6 +62,7 @@ void LoadEeprom() {
     }
     sEepromLoaded = true;
     std::memset(sEeprom, 0xFF, sizeof(sEeprom));
+    mk64_3ds::RecoverSaveBackup(kEepromPath);
     FILE* file = std::fopen(kEepromPath, "rb");
     if (file == nullptr) {
         // v0.14 and older accidentally used the SpaghettiKart directory and a
@@ -109,6 +95,7 @@ void LoadVirtualPak() {
         return;
     }
     sVirtualPakLoaded = true;
+    mk64_3ds::RecoverSaveBackup(kVirtualPakPath);
     FILE* file = std::fopen(kVirtualPakPath, "rb");
     if (file == nullptr) {
         file = std::fopen(kLegacyVirtualPakPath, "rb");
@@ -170,6 +157,9 @@ u8 __osMaxControllers = MAXCONTROLLERS;
 
 void osInitialize(void) {
     Mk64Input3DSInit();
+    // Resolve save reads at boot, including the optional Time Trial ghost pak.
+    LoadEeprom();
+    LoadVirtualPak();
 }
 
 int32_t osContInit(OSMesgQueue*, uint8_t* controllerBits, OSContStatus* status) {
