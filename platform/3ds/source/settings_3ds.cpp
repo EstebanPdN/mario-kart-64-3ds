@@ -1,4 +1,5 @@
 #include "settings_3ds.h"
+#include "render_policy_3ds.hpp"
 
 #include <cerrno>
 #include <cstddef>
@@ -15,29 +16,48 @@ constexpr const char* kSettingsTemporaryPath = "sdmc:/3ds/MK64/mk64-3ds.cfg.tmp"
 struct Settings {
     Mk64AspectRatio3DS aspectRatio;
     bool topHudEnabled;
+    Mk64HudLayout3DS hudLayout;
     uint16_t resolutionWidth;
     uint8_t renderScalePercent;
     Mk64DisplayFilter3DS displayFilter;
+    Mk64RenderDistance3DS renderDistance;
     uint8_t turboMultiplier;
     uint16_t masterVolumePercent;
     bool showFpsEnabled;
     bool overlayEnabled;
+    bool showLoadingScreens;
 };
 
 constexpr Settings kDefaults = {
     MK64_ASPECT_RATIO_3DS_WIDE,
     false,
+    MK64_HUD_LAYOUT_3DS_MKDS_2,
     400,
-    100,
+    75,
     MK64_DISPLAY_FILTER_3DS_BILINEAR,
+    MK64_RENDER_DISTANCE_3DS_LOW,
     1,
     100,
     false,
     false,
+    false,
 };
 
+bool sNewModelDefaults = false;
+Settings ModelDefaults() {
+    Settings defaults = kDefaults;
+    if (sNewModelDefaults) {
+        defaults.renderScalePercent = 100;
+        defaults.renderDistance = MK64_RENDER_DISTANCE_3DS_NORMAL;
+    }
+    return defaults;
+}
 Settings sSettings = kDefaults;
 bool sLoaded = false;
+bool sLayoutRead = false;
+bool sLegacyHudRead = false;
+constexpr const char* kLayoutNames[] = { "clean", "mk7", "mkds", "mkds2", "classic" };
+constexpr const char* kLegacyLayoutNames[] = { "clean", "focus", "race", "hybrid", "classic" };
 
 bool IsAsciiSpace(char character) {
     return character == ' ' || character == '\t' || character == '\r' || character == '\n' ||
@@ -115,13 +135,7 @@ uint16_t SanitizeResolution(long width) {
 }
 
 uint8_t SanitizeRenderScale(long percent) {
-    if (percent <= 62) {
-        return 50;
-    }
-    if (percent <= 87) {
-        return 75;
-    }
-    return 100;
+    return mk64_3ds::NormalizeRenderScale(percent);
 }
 
 Mk64DisplayFilter3DS SanitizeDisplayFilter(Mk64DisplayFilter3DS filter) {
@@ -171,11 +185,31 @@ void ApplySetting(const char* key, const char* value) {
         return;
     }
 
+    if (std::strcmp(key, "hud_layout") == 0) {
+        for (int i = 0; i < 5; ++i) {
+            if (EqualsIgnoreCase(value, kLayoutNames[i]) || EqualsIgnoreCase(value, kLegacyLayoutNames[i])) {
+                sSettings.hudLayout = static_cast<Mk64HudLayout3DS>(i);
+                sLayoutRead = true;
+            }
+        }
+        return;
+    }
     bool booleanValue = false;
+    if (std::strcmp(key, "show_loading_screens") == 0) {
+        if (ParseBoolean(value, &booleanValue)) sSettings.showLoadingScreens = booleanValue;
+        return;
+    }
     if (std::strcmp(key, "top_hud") == 0) {
         if (ParseBoolean(value, &booleanValue)) {
             sSettings.topHudEnabled = booleanValue;
+            sLegacyHudRead = true;
         }
+        return;
+    }
+    if (std::strcmp(key, "render_distance") == 0) {
+        if (EqualsIgnoreCase(value, "low")) sSettings.renderDistance = MK64_RENDER_DISTANCE_3DS_LOW;
+        else if (EqualsIgnoreCase(value, "normal")) sSettings.renderDistance = MK64_RENDER_DISTANCE_3DS_NORMAL;
+        else if (EqualsIgnoreCase(value, "high")) sSettings.renderDistance = MK64_RENDER_DISTANCE_3DS_HIGH;
         return;
     }
     if (std::strcmp(key, "display_filter") == 0) {
@@ -230,11 +264,15 @@ void EnsureLoaded() {
 }
 }
 
+extern "C" void Mk64Settings3DSSetHardwareModel(bool isNewModel) {
+    sNewModelDefaults = isNewModel;
+}
+
 extern "C" void Mk64Settings3DSLoad(void) {
     if (sLoaded) {
         return;
     }
-    sSettings = kDefaults;
+    sSettings = ModelDefaults();
     sLoaded = true;
 
     FILE* file = std::fopen(kSettingsPath, "rb");
@@ -261,6 +299,8 @@ extern "C" void Mk64Settings3DSLoad(void) {
         }
     }
     std::fclose(file);
+    if (!sLayoutRead && sLegacyHudRead) sSettings.hudLayout = sSettings.topHudEnabled ? MK64_HUD_LAYOUT_3DS_CLASSIC : MK64_HUD_LAYOUT_3DS_CLEAN;
+    sSettings.topHudEnabled = sSettings.hudLayout == MK64_HUD_LAYOUT_3DS_CLASSIC;
 }
 
 extern "C" bool Mk64Settings3DSSave(void) {
@@ -279,23 +319,30 @@ extern "C" bool Mk64Settings3DSSave(void) {
         "# Mario Kart 64 3DS settings\n"
         "aspect_ratio=%s\n"
         "top_hud=%s\n"
+        "hud_layout=%s\n"
         "resolution=%u\n"
         "render_scale=%u\n"
         "display_filter=%s\n"
+        "render_distance=%s\n"
         "turbo_speed=%u\n"
         "master_volume=%u\n"
         "show_fps=%s\n"
-        "overlay=%s\n",
+        "overlay=%s\n"
+        "show_loading_screens=%s\n",
         sSettings.aspectRatio == MK64_ASPECT_RATIO_3DS_ORIGINAL ? "original" : "wide",
         sSettings.topHudEnabled ? "on" : "off",
+        kLayoutNames[static_cast<int>(sSettings.hudLayout)],
         static_cast<unsigned int>(sSettings.resolutionWidth),
         static_cast<unsigned int>(sSettings.renderScalePercent),
         sSettings.displayFilter == MK64_DISPLAY_FILTER_3DS_BLUR
             ? "blur"
             : (sSettings.displayFilter == MK64_DISPLAY_FILTER_3DS_CRT ? "crt" : "bilinear"),
+        sSettings.renderDistance == MK64_RENDER_DISTANCE_3DS_LOW ? "low" :
+            (sSettings.renderDistance == MK64_RENDER_DISTANCE_3DS_NORMAL ? "normal" : "high"),
         static_cast<unsigned int>(sSettings.turboMultiplier),
         static_cast<unsigned int>(sSettings.masterVolumePercent),
-        sSettings.showFpsEnabled ? "on" : "off", sSettings.overlayEnabled ? "on" : "off");
+        sSettings.showFpsEnabled ? "on" : "off", sSettings.overlayEnabled ? "on" : "off",
+        sSettings.showLoadingScreens ? "on" : "off");
     const bool flushSucceeded = std::fflush(file) == 0;
     const bool closeSucceeded = std::fclose(file) == 0;
     const bool writeSucceeded = written >= 0 && flushSucceeded && closeSucceeded;
@@ -319,8 +366,18 @@ extern "C" bool Mk64Settings3DSSave(void) {
 }
 
 extern "C" void Mk64Settings3DSResetDefaults(void) {
-    sSettings = kDefaults;
+    sSettings = ModelDefaults();
     sLoaded = true;
+}
+
+extern "C" bool Mk64Settings3DSGetShowLoadingScreens(void) {
+    EnsureLoaded();
+    return sSettings.showLoadingScreens;
+}
+
+extern "C" void Mk64Settings3DSSetShowLoadingScreens(bool enabled) {
+    EnsureLoaded();
+    sSettings.showLoadingScreens = enabled;
 }
 
 extern "C" Mk64AspectRatio3DS Mk64Settings3DSGetAspectRatio(void) {
@@ -342,7 +399,7 @@ extern "C" bool Mk64Settings3DSGetTopHudEnabled(void) {
 
 extern "C" void Mk64Settings3DSSetTopHudEnabled(bool enabled) {
     EnsureLoaded();
-    sSettings.topHudEnabled = enabled;
+    Mk64Settings3DSSetHudLayout(enabled ? MK64_HUD_LAYOUT_3DS_CLASSIC : MK64_HUD_LAYOUT_3DS_CLEAN);
 }
 
 extern "C" uint16_t Mk64Settings3DSGetResolutionWidth(void) {
@@ -413,4 +470,26 @@ extern "C" bool Mk64Settings3DSGetOverlayEnabled(void) {
 extern "C" void Mk64Settings3DSSetOverlayEnabled(bool enabled) {
     EnsureLoaded();
     sSettings.overlayEnabled = enabled;
+}
+
+extern "C" Mk64RenderDistance3DS Mk64Settings3DSGetRenderDistance(void) {
+    EnsureLoaded();
+    return sSettings.renderDistance;
+}
+
+extern "C" void Mk64Settings3DSSetRenderDistance(Mk64RenderDistance3DS distance) {
+    EnsureLoaded();
+    sSettings.renderDistance = distance >= MK64_RENDER_DISTANCE_3DS_LOW && distance <= MK64_RENDER_DISTANCE_3DS_HIGH
+                                  ? distance : MK64_RENDER_DISTANCE_3DS_HIGH;
+}
+
+extern "C" Mk64HudLayout3DS Mk64Settings3DSGetHudLayout(void) {
+    EnsureLoaded();
+    return sSettings.hudLayout;
+}
+extern "C" void Mk64Settings3DSSetHudLayout(Mk64HudLayout3DS layout) {
+    EnsureLoaded();
+    sSettings.hudLayout = layout >= MK64_HUD_LAYOUT_3DS_CLEAN && layout <= MK64_HUD_LAYOUT_3DS_CLASSIC
+                             ? layout : MK64_HUD_LAYOUT_3DS_CLEAN;
+    sSettings.topHudEnabled = sSettings.hudLayout == MK64_HUD_LAYOUT_3DS_CLASSIC;
 }

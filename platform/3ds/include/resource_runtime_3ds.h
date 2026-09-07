@@ -8,7 +8,14 @@
 extern "C" {
 #endif
 
+/* Loading-phase ZIP cache; returns false if the bounded cache is full. */
+bool Mk64Resource3DSPrefetchKart(const char* name, size_t* cachedBytes);
 bool Mk64Resource3DSInit(const char* archivePath);
+bool Mk64Resource3DSMakeResident(size_t budget, void (*progress)(unsigned));
+bool Mk64Resource3DSIsResident(void);
+uint64_t Mk64Resource3DSArchiveBytes(void);
+uint64_t Mk64Resource3DSPhysicalReadCalls(void);
+uint64_t Mk64Resource3DSPhysicalReadBytes(void);
 void Mk64Resource3DSShutdown(void);
 size_t Mk64Resource3DSArchiveEntryCount(void);
 size_t Mk64Resource3DSLoadedCount(void);

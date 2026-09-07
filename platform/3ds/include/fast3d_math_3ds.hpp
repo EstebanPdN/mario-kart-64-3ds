@@ -1,6 +1,17 @@
 #pragma once
 
+#include <cstdint>
+
 namespace mk64_3ds {
+
+// Texture row strides are normally powers of two. ARM11 has no integer
+// divide instruction; use its count/shift instructions for this common case.
+inline std::uint32_t Fast3DTextureRows(std::uint32_t bytes, std::uint32_t stride) {
+    if (stride != 0 && (stride & (stride - 1)) == 0) {
+        return bytes >> __builtin_ctz(stride);
+    }
+    return bytes / (stride == 0 ? 1 : stride);
+}
 
 inline float Fast3DAspectCorrection(float width, float height) {
     return width > 0.0f ? (4.0f / 3.0f) * height / width : 1.0f;

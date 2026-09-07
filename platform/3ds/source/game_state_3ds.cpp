@@ -1,3 +1,5 @@
+#include "settings_3ds.h"
+#include "render_policy_3ds.hpp"
 #include "game_state_3ds.h"
 #include "input_policy_3ds.hpp"
 
@@ -24,6 +26,7 @@ extern "C" {
 #include "objects.h"
 #include "racing/race_logic.h"
 #include "save.h"
+#include "save_data.h"
 #include "sounds.h"
 
 extern const int8_t D_800F0B54[];
@@ -235,6 +238,21 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
         racer.rank = -1;
     }
 
+    snapshot->topHudOpacity = gGamestate == RACING && gRaceState >= RACE_IN_PROGRESS
+        ? std::clamp(gCourseTimer, 0.0f, 1.0f) : 0.0f;
+    snapshot->dataGrid = gGamestate != RACING && gMenuSelection == DATA_MENU;
+    snapshot->dataCourse = gGamestate != RACING && gMenuSelection == COURSE_DATA_MENU;
+    snapshot->dataIndex = std::clamp<int>(gTimeTrialDataCourseIndex, 0, 15);
+    snapshot->dataSubmenu = gSubMenuSelection;
+    snapshot->dataConfirm = gCourseRecordsSubMenuSelection;
+    snapshot->dataEraseOption = gCourseRecordsMenuSelection;
+    if (snapshot->dataGrid || snapshot->dataCourse) {
+        snapshot->dataHasGhost = func_800B639C(snapshot->dataIndex) >= 0;
+        snapshot->dataHasRecords = gSaveData.allCourseTimeTrialRecords.cupRecords[snapshot->dataIndex / 4]
+            .courseRecords[snapshot->dataIndex % 4].unknownBytes[0] != 0;
+        for (int i = 0; i < 6; ++i) snapshot->dataTimes[i] = i < 5
+            ? func_800B4EB4(i, snapshot->dataIndex) : func_800B4FB0(snapshot->dataIndex);
+    }
     snapshot->gameState = gGamestate;
     snapshot->gameMode = gModeSelection;
     snapshot->menuSelection = gMenuSelection;
@@ -242,6 +260,7 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
     snapshot->gameSelectVisible =
         gMenuSelection == MAIN_MENU && gMainMenuSelection == MAIN_MENU_PLAYER_SELECT;
     snapshot->racing = gGamestate == RACING;
+    snapshot->multiplayer = gPlayerCountSelection1 > 1;
     snapshot->paused = snapshot->racing && gIsGamePaused != 0;
     if (snapshot->racing && !sWasRacing) sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
     if (!snapshot->racing) sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
@@ -264,7 +283,10 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
     snapshot->currentLap = static_cast<int8_t>(lap);
 
     snapshot->trackIndex = std::min(sTrackIndex, kTracks.size() - 1);
+    if (snapshot->dataGrid || snapshot->dataCourse)
+        snapshot->trackIndex = gCupCourseOrder[snapshot->dataIndex / 4][snapshot->dataIndex % 4];
     const VanillaTrack& track = kTracks[snapshot->trackIndex];
+    snapshot->trackLength = track.length;
     snapshot->trackName = track.name;
     snapshot->coursePreviewTexture = track.preview;
     snapshot->minimapTexture = track.minimap;
@@ -364,11 +386,11 @@ extern "C" void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* sn
 }
 
 extern "C" void Mk64GameState3DSSetTopHudEnabled(bool enabled) {
-    const int8_t value = enabled ? 1 : 0;
+    const int8_t value = (enabled ? 1 : 0) | (gPlayerCountSelection1 > 1 ? 2 : 0);
     if (sLastTopHudEnabled == value) return;
     sLastTopHudEnabled = value;
     sHiddenTopHudMode = MK64_TOP_HUD_RENDER_NONE;
-    CVarSetInteger("gDrawHUD", enabled ? 1 : 0);
+    CVarSetInteger("gDrawHUD", gPlayerCountSelection1 > 1 ? 1 : 0);
 }
 
 extern "C" bool Mk64GameState3DSRaceControlsActive() {
@@ -379,14 +401,17 @@ extern "C" bool Mk64GameState3DSCycleHiddenTopHud() {
     if (!Mk64GameState3DSRaceControlsActive() || CVarGetInteger("gDrawHUD", true) != 0) {
         return false;
     }
+    if (Mk64Settings3DSGetHudLayout() != MK64_HUD_LAYOUT_3DS_CLEAN) return false;
     sHiddenTopHudMode = mk64_3ds::NextHiddenTopHudMode(sHiddenTopHudMode);
     return true;
 }
 
 extern "C" int Mk64GameState3DSGetTopHudRenderMode() {
     if (gGamestate != RACING || gIsGamePaused != 0) return MK64_TOP_HUD_RENDER_NONE;
-    if (CVarGetInteger("gDrawHUD", true) != 0) return MK64_TOP_HUD_RENDER_FULL;
-    return static_cast<int>(sHiddenTopHudMode);
+    // Multi-player retains each viewport's native HUD. Single-player Classic
+    // is composed at native display resolution by the port UI.
+    if (gPlayerCountSelection1 > 1) return MK64_TOP_HUD_RENDER_FULL;
+    return Mk64Settings3DSGetHudLayout() == MK64_HUD_LAYOUT_3DS_CLEAN ? static_cast<int>(sHiddenTopHudMode) : MK64_TOP_HUD_RENDER_NONE;
 }
 
 extern "C" bool Mk64GameState3DSPerformPauseAction(Mk64PauseAction3DS action) {
@@ -416,4 +441,81 @@ extern "C" void Mk64GameState3DSApplyTurbo(bool active, uint8_t multiplier) {
     // The unmodified game executes two 30 Hz logic ticks for each rendered
     // key frame. User-facing x1 must preserve that baseline.
     gTickLogic = active ? 2 * clampedMultiplier : 2;
+}
+
+// Called once per presentation, after the world is ready. High and all menu
+// states preserve the stock renderer. Perspective scale is 1 in GameCamera.
+extern "C" float Mk64GameState3DSDistanceFog(uint32_t* color) {
+    if (gGamestate != RACING || Mk64Settings3DSGetRenderDistance() == MK64_RENDER_DISTANCE_3DS_HIGH)
+        return 0.0f;
+    Properties* properties = CM_GetProps();
+    if (properties == nullptr) return 0.0f;
+    const auto horizon = properties->Skybox.BottomRight;
+    const uint8_t r = bFog ? gFogColour.r : horizon.r;
+    const uint8_t g = bFog ? gFogColour.g : horizon.g;
+    const uint8_t b = bFog ? gFogColour.b : horizon.b;
+    *color = r | (static_cast<uint32_t>(g) << 8) | (static_cast<uint32_t>(b) << 16) | 0xFF000000U;
+    return mk64_3ds::RenderDistanceEnd(properties->FarPersp, Mk64Settings3DSGetRenderDistance());
+}
+
+
+extern "C" const char* Mk64GameState3DSDataPreview(int index) {
+    index = std::clamp(index, 0, 15);
+    return kTracks[gCupCourseOrder[index / 4][index % 4]].preview;
+}
+extern "C" const char* Mk64GameState3DSDataName(int index) {
+    index = std::clamp(index, 0, 15);
+    return kTracks[gCupCourseOrder[index / 4][index % 4]].name;
+}
+extern "C" void Mk64GameState3DSDataMove(int delta) {
+    if (is_screen_being_faded()) return;
+    gTimeTrialDataCourseIndex = std::clamp<int>(gTimeTrialDataCourseIndex + delta, 0, 15);
+    play_sound2(SOUND_MENU_CURSOR_MOVE);
+}
+extern "C" void Mk64GameState3DSDataConfirm(int direction, bool activate, bool back) {
+    Controller input{};
+    input.buttonPressed = (direction < 0 ? U_JPAD : direction > 0 ? D_JPAD : 0) |
+        (activate ? A_BUTTON : 0) | (back ? B_BUTTON : 0);
+    course_data_menu_act(&input, 0);
+}
+extern "C" void Mk64GameState3DSDataAction(int action) {
+    if (is_screen_being_faded()) return;
+    if (gMenuSelection == DATA_MENU) {
+        if (action == -1) func_8009E258();
+        else { gCourseRecordsMenuSelection = COURSE_RECORDS_MENU_RETURN_MENU; func_8009E1C0(); }
+        play_sound2(SOUND_MENU_OK_CLICKED);
+        return;
+    }
+    if (gMenuSelection != COURSE_DATA_MENU) return;
+    const int index = std::clamp<int>(gTimeTrialDataCourseIndex, 0, 15);
+    if (action == -1 || action == 0) { func_8009E208(); play_sound2(SOUND_MENU_GO_BACK); return; }
+    const bool ghost = func_800B639C(index) >= 0;
+    if ((action == 2 || action == 3) && !ghost) return;
+    if (action == 3) {
+        gModeSelection = TIME_TRIALS;
+        gPlayerCount = gPlayerCountSelection1 = 1;
+        gScreenModeSelection = SCREEN_MODE_1P;
+        gCCSelection = CC_100;
+        gIsMirrorMode = 0;
+        CM_SetCupIndex(index / 4);
+        SetCupCursorPosition(index % 4);
+        gCupSelection = index / 4;
+        gCourseIndexInCup = index % 4;
+        gCurrentCourseId = gCupCourseOrder[index / 4][index % 4];
+        TrackBrowser_SetTrackFromCup();
+        // Follow the normal course-selection fade, which initializes and loads
+        // the saved ghost through the existing Time Trial startup path.
+        gMenuSelection = COURSE_SELECT_MENU;
+        gSubMenuSelection = SUB_MENU_MAP_SELECT_OK;
+        func_8009E1C0();
+        func_800CA330(0x19);
+        play_sound2(SOUND_MENU_OK_CLICKED);
+        return;
+    }
+    if (action == 1 && !gSaveData.allCourseTimeTrialRecords.cupRecords[index / 4]
+        .courseRecords[index % 4].unknownBytes[0]) return;
+    gCourseRecordsMenuSelection = action;
+    gSubMenuSelection = SUB_MENU_DATA_ERASE_CONFIRM;
+    gCourseRecordsSubMenuSelection = COURSE_RECORDS_SUB_MENU_QUIT;
+    play_sound2(SOUND_MENU_SELECT);
 }

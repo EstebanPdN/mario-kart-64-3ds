@@ -73,7 +73,7 @@ bool AdvanceUntilMidpoint(mk64_3ds::AdaptivePresentationState* state,
 } // namespace
 
 int main() {
-    static_assert(sizeof(mk64_3ds::AdaptivePresentationState) <= 4);
+    static_assert(sizeof(mk64_3ds::AdaptivePresentationState) <= 5);
     assert(!mk64_3ds::IsAdaptivePresentationTextureBurst(
         mk64_3ds::kAdaptivePresentationTextureBurstCount - 1,
         mk64_3ds::kAdaptivePresentationTextureBurstBytes - 1));
@@ -104,18 +104,19 @@ int main() {
     RecoverToFirstProbe(&state);
     CompleteProbe(&state);
 
-    // A merely non-critical audio level is not enough margin for an optional
-    // second display list, even though it remains above the hard low-water mark.
+    // Recovery and exit use distinct thresholds. A validated path survives
+    // queue sawtooth above low water; a new/probing path still needs recovery.
     inputs = HealthyInputs();
     inputs.audioBufferedFrames = inputs.audioLowWaterFrames + 1;
     decision = mk64_3ds::UpdateAdaptivePresentation(&state, inputs);
-    ExpectRecovery(decision);
-    assert(state.cooldownTicks == mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks);
+    assert(decision.renderMidpoint);
+    assert(state.cooldownTicks == 0);
 
     inputs.audioBufferedFrames = inputs.audioLowWaterFrames;
     decision = mk64_3ds::UpdateAdaptivePresentation(&state, inputs);
     assert(!decision.renderMidpoint);
     assert((decision.pressureMask & mk64_3ds::AdaptivePressureAudioLow) != 0);
+    assert(state.cooldownTicks == mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks);
 
     inputs = HealthyInputs();
     inputs.audioBufferedFrames = inputs.audioRecoveryFrames - 1;
@@ -169,6 +170,23 @@ int main() {
     assert(failedProbeMidpoints == 3);
     assert(!state.midpointEnabled);
 
+    // One first-probe phase shift with measured wait is allowed. A second
+    // slow trial still backs out, and CPU/audio pressure overrides the grace.
+    state = {}; inputs = HealthyInputs();
+    RecoverToFirstProbe(&state);
+    inputs.previousTickSlow = true;
+    inputs.synchronizationPhaseDelay = true;
+    assert(mk64_3ds::UpdateAdaptivePresentation(&state, inputs).renderMidpoint);
+    assert(state.midpointProbeTicks == 2);
+    assert(!mk64_3ds::UpdateAdaptivePresentation(&state, inputs).renderMidpoint);
+    assert(state.cooldownTicks == mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks);
+    inputs = HealthyInputs(); state = {};
+    RecoverToFirstProbe(&state);
+    inputs.previousTickSlow = true; inputs.synchronizationPhaseDelay = true;
+    inputs.audioBufferedFrames = inputs.audioLowWaterFrames;
+    assert(!mk64_3ds::UpdateAdaptivePresentation(&state, inputs).renderMidpoint);
+    inputs = HealthyInputs();
+
     // Genuine sustained headroom survives validation and keeps requesting a
     // midpoint until a real pressure signal arrives.
     DrainCooldown(&state);
@@ -192,6 +210,29 @@ int main() {
     }
     assert(decision.renderMidpoint);
     assert(!state.midpointEnabled);
+
+    // Hardware dump 041: the worker publication alternates a safe 1000-1300
+    // sample reserve with short >1344 snapshots. Recovery must not demand
+    // eight consecutive publications or freeze cooldown between publications.
+    state = {}; inputs = HealthyInputs();
+    inputs.audioRecoveryFrames = 1344;
+    state.cooldownTicks = 15;
+    unsigned firstRequest = 0;
+    for (unsigned tick = 1; tick <= 96; ++tick) {
+        inputs.audioBufferedFrames = tick % 4 == 0 ? 1800 : 1150;
+        decision = mk64_3ds::UpdateAdaptivePresentation(&state, inputs);
+        if (decision.renderMidpoint && firstRequest == 0) firstRequest = tick;
+        if (tick == 15) assert(state.cooldownTicks == 0);
+        if (tick > 28) assert(decision.renderMidpoint);
+    }
+    assert(firstRequest >= 23 && firstRequest <= 26);
+    assert(state.midpointEnabled);
+
+    // An established path gets one isolated wait grace as well as a probe.
+    inputs.previousTickSlow = true; inputs.synchronizationPhaseDelay = true;
+    assert(mk64_3ds::UpdateAdaptivePresentation(&state, inputs).renderMidpoint);
+    assert(!mk64_3ds::UpdateAdaptivePresentation(&state, inputs).renderMidpoint);
+    assert(state.cooldownTicks == mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks);
 
     std::puts("adaptive presentation policy: ok");
     return 0;

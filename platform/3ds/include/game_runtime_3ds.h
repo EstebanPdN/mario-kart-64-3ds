@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 bool Mk64Graphics3DSInit(void);
+void* Mk64Graphics3DSGetTopRenderTarget(void);
 void Mk64Graphics3DSShutdown(void);
 bool WindowIsRunning(void);
 
@@ -24,6 +25,7 @@ bool Mk64Graphics3DSResolvedNewModel(void);
 uint32_t Mk64Graphics3DSResolvedOutputWidth(void);
 bool Mk64Graphics3DSUsesIntermediatePresentation(void);
 void Mk64Graphics3DSSuppressNextPresentation(bool suppress);
+void Mk64Graphics3DSResumeAfterDiagnosticPause(void);
 void Mk64Graphics3DSSetExternalLinearBufferRange(const void* address, size_t size);
 void Mk64Graphics3DSMarkExternalLinearBuffersDirty(void);
 

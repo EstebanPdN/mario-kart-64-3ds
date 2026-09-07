@@ -1,4 +1,6 @@
 #include "port/interpolation/FrameInterpolation.h"
+#include "interpolation_diagnostics_3ds.hpp"
+#include <cstdio>
 
 #include <array>
 #include <cmath>
@@ -47,6 +49,7 @@ struct MatrixFrame {
     std::array<MatrixRecord, kMaxRecordedMatrices> records = {};
     size_t count = 0;
     bool overflowed = false;
+    uint32_t overflowReasons = 0;
     bool cameraCut = false;
 };
 
@@ -99,6 +102,7 @@ uint32_t sPreparedFrames = 0;
 uint32_t sRetainedFrames = 0;
 uint32_t sLastMatchedMatrices = 0;
 uint32_t sLastTotalMatrices = 0;
+mk64_3ds::InterpolationDiagnostic sLastDiagnostic;
 
 extern "C" Mat4* gInterpolationMatrix;
 
@@ -124,7 +128,7 @@ ScopeState* CurrentScope() {
 uintptr_t MatrixSignature(MatrixKind kind, uintptr_t callsite, uint32_t* sequenceHash) {
     ScopeState* scope = CurrentScope();
     if (scope == nullptr) {
-        if (sStorage != nullptr) sStorage->frames[sCurrentFrame].overflowed = true;
+        if (sStorage != nullptr) { sStorage->frames[sCurrentFrame].overflowed = true; sStorage->frames[sCurrentFrame].overflowReasons |= 1U; }
         if (sequenceHash != nullptr) *sequenceHash = 0;
         return 0;
     }
@@ -144,10 +148,12 @@ void AppendMatrix(Mtx* destination, const MtxF& value, MatrixKind kind, uintptr_
     uint32_t sequenceHash = 0;
     const uintptr_t signature = MatrixSignature(kind, callsite, &sequenceHash);
     if (destination == nullptr) {
+        frame.overflowReasons |= 2U;
         frame.overflowed = true;
         return;
     }
     if (frame.count >= frame.records.size()) {
+        frame.overflowReasons |= 4U;
         frame.overflowed = true;
         return;
     }
@@ -326,6 +332,71 @@ bool SequenceCountsMatch(uint32_t sequenceHash) {
 
 } // namespace
 
+namespace mk64_3ds {
+const InterpolationDiagnostic& InterpolationLastDiagnostic() { return sLastDiagnostic; }
+
+bool InterpolationWriteDiagnostic(const char* directory) {
+    char path[256];
+    std::snprintf(path, sizeof(path), "%s/interpolation.txt", directory);
+    FILE* file = std::fopen(path, "wb");
+    if (file == nullptr) return false;
+    std::fprintf(file, "Interpolation diagnostics v1\n"
+        "Result: 0 not attempted, 1 ready, 2 disabled, 3 empty recording, 4 recording overflow, "
+        "5 camera cut, 6 signature table full, 7 sequence table full, 8 prepared table full, 9 insufficient matches.\n"
+        "Flags: 1 current overflow, 2 previous overflow, 4 current camera cut.\n"
+        "Overflow reasons: (flags >> 3) & 127 current, (flags >> 11) & 127 previous; "
+        "1 missing scope, 2 null destination, 4 matrix capacity, 8 unbalanced scopes, 16 scope depth, 32 child table, 64 scope underflow.\n"
+        "Last preparation: result=%lu current=%lu previous=%lu matched=%lu total=%lu flags=%lu\n"
+        "Attempts=%lu accepted=%lu rejected=%lu; minimum match percent=%lu\n"
+        "Recorder address=%p size=%lu; enabled=%u recording=%u scope_depth=%lu camera_epoch=%lu\n"
+        "Matrix files describe the pair at capture time, not necessarily the last preparation attempt.\n"
+        "Use the per-tick CSV for the exact historical rejection and this pair to inspect identities.\n",
+        static_cast<unsigned long>(sLastDiagnostic.result),
+        static_cast<unsigned long>(sLastDiagnostic.current), static_cast<unsigned long>(sLastDiagnostic.previous),
+        static_cast<unsigned long>(sLastDiagnostic.matched), static_cast<unsigned long>(sLastDiagnostic.total),
+        static_cast<unsigned long>(sLastDiagnostic.flags),
+        static_cast<unsigned long>(sPrepareAttempts), static_cast<unsigned long>(sPreparedFrames),
+        static_cast<unsigned long>(sRetainedFrames), static_cast<unsigned long>(kMinimumMatchPercent),
+        static_cast<void*>(sStorage.get()), static_cast<unsigned long>(sStorage ? sizeof(RecorderStorage) : 0),
+        sEnabled, sRecording, static_cast<unsigned long>(sScopeDepth), static_cast<unsigned long>(sCameraEpoch));
+    bool ok = std::ferror(file) == 0;
+    if (sStorage != nullptr) {
+        for (unsigned frame : {sPreviousFrame, sCurrentFrame}) {
+            const auto& data = sStorage->frames[frame];
+            std::fprintf(file, "%s: count=%lu overflow=%u camera_cut=%u reasons=%lu\n",
+                frame == sCurrentFrame ? "current" : "previous", static_cast<unsigned long>(data.count),
+                data.overflowed, data.cameraCut, static_cast<unsigned long>(data.overflowReasons));
+        }
+    }
+    ok &= std::ferror(file) == 0;
+    if (std::fclose(file) != 0) ok = false;
+    if (sStorage == nullptr) return ok;
+    for (unsigned frame : {sPreviousFrame, sCurrentFrame}) {
+        std::snprintf(path, sizeof(path), "%s/matrices-%s.csv", directory,
+            frame == sCurrentFrame ? "current" : "previous");
+        file = std::fopen(path, "wb");
+        if (file == nullptr) { ok = false; continue; }
+        std::fputs("index,destination,signature,sequence,kind", file);
+        for (unsigned j = 0; j < 16; ++j) std::fprintf(file, ",m%u", j);
+        std::fputc('\n', file);
+        const auto& data = sStorage->frames[frame];
+        for (size_t i = 0; i < data.count; ++i) {
+            const auto& r = data.records[i];
+            std::fprintf(file, "%lu,%08lX,%08lX,%08lX,%u", static_cast<unsigned long>(i),
+                static_cast<unsigned long>(reinterpret_cast<uintptr_t>(r.destination)),
+                static_cast<unsigned long>(r.signature), static_cast<unsigned long>(r.sequenceHash),
+                static_cast<unsigned>(r.kind));
+            for (unsigned row = 0; row < 4; ++row)
+                for (unsigned col = 0; col < 4; ++col) std::fprintf(file, ",%.9g", r.value.mf[row][col]);
+            std::fputc('\n', file);
+        }
+        ok &= std::ferror(file) == 0;
+        if (std::fclose(file) != 0) ok = false;
+    }
+    return ok;
+}
+}
+
 extern "C" void Mk64FrameInterpolation3DSSetEnabled(bool enabled) {
     sStorage.reset();
     if (enabled) {
@@ -359,10 +430,13 @@ std::unordered_map<Mtx*, MtxF> FrameInterpolation_Interpolate(float step) {
 
 extern "C" bool Mk64FrameInterpolation3DSPrepare(float step) {
     sPreparedActive = false;
+    sLastDiagnostic = {};
+    using mk64_3ds::InterpolationResult;
     ++sPrepareAttempts;
     sLastMatchedMatrices = 0;
     sLastTotalMatrices = 0;
     if (!sEnabled || sStorage == nullptr) {
+        sLastDiagnostic.result = InterpolationResult::Disabled;
         ++sRetainedFrames;
         return false;
     }
@@ -378,8 +452,17 @@ extern "C" bool Mk64FrameInterpolation3DSPrepare(float step) {
     const MatrixFrame& current = sStorage->frames[sCurrentFrame];
     const MatrixFrame& previous = sStorage->frames[sPreviousFrame];
     sLastTotalMatrices = static_cast<uint32_t>(current.count);
+    sLastDiagnostic.current = current.count;
+    sLastDiagnostic.previous = previous.count;
+    sLastDiagnostic.flags = (current.overflowed ? 1U : 0U) |
+        (previous.overflowed ? 2U : 0U) | (current.cameraCut ? 4U : 0U) |
+        (current.overflowReasons << 3U) | (previous.overflowReasons << 11U);
     if (current.count == 0 || previous.count == 0 || current.overflowed ||
         previous.overflowed || current.cameraCut) {
+        sLastDiagnostic.result = (current.count == 0 || previous.count == 0)
+            ? InterpolationResult::EmptyRecording
+            : (current.overflowed || previous.overflowed)
+                ? InterpolationResult::RecordingOverflow : InterpolationResult::CameraCut;
         ++sRetainedFrames;
         return false;
     }
@@ -387,8 +470,10 @@ extern "C" bool Mk64FrameInterpolation3DSPrepare(float step) {
     step = std::fmax(0.0f, std::fmin(1.0f, step));
     sPreparedStep = step;
     for (size_t index = 0; index < previous.count; ++index) {
-        if (!IncrementSequenceCount(previous.records[index].sequenceHash, false) ||
-            !InsertPreviousSignature(previous.records[index], index)) {
+        const bool sequenceOk = IncrementSequenceCount(previous.records[index].sequenceHash, false);
+        if (!sequenceOk || !InsertPreviousSignature(previous.records[index], index)) {
+            sLastDiagnostic.result = sequenceOk ? InterpolationResult::SignatureTableFull
+                                                : InterpolationResult::SequenceTableFull;
             sStorage->preparedKeys.fill(nullptr);
             ++sRetainedFrames;
             return false;
@@ -396,6 +481,7 @@ extern "C" bool Mk64FrameInterpolation3DSPrepare(float step) {
     }
     for (size_t index = 0; index < current.count; ++index) {
         if (!IncrementSequenceCount(current.records[index].sequenceHash, true)) {
+            sLastDiagnostic.result = InterpolationResult::SequenceTableFull;
             sStorage->preparedKeys.fill(nullptr);
             ++sRetainedFrames;
             return false;
@@ -415,6 +501,7 @@ extern "C" bool Mk64FrameInterpolation3DSPrepare(float step) {
         // Mtx replaces the earlier state, and the final validity scan below
         // therefore measures actual replacements rather than transient hits.
         if (!SetPrepared(newRecord.destination, currentIndex, previousIndex)) {
+            sLastDiagnostic.result = InterpolationResult::PreparedTableFull;
             sStorage->preparedKeys.fill(nullptr);
             ++sRetainedFrames;
             return false;
@@ -430,11 +517,15 @@ extern "C" bool Mk64FrameInterpolation3DSPrepare(float step) {
     }
     sLastMatchedMatrices = static_cast<uint32_t>(matched);
     sLastTotalMatrices = static_cast<uint32_t>(total);
+    sLastDiagnostic.matched = matched;
+    sLastDiagnostic.total = total;
     if (matched == 0 || total == 0 || matched * 100U < total * kMinimumMatchPercent) {
+        sLastDiagnostic.result = InterpolationResult::InsufficientMatches;
         sStorage->preparedKeys.fill(nullptr);
         ++sRetainedFrames;
         return false;
     }
+    sLastDiagnostic.result = InterpolationResult::Ready;
     sPreparedActive = true;
     ++sPreparedFrames;
     return true;
@@ -507,6 +598,7 @@ void FrameInterpolation_StartRecord() {
     MatrixFrame& current = sStorage->frames[sCurrentFrame];
     current.count = 0;
     current.overflowed = false;
+    current.overflowReasons = 0;
     current.cameraCut = !sAllowCurrentFrame;
     sAllowCurrentFrame = true;
     sStorage->scopes.fill({});
@@ -518,6 +610,7 @@ void FrameInterpolation_StartRecord() {
 
 void FrameInterpolation_StopRecord() {
     if (sEnabled && sRecording && sScopeDepth != 1U) {
+        sStorage->frames[sCurrentFrame].overflowReasons |= 8U;
         sStorage->frames[sCurrentFrame].overflowed = true;
     }
     sScopeDepth = 0;
@@ -528,6 +621,7 @@ void FrameInterpolation_RecordMarker(const char* file, int line) {
     if (!sEnabled || !sRecording) return;
     ScopeState* scope = CurrentScope();
     if (scope == nullptr) {
+        sStorage->frames[sCurrentFrame].overflowReasons |= 1U;
         sStorage->frames[sCurrentFrame].overflowed = true;
         return;
     }
@@ -543,12 +637,14 @@ void FrameInterpolation_RecordOpenChild(const void* label, uintptr_t tag) {
     if (!sEnabled || !sRecording) return;
     ScopeState* parent = CurrentScope();
     if (parent == nullptr || sScopeDepth >= sStorage->scopes.size()) {
+        sStorage->frames[sCurrentFrame].overflowReasons |= 16U;
         sStorage->frames[sCurrentFrame].overflowed = true;
         ++sScopeDepth;
         return;
     }
     uint32_t occurrence = 0;
     if (!NextChildOccurrence(parent->hash, label, tag, &occurrence)) {
+        sStorage->frames[sCurrentFrame].overflowReasons |= 32U;
         sStorage->frames[sCurrentFrame].overflowed = true;
         ++sScopeDepth;
         return;
@@ -565,6 +661,7 @@ void FrameInterpolation_RecordOpenChild(const void* label, uintptr_t tag) {
 void FrameInterpolation_RecordCloseChild() {
     if (!sEnabled || !sRecording) return;
     if (sScopeDepth <= 1U) {
+        sStorage->frames[sCurrentFrame].overflowReasons |= 64U;
         sStorage->frames[sCurrentFrame].overflowed = true;
         return;
     }

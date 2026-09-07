@@ -35,6 +35,7 @@ struct AdaptivePresentationInputs {
     std::uint32_t audioRecoveryFrames = 0;
     bool keyframeHeadroom = false;
     bool previousTickSlow = false;
+    bool synchronizationPhaseDelay = false;
     bool resourceActivity = false;
     bool textureUploadActivity = false;
     bool citro3DBusy = false;
@@ -45,6 +46,7 @@ struct AdaptivePresentationState {
     std::uint8_t healthyRecoveryTicks = 0;
     std::uint8_t midpointProbeTicks = 0;
     std::uint8_t cooldownTicks = 0;
+    bool synchronizationGraceUsed = false;
 };
 
 struct AdaptivePresentationDecision {
@@ -71,9 +73,16 @@ inline AdaptivePresentationDecision UpdateAdaptivePresentation(
     if (inputs.audioBufferedFrames <= inputs.audioLowWaterFrames) {
         decision.pressureMask |= AdaptivePressureAudioLow;
     }
-    if (inputs.previousTickSlow) {
+    // A single delayed display refresh is not sustained workload pressure.
+    // Only tolerate it on an active/probing path with measured wait evidence;
+    // consecutive slow ticks and every hard pressure signal still back out.
+    const bool phaseGrace = inputs.previousTickSlow && inputs.synchronizationPhaseDelay &&
+        (state->midpointEnabled || state->midpointProbeTicks != 0) &&
+        !state->synchronizationGraceUsed;
+    if (inputs.previousTickSlow && !phaseGrace) {
         decision.pressureMask |= AdaptivePressureSlowTick;
     }
+    state->synchronizationGraceUsed = inputs.previousTickSlow;
     if (inputs.resourceActivity) {
         decision.pressureMask |= AdaptivePressureResourceActivity;
     }
@@ -84,20 +93,18 @@ inline AdaptivePresentationDecision UpdateAdaptivePresentation(
         decision.pressureMask |= AdaptivePressureCitro3DBusy;
     }
 
-    const bool lacksRecoveryMargin = inputs.audioBufferedFrames < inputs.audioRecoveryFrames;
-    if (decision.pressureMask != AdaptivePressureNone || lacksRecoveryMargin) {
+    // Low water is a hard stop in every phase. A worker may publish the next
+    // block just after this snapshot, so the higher entry margin must not
+    // reset healthy history or freeze the cooldown on every queue sawtooth.
+    if (decision.pressureMask != AdaptivePressureNone) {
         const bool failedMidpoint = state->midpointEnabled || state->midpointProbeTicks != 0;
         state->midpointEnabled = false;
         state->healthyRecoveryTicks = 0;
         state->midpointProbeTicks = 0;
         if (failedMidpoint) {
             state->cooldownTicks = kAdaptivePresentationFailedProbeCooldownTicks;
-        } else if (decision.pressureMask != AdaptivePressureNone &&
-                   state->cooldownTicks < kAdaptivePresentationPressureCooldownTicks) {
+        } else if (state->cooldownTicks < kAdaptivePresentationPressureCooldownTicks) {
             state->cooldownTicks = kAdaptivePresentationPressureCooldownTicks;
-        }
-        if (lacksRecoveryMargin && decision.pressureMask == AdaptivePressureNone) {
-            decision.pressureMask = AdaptivePressureRecovery;
         }
         return decision;
     }
@@ -139,7 +146,8 @@ inline AdaptivePresentationDecision UpdateAdaptivePresentation(
     if (state->healthyRecoveryTicks < kAdaptivePresentationHealthyTicksToEnable) {
         ++state->healthyRecoveryTicks;
     }
-    if (state->healthyRecoveryTicks >= kAdaptivePresentationHealthyTicksToEnable) {
+    if (state->healthyRecoveryTicks >= kAdaptivePresentationHealthyTicksToEnable &&
+        inputs.audioBufferedFrames >= inputs.audioRecoveryFrames) {
         state->midpointProbeTicks = 1;
         decision.renderMidpoint = true;
     } else {

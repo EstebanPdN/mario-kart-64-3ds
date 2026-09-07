@@ -25,6 +25,8 @@
 #else
 #define MK64_OPTIONAL_SYMBOL __attribute__((weak))
 #endif
+extern "C" uint64_t Mk64Perf3DSResourceStart(void) MK64_OPTIONAL_SYMBOL;
+extern "C" void Mk64Perf3DSResourceRead(uint64_t, size_t) MK64_OPTIONAL_SYMBOL;
 extern "C" void* linearAlloc(size_t size);
 extern "C" void linearFree(void* mem);
 extern "C" void Mk64Diagnostics3DSSetResource(const char*, size_t) MK64_OPTIONAL_SYMBOL;
@@ -838,8 +840,10 @@ LoadedResource* LoadResolvedPath(size_t archiveIndex, CrcEntry* crcEntry) {
     }
 
     SerializedReadLease readLease(archiveIndex, path);
-    if (sArchive->ReadEntryByIndex(archiveIndex, readLease.Bytes()) !=
-        mk64_3ds::O2rReadResult::Ok) {
+    const uint64_t readStart = Mk64Perf3DSResourceStart != nullptr ? Mk64Perf3DSResourceStart() : 0;
+    const auto readResult = sArchive->ReadEntryByIndex(archiveIndex, readLease.Bytes());
+    if (Mk64Perf3DSResourceRead != nullptr) Mk64Perf3DSResourceRead(readStart, readLease.Bytes()->size());
+    if (readResult != mk64_3ds::O2rReadResult::Ok) {
         return nullptr;
     }
 
@@ -969,6 +973,35 @@ bool FillTextureResult(LoadedResource* resource, Mk64TextureResource3DS* outText
 }
 
 } // namespace
+
+extern "C" bool Mk64Resource3DSPrefetchKart(const char* name, size_t* cachedBytes) {
+    if (sArchive == nullptr || name == nullptr) return false;
+    const auto path = NormalizePath(name);
+    if (!IsStreamingTexturePath(path)) return false;
+    CrcEntry* entry = FindCrcEntry(path);
+    bool ok = false;
+    // Two MiB is bounded independently of kart texture/GPU ownership. Other
+    // angles still use normal validated ZIP reads when first encountered.
+    if (entry != nullptr) ok = sArchive->CacheEntryByIndex(CrcEntryArchiveIndex(entry), 2u * 1024u * 1024u);
+    if (cachedBytes != nullptr) *cachedBytes = sArchive->CachedBytes();
+    return ok;
+}
+
+extern "C" bool Mk64Resource3DSMakeResident(size_t budget, void (*progress)(unsigned)) {
+    return sArchive != nullptr && sArchive->MakeResident(budget, progress);
+}
+extern "C" bool Mk64Resource3DSIsResident(void) {
+    return sArchive != nullptr && sArchive->IsResident();
+}
+extern "C" uint64_t Mk64Resource3DSArchiveBytes(void) {
+    return sArchive == nullptr ? 0 : sArchive->ArchiveBytes();
+}
+extern "C" uint64_t Mk64Resource3DSPhysicalReadCalls(void) {
+    return sArchive == nullptr ? 0 : sArchive->PhysicalReadCalls();
+}
+extern "C" uint64_t Mk64Resource3DSPhysicalReadBytes(void) {
+    return sArchive == nullptr ? 0 : sArchive->PhysicalReadBytes();
+}
 
 extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
     try {

@@ -1,5 +1,13 @@
 #pragma once
 
+// Called on the main thread before entering the game loop. Subsequent log
+// writes stay in bounded RAM until an explicit dump or orderly shutdown.
+#ifdef __cplusplus
+extern "C" void Mk64Diagnostics3DSBufferRuntimeLog(void);
+#else
+void Mk64Diagnostics3DSBufferRuntimeLog(void);
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -30,6 +38,7 @@ bool Mk64Diagnostics3DSIsPaused(void);
 bool Mk64Diagnostics3DSServiceDumpIfRequested(void);
 bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input);
 bool Mk64Diagnostics3DSConsumeInput(Mk64DiagnosticsInput3DS* input);
+bool Mk64Diagnostics3DSRequestCleanDumps(void);
 bool Mk64Diagnostics3DSRequestDump(void);
 bool Mk64Diagnostics3DSIsNewModel(void);
 bool Mk64Diagnostics3DSSupportsWideMode(void);

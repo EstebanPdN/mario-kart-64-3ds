@@ -74,6 +74,7 @@ if(MK64_3DS_BUILD_GAME_CORE)
     )
     list(FILTER SPAGHETTIKART_GAME_RECURSIVE EXCLUDE REGEX ".*\\.inc\\.c$")
     list(FILTER SPAGHETTIKART_GAME_RECURSIVE EXCLUDE REGEX ".*/crash_screen_enhancement\\.c$")
+    list(REMOVE_ITEM SPAGHETTIKART_GAME_RECURSIVE "${SPAGHETTIKART_ROOT}/src/audio/effects.c")
 
     # The desktop port reserves 256 MiB in racing/memory.c. Generate a 3DS-only
     # translation unit with a runtime-allocated 8 MiB arena while leaving
@@ -391,9 +392,8 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         file(WRITE "${SPAGHETTIKART_3DS_COLLISION_SOURCE}" "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
     endif()
 
-    # Keep the generated seam used by E1 diagnostics, but do not preload kart
-    # animation frames. Fast3D's bounded GPU cache now owns their exact lifetime;
-    # eager raw-resource loads bypass that ownership and create the start hitch.
+    # Preload bounded compressed ZIP ranges for the initial kart angle group.
+    # Decoded resources and GPU textures retain their existing bounded lifetime.
     file(READ "${SPAGHETTIKART_SPAWN_PLAYERS_SOURCE}" SPAGHETTIKART_SPAWN_PLAYERS_TEXT)
     set(SPAGHETTIKART_3DS_SPAWN_PLAYERS_ORIGINAL
         "${SPAGHETTIKART_SPAWN_PLAYERS_TEXT}")
@@ -402,6 +402,8 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
         [=[#include "port/Game.h"
 #if defined(PLATFORM_3DS)
 #include "libultraship/bridge/resourcebridge.h"
+#include "resource_runtime_3ds.h"
+extern void Mk64BottomUI3DSShowLoadingProgress(const char*, const char*, unsigned) __attribute__((weak));
 extern void Mk64Diagnostics3DSKartPrefetch(size_t, size_t, size_t, size_t, size_t)
     __attribute__((weak));
 #endif]=]
@@ -420,7 +422,7 @@ extern void Mk64Diagnostics3DSKartPrefetch(size_t, size_t, size_t, size_t, size_
 
 #if defined(PLATFORM_3DS)
 #define MK64_3DS_INITIAL_KART_PREFETCH_LIMIT 192
-#define MK64_3DS_INITIAL_KART_PREFETCH_FRAMES 0
+#define MK64_3DS_INITIAL_KART_PREFETCH_FRAMES 35
 #define MK64_3DS_INITIAL_KART_GROUP_COUNT 9
 #define MK64_3DS_INITIAL_KART_WHEEL_COUNT 4
 extern u8**** gKartTextureTable0[];
@@ -452,7 +454,16 @@ static void mk64_3ds_reset_initial_kart_prefetch(void) {
 }
 
 static void mk64_3ds_prefetch_initial_kart(const char* path) {
-    (void)path;
+    ++sInitialKartPrefetchAttempted3DS;
+    size_t bytes = sInitialKartPrefetchBytes3DS;
+    if (Mk64Resource3DSPrefetchKart(path, &bytes)) {
+        if (bytes == sInitialKartPrefetchBytes3DS) ++sInitialKartPrefetchDuplicates3DS;
+        else ++sInitialKartPrefetchLoaded3DS;
+    } else {
+        ++sInitialKartPrefetchUnavailable3DS;
+    }
+    sInitialKartPrefetchBytes3DS = bytes;
+    mk64_3ds_report_initial_kart_prefetch();
 }
 #endif]=]
         SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT
@@ -471,6 +482,7 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         [=[        }
 
 #if defined(PLATFORM_3DS)
+        if (!Mk64Resource3DSIsResident()) {
         const char* initialKartTexture = ((screenId == 0) || (screenId == 1))
             ? (const char*)gEncodedKartTexture[0][screenId][playerId].unk_00
             : (const char*)gEncodedKartTexture[0][screenId - 2][playerId + 4].unk_00;
@@ -482,13 +494,14 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
             initialKartFrame >= 0 && initialKartFrame < 35) {
             for (s32 frameOffset = 0;
                  frameOffset < MK64_3DS_INITIAL_KART_PREFETCH_FRAMES; ++frameOffset) {
-                const s32 frame = initialKartFrame + frameOffset;
+                const s32 frame = frameOffset;
                 if (frame >= 35) break;
                 for (s32 wheel = 0; wheel < MK64_3DS_INITIAL_KART_WHEEL_COUNT; ++wheel) {
                     mk64_3ds_prefetch_initial_kart((const char*)
                         gKartTextureTable0[player->characterId][initialKartGroup][frame][wheel]);
                 }
             }
+        }
         }
 #endif
         gLastAnimFrameSelector[screenId][playerId] = player->animFrameSelector[screenId];]=]
@@ -557,7 +570,15 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
     endif()
     if(NOT SPAGHETTIKART_3DS_SPAWN_PLAYERS_EXISTING STREQUAL
        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT)
-        file(WRITE "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
+        string(REPLACE
+        "    static const size_t playerCounts[4] = { 8, 8, 4, 4 };"
+        "    if (Mk64BottomUI3DSShowLoadingProgress != NULL) Mk64BottomUI3DSShowLoadingProgress(\"LOADING RACE\", \"KART TEXTURES\", 0);\n    static const size_t playerCounts[4] = { 8, 8, 4, 4 };"
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
+    string(REPLACE
+        "            func_8003CD98(&gPlayers[ply], gScreenContexts[i].camera, ply, i);"
+        "            func_8003CD98(&gPlayers[ply], gScreenContexts[i].camera, ply, i);\n            if (Mk64BottomUI3DSShowLoadingProgress != NULL) Mk64BottomUI3DSShowLoadingProgress(\"LOADING RACE\", \"KART TEXTURES\", (unsigned)(100 * (i * playerCounts[gPlayerCountSelection1 - 1] + ply + 1) / (screens * playerCounts[gPlayerCountSelection1 - 1])));"
+        SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
+    file(WRITE "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
              "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_TEXT}")
     endif()
 
@@ -764,6 +785,32 @@ s16 add_actor_to_empty_slot(Vec3f pos, Vec3s rot, Vec3f velocity, s16 actorType)
        SPAGHETTIKART_3DS_ACTORS_SECOND_FALLBACK_TEXT)
         message(FATAL_ERROR "The upstream actor allocation path changed")
     endif()
+    # Culling a fake item box used to leave its interpolation child open.
+    # Open only once the visibility exits have passed, preserving strict recorder checks.
+    file(READ "${SPAGHETTIKART_ROOT}/src/actors/fake_item_box/render.inc.c" FAKE_BOX_ORIGINAL)
+    string(REPLACE
+        "    FrameInterpolation_RecordOpenChild(\"fake_item_box\", uniqueIdentifier);\n"
+        "" FAKE_BOX_FIXED "${FAKE_BOX_ORIGINAL}")
+    string(REPLACE
+        "    actor_rendered(camera, (struct Actor*) fakeItemBox);"
+        "    FrameInterpolation_RecordOpenChild(\"fake_item_box\", uniqueIdentifier);\n    actor_rendered(camera, (struct Actor*) fakeItemBox);"
+        FAKE_BOX_FIXED "${FAKE_BOX_FIXED}")
+    if(FAKE_BOX_FIXED STREQUAL FAKE_BOX_ORIGINAL)
+        message(FATAL_ERROR "The upstream fake item box visibility boundary changed")
+    endif()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/fake_item_box_render_3ds.inc.c" "${FAKE_BOX_FIXED}")
+    string(REPLACE "actors/fake_item_box/render.inc.c" "fake_item_box_render_3ds.inc.c"
+        SPAGHETTIKART_3DS_ACTORS_TEXT "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    string(REPLACE
+        "    FrameInterpolation_RecordOpenChild(\"shell\", TAG_ITEM_ADDR(((actorIdx << 4) | (camera - cameras))));\n"
+        "" SPAGHETTIKART_3DS_ACTORS_TEXT "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    string(REPLACE
+        "    actor_rendered(camera, (struct Actor*) shell);"
+        "    FrameInterpolation_RecordOpenChild(\"shell\", TAG_ITEM_ADDR(((actorIdx << 4) | (camera - cameras))));\n    actor_rendered(camera, (struct Actor*) shell);"
+        SPAGHETTIKART_3DS_ACTORS_TEXT "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    string(REPLACE "    if (maxObjectsReached) {\n        return;"
+        "    if (maxObjectsReached) {\n        FrameInterpolation_RecordCloseChild();\n        return;"
+        SPAGHETTIKART_3DS_ACTORS_TEXT "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
     file(WRITE "${SPAGHETTIKART_3DS_ACTORS_SOURCE}"
          "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
 
@@ -1020,6 +1067,14 @@ void render_pause_menu(MenuItem* arg0) {
         message(FATAL_ERROR "The upstream pause cursor render point changed")
     endif()
     set(SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING "")
+    string(REPLACE "void render_menus(MenuItem* arg0) {"
+        "void render_menus(MenuItem* arg0) {\n    if ((gMenuSelection == DATA_MENU || gMenuSelection == COURSE_DATA_MENU) && arg0->type != MAIN_MENU_BACKGROUND) return;"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        "            case COURSE_DATA_MENU:\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
+        "            case COURSE_DATA_MENU:\n                add_menu_item(MAIN_MENU_BACKGROUND, 0, 0, MENU_ITEM_PRIORITY_2);\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    include(platform/3ds/results_layout.cmake)
     if(EXISTS "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}" SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING)
     endif()
@@ -1136,6 +1191,9 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
     if(SPAGHETTIKART_3DS_MAIN_TEXT STREQUAL SPAGHETTIKART_3DS_MAIN_READBACK_TEXT)
         message(FATAL_ERROR "The upstream per-frame framebuffer creation call changed")
     endif()
+    string(REPLACE "void update_gamestate(void) {"
+        "extern void Mk64BottomUI3DSShowLoadingProgress(const char*, const char*, unsigned) __attribute__((weak));\nvoid update_gamestate(void) {\n    if (Mk64BottomUI3DSShowLoadingProgress != NULL) Mk64BottomUI3DSShowLoadingProgress(\"LOADING GAME\", \"PLEASE WAIT\", 0);"
+        SPAGHETTIKART_3DS_MAIN_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
     set(SPAGHETTIKART_3DS_MAIN_EXISTING "")
     if(EXISTS "${SPAGHETTIKART_3DS_MAIN_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_MAIN_SOURCE}" SPAGHETTIKART_3DS_MAIN_EXISTING)
@@ -1228,6 +1286,7 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
         ${SPAGHETTIKART_GAME_RECURSIVE}
         ${SPAGHETTIKART_GAME_OS_MATH}
         platform/3ds/source/resource_prefetch_3ds.c
+        platform/3ds/source/audio_effects_3ds.c
         "${SPAGHETTIKART_3DS_MEMORY_SOURCE}"
         "${SPAGHETTIKART_3DS_COLLISION_SOURCE}"
         "${SPAGHETTIKART_3DS_SPAWN_PLAYERS_SOURCE}"
@@ -2358,6 +2417,17 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL
            SPAGHETTIKART_3DS_CULL_INCLUDE_ORIGINAL)
             message(FATAL_ERROR "The upstream Fast3D culling include point changed")
+        endif()
+        string(REPLACE "#include \"fast3d_culling_3ds.hpp\""
+            "#include \"fast3d_culling_3ds.hpp\"\n#include \"render_policy_3ds.hpp\"\nextern \"C\" { extern float gMk64DistanceFar3DS; extern uint32_t gMk64DistanceCulled3DS; }"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        set(MK64_DISTANCE_PATCH_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        string(REPLACE
+            "    struct LoadedVertex* v_arr[3] = { v1, v2, v3 };"
+            "    struct LoadedVertex* v_arr[3] = { v1, v2, v3 };\n    if (::mk64_3ds::CullDistantTriangle(v1->w, v2->w, v3->w, gMk64DistanceFar3DS, is_rect, (mRsp->geometry_mode & G_ZBUFFER) != 0)) {\n        ++gMk64DistanceCulled3DS;\n        return;\n    }"
+            SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL MK64_DISTANCE_PATCH_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D distance-culling insertion point changed")
         endif()
         set(SPAGHETTIKART_3DS_CULL_HANDLER_ORIGINAL
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
@@ -3753,6 +3823,7 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
             message(FATAL_ERROR "The upstream Fast3D interpreter watchdog insertion points changed")
         endif()
         file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+        include(platform/3ds/triangle_math.cmake)
         file(WRITE "${SPAGHETTIKART_3DS_INTERPRETER_SOURCE}" "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
 
         add_library(mk64-3ds-fast3d-interpreter STATIC
@@ -3851,6 +3922,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
    MK64_3DS_BUILD_INTERPRETER_PROBE)
     add_library(mk64-3ds-game-runtime STATIC
         platform/3ds/source/game_runtime_3ds.cpp
+        platform/3ds/source/performance_trace_3ds.cpp
     )
     target_include_directories(mk64-3ds-game-runtime PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/include"

@@ -30,6 +30,13 @@ class O2rArchiveReader final {
     O2rReadResult Open();
     void Close();
     bool IsOpen() const;
+    bool MakeResident(std::size_t budget, void (*progress)(unsigned) = nullptr);
+    bool IsResident() const;
+    std::uint64_t ArchiveBytes() const;
+    std::uint64_t PhysicalReadCalls() const;
+    std::uint64_t PhysicalReadBytes() const;
+    bool CacheEntryByIndex(std::size_t entryIndex, std::size_t budget);
+    std::size_t CachedBytes() const;
     const std::vector<std::string>& Entries() const;
     O2rReadResult ReadEntry(std::string_view entryPath, std::vector<std::uint8_t>* bytes);
     O2rReadResult ReadEntryByIndex(std::size_t entryIndex, std::vector<std::uint8_t>* bytes);

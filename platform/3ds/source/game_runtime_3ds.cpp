@@ -7,6 +7,9 @@
 #include "gfx_citro3d.h"
 #include "gfx_window_manager_3ds.h"
 #include "settings_3ds.h"
+#include "resource_runtime_3ds.h"
+#include "performance_trace_3ds.hpp"
+#include "interpolation_diagnostics_3ds.hpp"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -25,6 +28,7 @@ void GfxSetInstance(std::shared_ptr<Interpreter> interpreter);
 }
 
 extern "C" size_t Mk64Resource3DSLoadedCount(void);
+extern "C" uint32_t gMk64DistanceCulled3DS;
 extern "C" void Mk64GameAudio3DSBeginFrame(void) __attribute__((weak));
 extern "C" Gfx* gDisplayListHead;
 extern "C" void Mk64FrameInterpolation3DSSetEnabled(bool enabled);
@@ -53,6 +57,7 @@ bool sSuppressNextPresentation = false;
 mk64_3ds::AdaptivePresentationState sAdaptivePresentation;
 uint64_t sLastPresentationStart = 0;
 uint64_t sPreviousPresentationDuration = 0;
+uint32_t sPreviousSynchronizationUs = 0;
 size_t sLastObservedResourceCount = 0;
 uint64_t sLastObservedTextureUploadCount = 0;
 uint64_t sLastObservedTextureUploadBytes = 0;
@@ -145,6 +150,7 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
                                    presentationStart - sLastPresentationStart > kSlowTickMilliseconds;
     const bool previousTickSlow = slowStartInterval ||
                                   sPreviousPresentationDuration > kSlowTickMilliseconds;
+    const uint64_t startInterval = sLastPresentationStart == 0 ? 0 : presentationStart - sLastPresentationStart;
     sLastPresentationStart = presentationStart;
 
     const float processingMilliseconds = C3D_GetProcessingTime();
@@ -161,7 +167,7 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
     // Large resource and texture bursts remain gated here. Ordinary animated
     // texture churn is judged by measured frame and Citro3D timings instead of
     // permanently disabling the midpoint path.
-    const bool resourceBurst = resourceDelta >= 16U;
+    const bool resourceBurst = resourceDelta >= 16U && !Mk64Resource3DSIsResident();
 
     mk64_3ds::AdaptivePresentationInputs inputs = {};
     inputs.hasPriorTopFrame = sHasPresentedTopFrame;
@@ -177,10 +183,30 @@ bool ShouldRenderIntermediatePresentation(uint64_t presentationStart) {
                               sPreviousPresentationDuration <= kSlowTickMilliseconds &&
                               !citro3DBusy;
     inputs.previousTickSlow = previousTickSlow;
+    // An isolated delayed refresh can happen after startup too. Distinguish
+    // measured synchronization from active work; the policy grants at most
+    // one such slow tick, with CPU/GPU/audio pressure still taking precedence.
+    const uint64_t intervalUs = startInterval * 1000ULL;
+    inputs.synchronizationPhaseDelay = startInterval > 0 && startInterval <= 50 &&
+        sPreviousPresentationDuration <= 50 && sPreviousSynchronizationUs >= 10000 &&
+        intervalUs <= static_cast<uint64_t>(sPreviousSynchronizationUs) + 30000;
     inputs.resourceActivity = resourceBurst;
     inputs.textureUploadActivity = textureUploadBurst;
     inputs.citro3DBusy = citro3DBusy;
-    return mk64_3ds::UpdateAdaptivePresentation(&sAdaptivePresentation, inputs).renderMidpoint;
+    const auto decision = mk64_3ds::UpdateAdaptivePresentation(&sAdaptivePresentation, inputs);
+    auto& perf = mk64_3ds::PerformanceCurrent();
+    perf.audio_decision = inputs.audioBufferedFrames;
+    perf.decision_cpu_us = PositiveHundredths(processingMilliseconds) * 10;
+    perf.decision_gpu_us = PositiveHundredths(drawingMilliseconds) * 10;
+    perf.pressure = decision.pressureMask;
+    perf.healthy = sAdaptivePresentation.healthyRecoveryTicks;
+    perf.probe = sAdaptivePresentation.midpointProbeTicks;
+    perf.cooldown = sAdaptivePresentation.cooldownTicks;
+    perf.enabled = sAdaptivePresentation.midpointEnabled;
+    perf.requested_mid = decision.renderMidpoint;
+    perf.sync_grace = previousTickSlow && inputs.synchronizationPhaseDelay &&
+                      !(decision.pressureMask & mk64_3ds::AdaptivePressureSlowTick);
+    return decision.renderMidpoint;
 }
 
 void LogPerformanceSample() {
@@ -218,6 +244,7 @@ void LogPerformanceSample() {
 }
 
 void SetRendererFault(const char* stage, const char* reason, bool frameStateRecovered) {
+    mk64_3ds::PerformanceCurrent().fault = 1;
     ++sRendererFaultCounter;
     sRendererHealthyFrameCounter = 0;
     sRendererFaulted = !frameStateRecovered;
@@ -271,6 +298,7 @@ extern "C" bool Mk64Graphics3DSInit() {
     sAdaptivePresentation = {};
     sLastPresentationStart = 0;
     sPreviousPresentationDuration = 0;
+    sPreviousSynchronizationUs = 0;
     sLastObservedResourceCount = Mk64Resource3DSLoadedCount();
     sLastObservedTextureUploadCount = 0;
     sLastObservedTextureUploadBytes = 0;
@@ -344,6 +372,10 @@ extern "C" bool Mk64Graphics3DSInit() {
     return true;
 }
 
+extern "C" void* Mk64Graphics3DSGetTopRenderTarget() {
+    return sRenderer != nullptr ? sRenderer->GetTopRenderTarget() : nullptr;
+}
+
 extern "C" void Mk64Graphics3DSShutdown() {
     if (sInterpreter != nullptr) {
         sInterpreter->Destroy();
@@ -365,6 +397,7 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sAdaptivePresentation = {};
     sLastPresentationStart = 0;
     sPreviousPresentationDuration = 0;
+    sPreviousSynchronizationUs = 0;
     sLastObservedResourceCount = 0;
     sLastObservedTextureUploadCount = 0;
     sLastObservedTextureUploadBytes = 0;
@@ -381,6 +414,8 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     if (commands == nullptr || sInterpreter == nullptr || sWindow == nullptr) {
         return;
     }
+    auto& perf = mk64_3ds::PerformanceCurrent();
+    mk64_3ds::PerformanceTimer graphicsTimer(perf.graphics_us);
     // The audio runtime may dispatch synthesis to a worker here. Keep the
     // weak hook before event/frame-readiness early returns so every valid game
     // frame offers exactly one opportunity to overlap synthesis with graphics.
@@ -397,12 +432,23 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     sInterpreter->HandleWindowEvents();
     const bool suppressPresentation = sSuppressNextPresentation;
     sSuppressNextPresentation = false;
-    if (suppressPresentation) {
+    // When optional midpoints are active, recover a half-tick of lateness by
+    // presenting only the mandatory keyframe. Skipping both images created a
+    // 50 ms gap that the adaptive gate then mistook for a second overload.
+    const bool establishedMidpoint = sAdaptivePresentation.midpointEnabled;
+    const bool catchupKeyframe = suppressPresentation && sUseIntermediatePresentation &&
+                                establishedMidpoint;
+    perf.catchup_key = catchupKeyframe;
+    if (suppressPresentation && !catchupKeyframe) {
+        perf.suppressed = 1;
+        // An intentional omitted presentation is not a slow rendered frame.
+        sLastPresentationStart = 0;
         Mk64FrameInterpolation3DSClearPrepared();
         Mk64Diagnostics3DSSetStage("renderer-presentation-suppressed");
         return;
     }
     if (sRendererFaulted) {
+        perf.fault = 1;
         // Keep gameplay/input alive if a frame decoding exception occurs.
         // Events must still be pumped so APT suspend/exit can complete and the
         // user can capture a SELECT dump instead of trapping the title forever.
@@ -416,9 +462,23 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     // bounded matrix-interpolated midpoint followed by the key frame; Old 3DS
     // and the 800 px quality mode present only the key frame.
     ++sFrameCounter;
+    struct CounterSample {
+        Fast::GfxRenderingAPICitro3D* renderer;
+        uint64_t draws, triangles, uploads, bytes;
+        ~CounterSample() {
+            auto& p = mk64_3ds::PerformanceCurrent();
+            p.draws = renderer->GetDrawCallCount() - draws;
+            p.triangles = renderer->GetTriangleCount() - triangles;
+            p.uploads = renderer->GetTextureCacheUploadCount() - uploads;
+            p.upload_bytes = renderer->GetTextureCacheUploadBytes() - bytes;
+        }
+    } sample{sRenderer.get(), sRenderer->GetDrawCallCount(), sRenderer->GetTriangleCount(),
+             sRenderer->GetTextureCacheUploadCount(), sRenderer->GetTextureCacheUploadBytes()};
     const uint64_t presentationStart = osGetTime();
-    const bool renderIntermediate = sUseIntermediatePresentation &&
-                                    ShouldRenderIntermediatePresentation(presentationStart);
+    const bool midpointRequested = sUseIntermediatePresentation &&
+                                   ShouldRenderIntermediatePresentation(presentationStart);
+    const bool renderIntermediate = midpointRequested && !catchupKeyframe;
+    perf.requested_mid = renderIntermediate;
     SetRendererStage("renderer-prepare");
     bool didPresentIntermediate = false;
     try {
@@ -428,25 +488,42 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
             // pressure, skip the entire extra presentation instead of paying
             // for a retained-image Citro3D frame and an additional VBlank.
             // The mandatory key frame below then gets the full 30 Hz budget.
-            const bool interpolated = Mk64FrameInterpolation3DSPrepare(0.5f);
+            bool interpolated;
+            { mk64_3ds::PerformanceTimer timer(perf.interpolation_us);
+              interpolated = Mk64FrameInterpolation3DSPrepare(0.5f); }
+            const auto& interpolation = mk64_3ds::InterpolationLastDiagnostic();
+            perf.interp_result = static_cast<uint32_t>(interpolation.result);
+            perf.interp_current = interpolation.current;
+            perf.interp_previous = interpolation.previous;
+            perf.interp_matched = interpolation.matched;
+            perf.interp_total = interpolation.total;
+            perf.interp_flags = interpolation.flags;
             if (interpolated) {
                 Mk64Diagnostics3DSSetFrame(sFrameCounter, 1);
                 sInterpreter->mInterpolationIndex = 0;
                 sInterpreter->mInterpolationIndexTarget = 0;
                 sInterpreter->mInterpolationT = 0.5f;
                 sInterpreter->StartFrame();
+                perf.previous_gpu_us = PositiveHundredths(C3D_GetDrawingTime()) * 10;
                 SetRendererStage("renderer-run-intermediate");
-                sInterpreter->Run(commands, sNoMatrixReplacements);
+                { mk64_3ds::PerformanceTimer timer(perf.interpreter_us); sInterpreter->Run(commands, sNoMatrixReplacements); }
+                perf.begin_wait_us += sRenderer->GetFrameBeginWaitMicroseconds();
                 // Count every image actually sent to the display. The lower
                 // HUD remains key-frame-only, but the optional top FPS glyph
                 // must be redrawn here or it flickers at 30 Hz and reports
                 // simulation ticks instead of presentation rate.
                 Mk64BottomUI3DSRecordPresentation();
-                if (Mk64Settings3DSGetShowFpsEnabled()) {
+                if (Mk64Settings3DSGetShowFpsEnabled() ||
+                    (Mk64Settings3DSGetHudLayout() >= MK64_HUD_LAYOUT_3DS_MK7 &&
+                     Mk64Settings3DSGetHudLayout() <= MK64_HUD_LAYOUT_3DS_MKDS_2)) {
+                    mk64_3ds::PerformanceTimer timer(perf.hud_us);
                     Mk64BottomUI3DSDrawTopFps(sRenderer->PrepareForExternalDraw());
                 }
                 SetRendererStage("renderer-end-intermediate");
-                sInterpreter->EndFrame();
+                { mk64_3ds::PerformanceTimer timer(perf.submit_us); sInterpreter->EndFrame(); }
+                ++perf.presents;
+                perf.mid_cpu_us = PositiveHundredths(C3D_GetProcessingTime()) * 10;
+                perf.culled += gMk64DistanceCulled3DS;
                 didPresentIntermediate = true;
                 sHasPresentedTopFrame = true;
             }
@@ -458,11 +535,16 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         sInterpreter->mInterpolationIndexTarget = 1;
         sInterpreter->mInterpolationT = 1.0f;
         sInterpreter->StartFrame();
+        perf.previous_gpu_us = PositiveHundredths(C3D_GetDrawingTime()) * 10;
         SetRendererStage("renderer-run-display-list");
-        sInterpreter->Run(commands, sNoMatrixReplacements);
-        Mk64BottomUI3DSDraw(sRenderer->PrepareForExternalDraw());
+        { mk64_3ds::PerformanceTimer timer(perf.interpreter_us); sInterpreter->Run(commands, sNoMatrixReplacements); }
+        perf.begin_wait_us += sRenderer->GetFrameBeginWaitMicroseconds();
+        { mk64_3ds::PerformanceTimer timer(perf.hud_us); Mk64BottomUI3DSDraw(sRenderer->PrepareForExternalDraw()); }
         SetRendererStage("renderer-end-frame");
-        sInterpreter->EndFrame();
+        { mk64_3ds::PerformanceTimer timer(perf.submit_us); sInterpreter->EndFrame(); }
+        ++perf.presents;
+        perf.key_cpu_us = PositiveHundredths(C3D_GetProcessingTime()) * 10;
+        perf.culled += gMk64DistanceCulled3DS;
         sHasPresentedTopFrame = true;
     } catch (const std::length_error& exception) {
         // The backend has already doubled E5's packed-vertex budget. If an
@@ -527,11 +609,19 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         return;
     }
     if (renderIntermediate && !didPresentIntermediate) {
-        // Do not count unavailable interpolation state as a successful probe.
-        // Wait for a fresh sustained-headroom window before trying it again.
-        sAdaptivePresentation = {};
-        sAdaptivePresentation.cooldownTicks =
-            mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks;
+        const auto result = mk64_3ds::InterpolationLastDiagnostic().result;
+        const bool transientPair = result == mk64_3ds::InterpolationResult::InsufficientMatches ||
+                                   result == mk64_3ds::InterpolationResult::CameraCut ||
+                                   result == mk64_3ds::InterpolationResult::EmptyRecording;
+        // A disocclusion/camera change invalidates this pair, not the measured
+        // rendering capacity. Keep an established path and test the fresh pair
+        // next tick. Structural recorder failures still receive full cooldown.
+        if (!transientPair || !establishedMidpoint) {
+            sAdaptivePresentation = {};
+            sAdaptivePresentation.cooldownTicks = transientPair
+                ? mk64_3ds::kAdaptivePresentationPressureCooldownTicks
+                : mk64_3ds::kAdaptivePresentationFailedProbeCooldownTicks;
+        }
     }
     if (sRendererFaultCounter != 0 &&
         ++sRendererHealthyFrameCounter >= kRendererFaultRecoveryResetFrames) {
@@ -539,6 +629,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         sRendererHealthyFrameCounter = 0;
     }
     LogPerformanceSample();
+    sPreviousSynchronizationUs = perf.begin_wait_us;
     sPreviousPresentationDuration = osGetTime() - presentationStart;
     SetRendererStage("renderer-frame-presented");
 }
@@ -666,4 +757,23 @@ extern "C" uint32_t OTRCalculateCenterOfAreaFromRightEdge(int32_t center) {
 }
 extern "C" uint32_t OTRCalculateCenterOfAreaFromLeftEdge(int32_t center) {
     return static_cast<uint32_t>((OTRGetDimensionFromLeftEdge(0.0f) - 320.0f) / 2.0f + center);
+}
+
+extern "C" void Mk64Graphics3DSResumeAfterDiagnosticPause() {
+    // A deliberate paused dump is not a slow gameplay tick. Restart both FPS
+    // history and adaptive timing without discarding the pre-pause CSV history.
+    sLastPresentationStart = 0;
+    sPreviousPresentationDuration = 0;
+    sPreviousSynchronizationUs = 0;
+    sAdaptivePresentation = {};
+    sLastPerformanceSampleFrame = sFrameCounter;
+    if (sRenderer != nullptr) {
+        sRenderer->ResetPresentedFps();
+        sLastPerformanceDrawCalls = sRenderer->GetDrawCallCount();
+        sLastPerformanceTriangles = sRenderer->GetTriangleCount();
+        sLastPerformanceTextureUploads = sRenderer->GetTextureCacheUploadCount();
+        sLastPerformanceTextureBytes = sRenderer->GetTextureCacheUploadBytes();
+        sLastPerformanceVertexBytes = sRenderer->GetVertexUploadBytes();
+        sLastPerformanceLinearHeapFlushFrames = sRenderer->GetLinearHeapFlushFrameCount();
+    }
 }

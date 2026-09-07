@@ -170,7 +170,7 @@ index 9f38169..4c63daa 100644
  };
  } // namespace LUS
 diff --git a/src/Companion.cpp b/src/Companion.cpp
-index a881533..2171891 100644
+index a881533..667b9ca 100644
 --- a/src/Companion.cpp
 +++ b/src/Companion.cpp
 @@ -12,6 +12,27 @@
@@ -514,10 +514,10 @@ index a881533..2171891 100644
          }
      }
  
+-    for(auto asset = root.begin(); asset != root.end(); ++asset){
 +    auto& addressEntries = this->gAddrMap[this->gCurrentFile];
 +    addressEntries.clear();
 +
--    for(auto asset = root.begin(); asset != root.end(); ++asset){
 +    for(auto asset = root.begin(); asset != root.end(); ++asset){ if(Mk64Extraction3DSShouldCancel()) throw std::runtime_error("Extraction cancelled by user.");
          auto node = asset->second;
          auto entryName = asset->first.as<std::string>();
@@ -735,15 +735,16 @@ index a881533..2171891 100644
  
      auto vWriter = LUS::BinaryWriter();
      vWriter.SetEndianness(Torch::Endianness::Big);
-@@ -1287,6 +1648,7 @@ void Companion::Process() {
+@@ -1287,7 +1648,8 @@ void Companion::Process() {
          vWriter.Write((uint32_t) 0);
      }
  
-+    size_t processedYamlFiles = 0;
 -    for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){
++    size_t processedYamlFiles = 0;
 +    for (const auto & entry : Torch::getRecursiveEntries(this->gAssetPath)){ if(Mk64Extraction3DSShouldCancel()) throw std::runtime_error("Extraction cancelled by user.");
          if(entry.is_directory())  {
              continue;
+         }
 @@ -1302,14 +1664,46 @@ void Companion::Process() {
              continue;
          }
@@ -942,10 +943,10 @@ index 5e0096e..61c8bff 100644
  #ifdef USE_STORMLIB
  private:
 diff --git a/src/archive/ZWrapper.cpp b/src/archive/ZWrapper.cpp
-index 6440b62..b7fdf3e 100644
+index 6440b62..6630725 100644
 --- a/src/archive/ZWrapper.cpp
 +++ b/src/archive/ZWrapper.cpp
-@@ -5,21 +5,217 @@
+@@ -5,21 +5,221 @@
  
  #include "spdlog/spdlog.h"
  #include <Companion.h>
@@ -1153,6 +1154,10 @@ index 6440b62..b7fdf3e 100644
 +        this->mArchiveFile = nullptr;
 +        throw std::runtime_error("Could not open the temporary O2R central directory on the SD card");
 +    }
++    // Buffers belong to this writer and remain alive through fclose. If the
++    // library declines buffering, keep its valid default rather than fail.
++    std::setvbuf(this->mArchiveFile, this->mArchiveBuffer, _IOFBF, sizeof(this->mArchiveBuffer));
++    std::setvbuf(this->mCentralDirectoryFile, this->mDirectoryBuffer, _IOFBF, sizeof(this->mDirectoryBuffer));
 +    this->mArchiveOpen = true;
 +    Mk64InstallLogWrite("O2R writer opened with SD-spooled ZIP central directory.");
 +#endif
@@ -1164,7 +1169,7 @@ index 6440b62..b7fdf3e 100644
      char* fileData = data.data();
      size_t fileSize = data.size();
  
-@@ -34,11 +230,151 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
+@@ -34,11 +234,155 @@ bool ZWrapper::AddFile(const std::string& path, std::vector<char> data) {
          stream.close();
      }
  
@@ -1179,7 +1184,9 @@ index 6440b62..b7fdf3e 100644
 +    const uint32_t crc = static_cast<uint32_t>(mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(data.data()),
 +                                                       data.size()));
 +    const uint32_t zipFileSize = static_cast<uint32_t>(data.size());
-+    const bool useDeflate = !data.empty();
++    // Avoid a complete Deflate allocation/initialization for tiny resources.
++    // ZIP STORED is already supported by the indexed runtime and validator.
++    const bool useDeflate = data.size() >= 256;
 +    const uint16_t zipFlags = useDeflate ? kMk64ZipDataDescriptorFlag : 0;
 +    const uint16_t zipMethod = useDeflate ? kMk64ZipMethodDeflate : kMk64ZipMethodStored;
 +    uint32_t compressedSize = useDeflate ? 0 : zipFileSize;
@@ -1205,6 +1212,8 @@ index 6440b62..b7fdf3e 100644
 +        ok = ok && Mk64WriteU32(this->mArchiveFile, crc);
 +        ok = ok && Mk64WriteU32(this->mArchiveFile, compressedSize);
 +        ok = ok && Mk64WriteU32(this->mArchiveFile, zipFileSize);
++    } else {
++        ok = ok && Mk64WriteAll(this->mArchiveFile, data.data(), data.size());
 +    }
 +
 +    ok = ok && Mk64WriteU32(this->mCentralDirectoryFile, 0x02014b50);
@@ -1317,10 +1326,10 @@ index 6440b62..b7fdf3e 100644
      return 0;
  }
 diff --git a/src/archive/ZWrapper.h b/src/archive/ZWrapper.h
-index d1fe867..266a29d 100644
+index d1fe867..2b95d70 100644
 --- a/src/archive/ZWrapper.h
 +++ b/src/archive/ZWrapper.h
-@@ -1,20 +1,37 @@
+@@ -1,20 +1,39 @@
  #pragma once
  
 +#include <cstdint>
@@ -1347,6 +1356,8 @@ index d1fe867..266a29d 100644
      int32_t Close(void) override;
  
 +#if defined(__3DS__) || defined(PLATFORM_3DS)
++    char mArchiveBuffer[64 * 1024];
++    char mDirectoryBuffer[16 * 1024];
 +    FILE* mArchiveFile;
 +    FILE* mCentralDirectoryFile;
 +    std::string mCentralDirectoryPath;
