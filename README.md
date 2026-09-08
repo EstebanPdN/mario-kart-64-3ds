@@ -44,7 +44,7 @@ activity leave enough headroom. It automatically falls back to the required
 30 Hz keyframes under pressure.
 
 The midpoint path is adaptive; it is not a promise of a fixed or sustained
-60 FPS mode. The 800-pixel quality mode presents keyframes only.
+60 FPS mode.
 
 The Display menu adjusts internal resolution from 0.50x through 1.00x and
 scales it to the complete top screen. Bilinear uses a single GPU
