@@ -1,3 +1,4 @@
+#include "gpu_command_budget_3ds.hpp"
 #include "game_runtime_3ds.h"
 
 #include "adaptive_presentation_3ds.hpp"
@@ -243,12 +244,13 @@ void LogPerformanceSample() {
 }
 }
 
-void SetRendererFault(const char* stage, const char* reason, bool frameStateRecovered) {
+void SetRendererFault(const char* stage, const char* reason, bool frameStateRecovered,
+                      bool reduceResourceBudget = true) {
     mk64_3ds::PerformanceCurrent().fault = 1;
     ++sRendererFaultCounter;
     sRendererHealthyFrameCounter = 0;
     sRendererFaulted = !frameStateRecovered;
-    if (frameStateRecovered) {
+    if (frameStateRecovered && reduceResourceBudget) {
         sTextureCacheCapacity = std::max(kTextureCacheRecoveryFloor,
                                          sTextureCacheCapacity > kTextureCacheRecoveryStep
                                              ? sTextureCacheCapacity - kTextureCacheRecoveryStep
@@ -547,11 +549,9 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         perf.culled += gMk64DistanceCulled3DS;
         sHasPresentedTopFrame = true;
     } catch (const std::length_error& exception) {
-        // The backend has already doubled E5's packed-vertex budget. If an
-        // unusually dense display list still exceeds it, close the partial
-        // frame and resume on the next simulation tick instead of freezing the
-        // renderer permanently. The adaptive fallback removes optional 60 Hz
-        // work while the scene remains above budget.
+        // Vertex and command pressure are recoverable before the library's
+        // fatal limit. The command guard reserves space for EndFrame; reset
+        // the pending interpreter batch and retry on the next logic tick.
         Mk64FrameInterpolation3DSClearPrepared();
         sRenderer->EndFrame();
         sInterpreter->mBufVboLen = 0;
@@ -559,7 +559,9 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         sInterpreter->mRdp->textures_changed[0] = true;
         sInterpreter->mRdp->textures_changed[1] = true;
         Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
-        SetRendererFault("renderer-vertex-pressure", exception.what(), true);
+        const bool commandPressure = dynamic_cast<const mk64_3ds::GpuCommandPressure*>(&exception) != nullptr;
+        SetRendererFault(commandPressure ? "renderer-command-pressure" : "renderer-vertex-pressure",
+                         exception.what(), true, !commandPressure);
         sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     } catch (const std::bad_alloc& exception) {

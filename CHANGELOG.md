@@ -3,6 +3,7 @@
 ## v1.5
 
 - Fixed startup, shutdown, and gameplay crashes
+- Fixed the graphics command-buffer crash on race results
 - Improved Old and New 3DS performance and memory use
 - Fixed frame interpolation and frame pacing
 - Preloaded game resources into RAM to remove in-race resource reads from SD
