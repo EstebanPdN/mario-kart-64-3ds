@@ -1,5 +1,4 @@
 #include "game_data_3ds.h"
-#include "settings_3ds.h"
 #include "game_data_archive_3ds.hpp"
 #include "install_progress_3ds.hpp"
 #include "install_log_3ds.h"
@@ -353,15 +352,8 @@ void DrawLoadingTopScreen(int percent) {
 }
 
 void PrepareInstallScreensLocked() {
-    if (!Mk64Settings3DSGetShowLoadingScreens()) {
-        for (const auto screen : { GFX_TOP, GFX_BOTTOM }) {
-            u16 width = 0, height = 0;
-            u8* buffer = gfxGetFramebuffer(screen, GFX_LEFT, &width, &height);
-            if (buffer != nullptr) std::memset(buffer, 0, static_cast<size_t>(width) * height * 2);
-        }
-        gfxFlushBuffers();
-        return;
-    }
+    // ROM extraction always shows progress and installer output. The loading
+    // screen preference applies only to game loading, not initial installation.
     DrawLoadingTopScreen(gInstallProgressPercent.load(std::memory_order_relaxed));
     consoleSelect(&gBottomConsole);
     consoleClear();

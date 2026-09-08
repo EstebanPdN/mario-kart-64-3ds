@@ -9,6 +9,7 @@
 - Preloaded game resources into RAM to remove in-race resource reads from SD
 - Improved rendering, textures, colors, and audio processing
 - Faster on-device game-data extraction
+- Always show ROM extraction progress independently of game loading screens
 - Added adjustable render scale, render distance, and display filters
 - Added five HUD layouts and improved race HUD presentation
 - Redesigned Data and Course Data across both screens
