@@ -22,25 +22,16 @@ https://discord.gg/SMW49UMkw
 
 ## Features
 
-- Native 400x240 gameplay and an optional 800x240 high-density top-screen mode.
-- Internal render scale from 0.50x to 1.00x in 0.05 steps, with a touch slider.
-- Low, Normal, and High render distance. High retains the stock course range.
-- Clean, MK7, MKDS, MKDS 2, and Classic HUD layouts in Display.
-  First-launch defaults use MKDS 2; saved layout choices are preserved.
-- Bilinear, Blur, and lightweight CRT display filters.
-- Wide 5:3 and Original 4:3 display modes.
-- Dual-screen interface, bottom-screen race HUD, and touch menu navigation.
-- Hardware-aware Old 3DS and New 3DS resource, HUD, audio, and presentation
-  profiles.
-- Direct-to-NDSP audio buffers, with synthesis overlapped on an auxiliary CPU
-  core when the hardware makes one safely available.
-- A compact PICA200 vertex stream, bounded texture storage, and direct ARM11
-  cache cleaning with a compatibility fallback for lower CPU, memory, IPC,
-  and upload overhead.
-- Original 30 Hz game simulation on every model, with an optional adaptive
-  midpoint presentation path on New 3DS systems in 400-pixel mode.
-- On-device ROM validation and resource extraction.
-- Diagnostic dumps created on demand with `SELECT`.
+* Native 400×240 resolution
+* Adjustable 0.50×–1.00× render scale
+* Low, Normal, and High render distance
+* Five HUD layouts
+* Bilinear, Blur, and CRT filters
+* Dual-screen HUD and touch controls
+* Optimized PICA200 rendering
+* Original 30 Hz simulation with adaptive New 3DS interpolation
+* On-device ROM validation and extraction
+* Diagnostic dumps with `SELECT`
 
 Multiplayer is planned but is not currently available.
 
