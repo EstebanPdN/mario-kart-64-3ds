@@ -1,6 +1,7 @@
 #include "gfx_citro3d.h"
 #include "system_3ds.h"
 #include "render_policy_3ds.hpp"
+#include "gpu_command_budget_3ds.hpp"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -43,6 +44,14 @@ uint32_t gMk64DistanceFogBinds3DS = 0;
 
 namespace Fast {
 namespace {
+
+void RequireGpuCommandRoom(uint32_t requiredWords) {
+    u32* buffer = nullptr;
+    u32 capacity = 0, offset = 0;
+    GPUCMD_GetBuffer(&buffer, &capacity, &offset);
+    if (buffer == nullptr || !mk64_3ds::GpuCommandRoom(capacity, offset, requiredWords))
+        throw mk64_3ds::GpuCommandPressure();
+}
 
 constexpr uint32_t kTopLogicalWidth = 400;
 constexpr uint32_t kTopWideWidth = 800;
@@ -921,6 +930,9 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         return;
     }
 
+    // Fail through the recoverable renderer path before libctru's fatal
+    // capacity assertion. Keep room to submit/close the partial frame safely.
+    RequireGpuCommandRoom(mk64_3ds::kGpuCommandTailWords + mk64_3ds::kGpuCommandDrawWords);
     const size_t sourceVertexCount = std::min(bufVboNumTris * 3, static_cast<size_t>(kMaxSourceVertices));
     const size_t sourceTriangleCount = sourceVertexCount / 3;
     if (program->strideFloats > kMaxVertexStrideFloats ||
@@ -1724,7 +1736,7 @@ void GfxRenderingAPICitro3D::Init() {
         osSetSpeedupEnable(true);
     }
 
-    if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE)) {
+    if (!C3D_Init(mk64_3ds::kGpuCommandBufferBytes)) {
         gfxExit();
         return;
     }
@@ -2217,6 +2229,7 @@ void* GfxRenderingAPICitro3D::PrepareForExternalDraw() {
     if (!mImpl->frameActive) {
         return nullptr;
     }
+    RequireGpuCommandRoom(mk64_3ds::kGpuCommandTailWords);
     // Citro2D's target-clear helper performs an internal FrameSplit. Complete
     // any scaled presentation first, then hand it a coherent top target.
     PresentSceneToTopTarget();
