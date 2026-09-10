@@ -119,16 +119,10 @@ Create this folder on your SD card:
 sd:/3ds/MK64/
 ```
 
-Place your USA Mario Kart 64 ROM in that folder and name it either:
+Place your USA Mario Kart 64 ROM in that folder and name it:
 
 ```text
 mk64.z64
-```
-
-or:
-
-```text
-Mario Kart 64.z64
 ```
 
 The ROM must use the `.z64` byte order. ROMs in another byte order can be
