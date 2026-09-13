@@ -25,7 +25,7 @@ jobs:
       - name: Install host build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends cmake make pkg-config
+          apt-get install -y --no-install-recommends cmake make pkg-config python3 perl patch xz-utils
 
       - name: Build 3DSX and CIA when local packaging tools are present
         run: ./platform/3ds/build.sh

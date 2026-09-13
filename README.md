@@ -278,3 +278,11 @@ port-specific artwork, and extraction logic. It does not distribute Mario Kart
 Users are responsible for providing their own legally obtained compatible ROM.
 This is an unofficial fan project and is not affiliated with or endorsed by
 Nintendo or Harbour Masters.
+
+### Built-in updater
+
+Open **Options > Game > Update** to check Stable or Experimental releases.
+The upper screen shows the changelog; L/R changes pages. Use A or touch to
+select and B to return. Installation requires confirmation and closes the game.
+Updates verify their download and preserve your ROM/O2R, saves and settings.
+See the [updater documentation](platform/3ds/update/README.md) for details.

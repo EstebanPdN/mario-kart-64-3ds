@@ -1,1 +1,3 @@
 platform/3ds/patches/*.patch whitespace=-trailing-space
+# Preserve the exact upstream patch payloads and their published checksums.
+platform/3ds/update-dependencies/*.patch whitespace=-trailing-space

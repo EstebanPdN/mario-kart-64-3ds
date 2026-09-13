@@ -33,9 +33,15 @@ else
   exit 1
 fi
 
+UPDATE_DEPS="${MK64_3DS_UPDATE_DEPS:-${BUILD}/update-deps/prefix}"
+if [[ ! -f "${UPDATE_DEPS}/lib/libcurl.a" ]]; then
+  python3 "${ROOT}/platform/3ds/build_update_deps.py" "${BUILD}/update-deps"
+fi
+
 cmake -S "${ROOT}" -B "${BUILD}" \
   -DCMAKE_TOOLCHAIN_FILE="${DEVKITPRO}/cmake/3DS.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DMK64_3DS_UPDATE_DEPS="${UPDATE_DEPS}" \
   -DMK64_3DS_BUILD_GAME_CORE=ON \
   -DMK64_3DS_BUILD_GAME_ENGINE=ON \
   -DMK64_3DS_ENABLE_O2R_READER=ON \
