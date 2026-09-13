@@ -1,7 +1,13 @@
 ## Changelog
 
+- Fixed access to the updater certificate and bundled offline release notes.
+- Kept the race scene above and the current course background below in Update.
+- Fixed changelog flicker during intermediate presentations.
+- Added centered page numbering with L and R at the sides.
+- Synchronized the white Nintendo-to-title transition on both screens.
+
 - Added Update below Close Options in Options - Game, and in the pause menu.
 - Stable and Experimental channels with version checks, download progress and confirmation before installation.
 - Updates verify HTTPS, size and SHA-256. CIA updates also verify the title ID before installation.
 - CIA and complete 3DSX updates preserve game data, saves and settings.
-- Both screens now stay black during the Nintendo intro and share the title menu fade.
+- The lower screen stays black during Nintendo before both screens fade through white to the title.

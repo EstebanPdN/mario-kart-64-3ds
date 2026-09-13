@@ -1,9 +1,13 @@
 # Built-in updater
 
 Options > Game places Update below Close Options. During a race, pause first:
-Continue Game, Update and Quit remain separate actions. Both updater screens use
-the Mario Kart menu background and native menu font. The upper screen shows
-release notes, with L/R paging and bundled notes available offline.
+Continue Game, Update and Quit remain separate actions. The updater retains the
+current course/menu backdrop below and the current rendered scene above, using
+the native menu font. The upper screen shows
+release notes on every presentation, including interpolated images, with side
+L/R controls, centered page numbering and bundled notes available offline.
+The updater keeps RomFS mounted for its certificate and offline notes until
+its worker has finished during shutdown.
 
 Opening Update checks the public releases of `EstebanPdN/mario-kart-64-3ds`.
 Stable and Experimental channels are stored in `sdmc:/3ds/MK64/update/channel.txt`.

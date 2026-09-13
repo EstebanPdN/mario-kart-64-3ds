@@ -510,14 +510,10 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
                 SetRendererStage("renderer-run-intermediate");
                 { mk64_3ds::PerformanceTimer timer(perf.interpreter_us); sInterpreter->Run(commands, sNoMatrixReplacements); }
                 perf.begin_wait_us += sRenderer->GetFrameBeginWaitMicroseconds();
-                // Count every image actually sent to the display. The lower
-                // HUD remains key-frame-only, but the optional top FPS glyph
-                // must be redrawn here or it flickers at 30 Hz and reports
-                // simulation ticks instead of presentation rate.
+                // Every presented image must carry the same active top overlay.
+                // Otherwise Update alternates with the underlying game at 30 Hz.
                 Mk64BottomUI3DSRecordPresentation();
-                if (Mk64Settings3DSGetShowFpsEnabled() ||
-                    (Mk64Settings3DSGetHudLayout() >= MK64_HUD_LAYOUT_3DS_MK7 &&
-                     Mk64Settings3DSGetHudLayout() <= MK64_HUD_LAYOUT_3DS_MKDS_2)) {
+                if (Mk64BottomUI3DSNeedsTopOverlay()) {
                     mk64_3ds::PerformanceTimer timer(perf.hud_us);
                     Mk64BottomUI3DSDrawTopFps(sRenderer->PrepareForExternalDraw());
                 }
