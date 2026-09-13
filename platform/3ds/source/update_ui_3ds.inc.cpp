@@ -197,8 +197,9 @@ void RefreshUpdateNotes() {
 
 void DrawUpdateTop() {
     RefreshUpdateNotes();
-    // Retain the scene already rendered on this top target, including races.
-    C2D_DrawRectSolid(0, 0, 0.3f, 400, 240, C2D_Color32(0, 0, 0, 166));
+    // Stock menu/HUD foregrounds are omitted while Update is open.
+    // Dim the remaining clean menu background or current 3D race scene.
+    C2D_DrawRectSolid(0, 0, 0.3f, 400, 240, C2D_Color32(0, 0, 0, 204));
     const auto white = C2D_Color32(242, 241, 220, 255);
     const auto yellow = C2D_Color32(255, 225, 75, 255);
     UpdateText("CHANGELOG", 200, 14, 1.0f, yellow, 360);
