@@ -2045,7 +2045,8 @@ void DrawBottomBatch() {
     // batch used to split that pending batch and could invalidate its texture
     // state on hardware.
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
-    C3D_RenderTargetClear(sUi.bottomTarget, C3D_CLEAR_ALL, C2D_Color32(0, 0, 0, 255), 0);
+    // Raw Citro3D clears use 0xRRGGBBAA; C2D_Color32 uses 0xAABBGGRR.
+    C3D_RenderTargetClear(sUi.bottomTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     PrepareC2DBatch();
     Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(sUi.bottomTarget);
@@ -2387,6 +2388,10 @@ extern "C" uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t heldKeys) {
 
 extern "C" bool Mk64BottomUI3DSConsumesCStick() {
     return sUi.initialized && sUi.consumesCStick;
+}
+
+extern "C" bool Mk64BottomUI3DSIsUpdateOpen() {
+    return sUi.initialized && UpdateIsOpen();
 }
 
 extern "C" bool Mk64BottomUI3DSIsModalOpen() {

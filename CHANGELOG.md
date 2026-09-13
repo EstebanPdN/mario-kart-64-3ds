@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6-E3
+
+- Fixed the red lower screen during the Nintendo logo.
+- Removed menu labels and race HUD text behind the Update changelog.
+- Preserved the synchronized white startup transition and current backgrounds.
+
 ## v1.6-E2
 
 - Fixed updater certificate and offline changelog access

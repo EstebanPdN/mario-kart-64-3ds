@@ -1069,12 +1069,24 @@ void render_pause_menu(MenuItem* arg0) {
     endif()
     set(SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING "")
     string(REPLACE "void render_menus(MenuItem* arg0) {"
-        "void render_menus(MenuItem* arg0) {\n    if ((gMenuSelection == DATA_MENU || gMenuSelection == COURSE_DATA_MENU) && arg0->type != MAIN_MENU_BACKGROUND) return;"
+        [=[extern bool Mk64BottomUI3DSIsUpdateOpen(void) __attribute__((weak));
+void render_menus(MenuItem* arg0) {
+    // Keep the original background/filter, but omit every foreground menu item.
+    // In a race this removes the pause title without replacing the 3D scene.
+    if (Mk64BottomUI3DSIsUpdateOpen != NULL && Mk64BottomUI3DSIsUpdateOpen() &&
+        arg0->type != MAIN_MENU_BACKGROUND &&
+        arg0->type != CHARACTER_SELECT_BACKGROUND &&
+        arg0->type != COURSE_SELECT_BACKGROUND &&
+        arg0->type != MENU_ITEM_UI_START_BACKGROUND) return;
+    if ((gMenuSelection == DATA_MENU || gMenuSelection == COURSE_DATA_MENU) && arg0->type != MAIN_MENU_BACKGROUND) return;]=]
         SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
     string(REPLACE
         "            case COURSE_DATA_MENU:\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
         "            case COURSE_DATA_MENU:\n                add_menu_item(MAIN_MENU_BACKGROUND, 0, 0, MENU_ITEM_PRIORITY_2);\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
         SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    if(NOT SPAGHETTIKART_3DS_MENU_ITEMS_TEXT MATCHES "extern bool Mk64BottomUI3DSIsUpdateOpen")
+        message(FATAL_ERROR "The upstream updater background render point changed")
+    endif()
     include(platform/3ds/results_layout.cmake)
     # Observe both white and black startup transitions before the stock timer advances.
     string(REPLACE "void func_8009CA6C(s32 arg0) {"
@@ -1098,6 +1110,7 @@ void render_pause_menu(MenuItem* arg0) {
         [=[#include "code_80057C60.h"
 #if defined(PLATFORM_3DS)
 extern int Mk64GameState3DSGetTopHudRenderMode(void);
+extern bool Mk64BottomUI3DSIsUpdateOpen(void) __attribute__((weak));
 #define MK64_TOP_HUD_RENDER_FULL (-1)
 #define MK64_TOP_HUD_RENDER_NONE 0
 #define MK64_TOP_HUD_RENDER_LAP_PROGRESS 1
@@ -1113,7 +1126,7 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
     set(SPAGHETTIKART_3DS_HUD_INCLUDE_TEXT "${SPAGHETTIKART_3DS_HUD_TEXT}")
     string(REPLACE
         "void func_800591B4(void) {\n\n    if ((gHUDDisable == 0) && (D_800DC5B8 != 0)) {"
-        "void func_800591B4(void) {\n#if defined(PLATFORM_3DS)\n    const int mk64TopHudMode = Mk64GameState3DSGetTopHudRenderMode();\n#endif\n\n    if ((gHUDDisable == 0) && (D_800DC5B8 != 0)) {"
+        "void func_800591B4(void) {\n#if defined(PLATFORM_3DS)\n    const bool mk64UpdateOpen = Mk64BottomUI3DSIsUpdateOpen != NULL && Mk64BottomUI3DSIsUpdateOpen();\n    const int mk64TopHudMode = mk64UpdateOpen ? MK64_TOP_HUD_RENDER_NONE : Mk64GameState3DSGetTopHudRenderMode();\n#endif\n\n    if ((gHUDDisable == 0) && (D_800DC5B8 != 0)) {"
         SPAGHETTIKART_3DS_HUD_TEXT
         "${SPAGHETTIKART_3DS_HUD_TEXT}"
     )
@@ -1160,6 +1173,19 @@ extern int Mk64GameState3DSGetTopHudRenderMode(void);
     )
     if(SPAGHETTIKART_3DS_HUD_TEXT STREQUAL SPAGHETTIKART_3DS_HUD_FULL_TEXT)
         message(FATAL_ERROR "The upstream selective HUD insertion point changed")
+    endif()
+    # Suppress viewport HUDs too (including multiplayer), but retain viewport state.
+    set(SPAGHETTIKART_3DS_HUD_UPDATE_TEXT "${SPAGHETTIKART_3DS_HUD_TEXT}")
+    string(REPLACE
+        "    D_8018D21C = arg0;"
+        "    D_8018D21C = arg0;\n    if (Mk64BottomUI3DSIsUpdateOpen != NULL && Mk64BottomUI3DSIsUpdateOpen()) return;"
+        SPAGHETTIKART_3DS_HUD_TEXT "${SPAGHETTIKART_3DS_HUD_TEXT}")
+    string(REPLACE
+        "        func_8005902C();\n        func_80057DD0();"
+        "        if (!mk64UpdateOpen) {\n            func_8005902C();\n            func_80057DD0();\n        }"
+        SPAGHETTIKART_3DS_HUD_TEXT "${SPAGHETTIKART_3DS_HUD_TEXT}")
+    if(SPAGHETTIKART_3DS_HUD_TEXT STREQUAL SPAGHETTIKART_3DS_HUD_UPDATE_TEXT)
+        message(FATAL_ERROR "The upstream updater HUD render points changed")
     endif()
     set(SPAGHETTIKART_3DS_HUD_EXISTING "")
     if(EXISTS "${SPAGHETTIKART_3DS_HUD_SOURCE}")

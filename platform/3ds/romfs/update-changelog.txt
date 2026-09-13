@@ -1,5 +1,8 @@
 ## Changelog
 
+- Fixed the red lower screen during the Nintendo logo.
+- Removed menu labels and race HUD text behind the Update changelog.
+- Preserved the synchronized white startup transition and current backgrounds.
 - Fixed access to the updater certificate and bundled offline release notes.
 - Kept the race scene above and the current course background below in Update.
 - Fixed changelog flicker during intermediate presentations.

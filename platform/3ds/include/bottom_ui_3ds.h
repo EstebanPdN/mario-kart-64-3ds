@@ -29,6 +29,9 @@ void Mk64BottomUI3DSDraw(void* existingTopTarget);
 uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t heldKeys);
 bool Mk64BottomUI3DSConsumesCStick(void);
 
+/* Hide stock menu/HUD lettering while retaining the scene behind Update. */
+bool Mk64BottomUI3DSIsUpdateOpen(void);
+
 /* Diagnostic/read-only state for integration and tests. */
 bool Mk64BottomUI3DSIsModalOpen(void);
 float Mk64BottomUI3DSGetCurrentFps(void);
