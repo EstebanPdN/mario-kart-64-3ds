@@ -1,6 +1,7 @@
 #include "hud_layout_3ds.hpp"
 #include "render_policy_3ds.hpp"
 #include "bottom_ui_3ds.h"
+#include "updater.h"
 #include "game_runtime_3ds.h"
 
 #include "diagnostics_3ds.h"
@@ -205,6 +206,11 @@ struct BottomUiState {
 
 BottomUiState sUi;
 bool sRenderSliderDragging = false;
+unsigned sMenuBlackAlpha = 255;
+void OpenUpdate();
+void CloseUpdate();
+void HandleUpdateInput(const Mk64DiagnosticsInput3DS& input);
+bool UpdateIsOpen();
 
 constexpr std::array<const char*, kFontGlyphCount> kFontResources = {
     "__OTR__textures/texture_data_2/font_letter_A",
@@ -1015,7 +1021,7 @@ void SaveChangedSetting(const char* successText) {
 
 uint8_t RowCount(OptionsTab tab) {
     switch (tab) {
-        case OptionsTab::Game: return sUi.modalOpenedFromPause ? 2 : 1;
+        case OptionsTab::Game: return sUi.modalOpenedFromPause ? 3 : 2;
         case OptionsTab::Screen: return 6;
         case OptionsTab::Gameplay: return 2;
         case OptionsTab::Developer: return 4;
@@ -1039,6 +1045,7 @@ void OpenOptions(bool fromPause) {
 }
 
 void CloseOptions() {
+    if (UpdateIsOpen()) CloseUpdate();
     if (sRenderSliderDragging) {
         sRenderSliderDragging = false;
         SaveChangedSetting("RENDER SCALE SAVED");
@@ -1083,6 +1090,7 @@ void ActivateSelectedRow(int direction) {
     const int step = direction < 0 ? -1 : 1;
     switch (sUi.tab) {
         case OptionsTab::Game:
+            if (sUi.selectedRow == 1) { OpenUpdate(); return; }
             if (sUi.modalOpenedFromPause) {
                 const Mk64PauseAction3DS action = sUi.selectedRow == 0
                                                        ? MK64_PAUSE_ACTION_CONTINUE
@@ -1232,6 +1240,7 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
 }
 
 void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
+    if (UpdateIsOpen()) { HandleUpdateInput(input); return; }
     if (sRenderSliderDragging) {
         if (input.touchHeld) {
             Mk64Settings3DSSetRenderScalePercent(mk64_3ds::RenderScaleFromTouch(input.touchX));
@@ -1521,6 +1530,7 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
     value[0] = '\0';
     switch (tab) {
         case OptionsTab::Game:
+            if (row == 1) { *label = "UPDATE"; break; }
             if (sUi.modalOpenedFromPause) {
                 *label = row == 0 ? "CONTINUE GAME" : "QUIT";
             } else {
@@ -1647,6 +1657,10 @@ void DrawOptions() {
              C2D_AlignCenter, 0.74f, true);
     DrawStatus();
 }
+
+#include "update_ui_3ds.inc.cpp"
+
+bool UpdateIsOpen() { return sUpdate.open; }
 
 void DrawDeveloperOverlay() {
     if (sUi.game.racing) DrawRaceBackground(216.0f); else DrawDimMenuBackground();
@@ -1990,6 +2004,8 @@ void DrawDataTop() {
 }
 
 void DrawBottom() {
+    if (sMenuBlackAlpha == 255) return;
+    if (UpdateIsOpen()) { DrawUpdateBottom(); return; }
     if (DataActive() && !sUi.modalOpen) { DrawDataBottom(); return; }
     if (Mk64Settings3DSGetOverlayEnabled()) {
         DrawDeveloperOverlay();
@@ -2033,11 +2049,12 @@ void DrawBottomBatch() {
     Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(sUi.bottomTarget);
     DrawBottom();
+    if (sMenuBlackAlpha) C2D_DrawRectSolid(0, 0, 0.99f, 320, 240, C2D_Color32(0, 0, 0, sMenuBlackAlpha));
     C2D_Flush();
 }
 
 void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
-    if (topTarget == nullptr || (!Mk64Settings3DSGetShowFpsEnabled() && !DrawsTopRaceHud() && !DataActive())) return;
+    if (topTarget == nullptr || (!Mk64Settings3DSGetShowFpsEnabled() && !DrawsTopRaceHud() && !DataActive() && !UpdateIsOpen())) return;
     // Preserve the completed game color buffer and clear only reverse-depth so
     // the overlay cannot be hidden behind scene geometry.
     // Split the queued lower-screen commands before clearing top depth.
@@ -2047,6 +2064,7 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
     PrepareC2DBatch();
     Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(topTarget);
+    if (UpdateIsOpen()) { DrawUpdateTop(); C2D_Flush(); return; }
     sDrawOpacity = sUi.game.topHudOpacity;
     if (sDrawOpacity > 0) DrawTopRaceHud();
     sDrawOpacity = 1.0f;
@@ -2056,6 +2074,12 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
 }
 
 } // namespace
+
+extern "C" void Mk64BottomUI3DSSetMenuBlackAlpha(unsigned alpha) {
+    alpha = std::min(alpha, 255U);
+    if (sMenuBlackAlpha != alpha) sUi.bottomDirty = true;
+    sMenuBlackAlpha = alpha;
+}
 
 extern "C" bool Mk64BottomUI3DSInit() {
     if (sUi.initialized) return true;
@@ -2268,7 +2292,7 @@ extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
     // to release before issuing any new Citro2D commands.
     DrainRetiredTextures();
     Mk64BottomUI3DSRecordPresentation();
-    const bool drawTopFps = Mk64Settings3DSGetShowFpsEnabled() || DrawsTopRaceHud() || DataActive();
+    const bool drawTopFps = Mk64Settings3DSGetShowFpsEnabled() || DrawsTopRaceHud() || DataActive() || UpdateIsOpen();
     if (!sUi.bottomDirty && !drawTopFps) return;
     if (sUi.bottomDirty) {
         DrawBottomBatch();

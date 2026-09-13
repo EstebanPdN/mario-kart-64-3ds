@@ -1,6 +1,7 @@
 #include "game_data_3ds.h"
 #include "audio_runtime_3ds.h"
 #include "bottom_ui_3ds.h"
+#include "updater.h"
 #include "diagnostics_3ds.h"
 #include "game_runtime_3ds.h"
 #include "game_state_3ds.h"
@@ -88,7 +89,7 @@ void ArchiveLoadProgress(unsigned percent) {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     std::set_terminate(TerminateHandler);
     Mk64Diagnostics3DSStart();
     Mk64Settings3DSSetHardwareModel(Mk64Diagnostics3DSIsNewModel());
@@ -193,10 +194,11 @@ int main() {
     thread5_game_loop();
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-ready");
 
+    Updater_Init(argc > 0 ? argv[0] : nullptr);
     uint64_t nextSimulationDeadline = svcGetSystemTick();
     uint64_t deadlineRemainder = 0;
     bool suppressNextPresentation = false;
-    while (WindowIsRunning()) {
+    while (WindowIsRunning() && !Updater_ShouldClose()) {
         if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
             Mk64Graphics3DSResumeAfterDiagnosticPause();
             Mk64BottomUI3DSResetFps();
@@ -278,6 +280,7 @@ int main() {
     // and diagnostics workers while NDSP/HID and their stacks are still mapped,
     // then keep the immediate exit that avoids GPU/resource teardown after
     // Citro3D has disabled its VBlank callbacks during the APT transition.
+    Updater_Shutdown();
     Mk64Diagnostics3DSCheckpoint("game-loop-exit-requested");
     Mk64GameAudio3DSShutdown();
     Mk64Diagnostics3DSStop();

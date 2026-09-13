@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.6-E1
+
+- Added a built-in updater with Stable and Experimental channels, download verification and installation confirmation
+- Added Update below Close Options, using the native menu font and Mario Kart backgrounds
+- Added paged release notes on the upper screen and complete CIA/3DSX update support
+- Kept the lower screen black during the Nintendo intro and synchronized its title-menu fade
+
 ## v1.5
 
 - Fixed startup, shutdown, and gameplay crashes

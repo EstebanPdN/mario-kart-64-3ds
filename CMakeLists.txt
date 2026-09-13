@@ -18,6 +18,7 @@ option(MK64_3DS_ENABLE_ON_DEVICE_EXTRACTOR "Build Torch so the 3DS can generate 
 set(MK64_3DS_ROMFS_DIR "${CMAKE_CURRENT_BINARY_DIR}/romfs")
 set(MK64_3DS_TORCH_ROMFS_DIR "${MK64_3DS_ROMFS_DIR}/torch")
 file(MAKE_DIRECTORY "${MK64_3DS_TORCH_ROMFS_DIR}")
+file(COPY "${CMAKE_CURRENT_LIST_DIR}/platform/3ds/romfs/" DESTINATION "${MK64_3DS_ROMFS_DIR}")
 file(COPY
     "${CMAKE_CURRENT_LIST_DIR}/third_party/SpaghettiKart/config.yml"
     DESTINATION "${MK64_3DS_TORCH_ROMFS_DIR}"
@@ -1075,6 +1076,10 @@ void render_pause_menu(MenuItem* arg0) {
         "            case COURSE_DATA_MENU:\n                add_menu_item(MAIN_MENU_BACKGROUND, 0, 0, MENU_ITEM_PRIORITY_2);\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
         SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
     include(platform/3ds/results_layout.cmake)
+    # Capture the exact full-screen black alpha before the stock fade advances.
+    string(REPLACE "void func_8009CA6C(s32 arg0) {"
+        "extern void Mk64BottomUI3DSSetMenuBlackAlpha(unsigned) __attribute__((weak));\nvoid func_8009CA6C(s32 arg0) {\n    if (arg0 == 4 && Mk64BottomUI3DSSetMenuBlackAlpha != NULL) {\n        unsigned alpha = 0;\n        if (gMenuSelection == LOGO_INTRO_MENU) alpha = 255;\n        else if (gMenuSelection == START_MENU && gTransitionType[4] == 1 && gTransitionDuration[4] != 0)\n            alpha = 255 - (gCurrentTransitionTime[4] * 255 / gTransitionDuration[4]);\n        Mk64BottomUI3DSSetMenuBlackAlpha(alpha);\n    }"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
     if(EXISTS "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}" SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING)
     endif()
@@ -3946,6 +3951,21 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         mk64-3ds-fast3d-interpreter
     )
 
+    set(MK64_3DS_UPDATE_DEPS "" CACHE PATH "Updater static library prefix")
+    add_library(mk64-3ds-updater STATIC
+        platform/3ds/update/updater.c
+        platform/3ds/update/update_manifest.c)
+    target_include_directories(mk64-3ds-updater PUBLIC platform/3ds/update
+        PRIVATE "${MK64_3DS_UPDATE_DEPS}/include")
+    target_compile_definitions(mk64-3ds-updater PRIVATE MK64_3DS_VERSION="${MK64_3DS_VERSION}")
+    foreach(lib curl jansson mbedtls mbedx509 mbedcrypto)
+        if(NOT EXISTS "${MK64_3DS_UPDATE_DEPS}/lib/lib${lib}.a")
+            message(FATAL_ERROR "Missing updater library ${lib}; run platform/3ds/build_update_deps.py")
+        endif()
+        target_link_libraries(mk64-3ds-updater PUBLIC "${MK64_3DS_UPDATE_DEPS}/lib/lib${lib}.a")
+    endforeach()
+    target_link_libraries(mk64-3ds-updater PUBLIC ctru m)
+
     add_executable(mk64-3ds-game
         platform/3ds/source/bottom_ui_3ds.cpp
         platform/3ds/source/diagnostics_3ds.cpp
@@ -3988,6 +4008,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         -Wl,--wrap=linearAlloc
     )
     target_link_libraries(mk64-3ds-game PRIVATE
+        mk64-3ds-updater
         mk64-3ds-game-runtime
         -Wl,--start-group
         mk64-3ds-game-core
