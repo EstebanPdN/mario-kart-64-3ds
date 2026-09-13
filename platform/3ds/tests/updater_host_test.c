@@ -68,6 +68,14 @@ static Result ac_result,soc_result,ssl_result;
 static unsigned ac_closed,soc_closed,ssl_closed;
 static int created_priority;
 static s32 caller_priority=0x30;
+static Result romfs_result;
+static unsigned romfs_mounts,romfs_unmounts;
+Result romfsInit(void){
+ if(R_FAILED(romfs_result))return romfs_result;
+ assert(rename("unmounted-romfs","romfs:")==0);romfs_mounts++;return 0;
+}
+Result romfsExit(void){assert(!Updater_Busy());assert(rename("romfs:","unmounted-romfs")==0);romfs_unmounts++;return 0;}
+
 Result acInit(void){return ac_result;}Result ACU_GetWifiStatus(u32*w){*w=1;return 0;}void acExit(void){ac_closed++;}
 void *memalign(size_t align,size_t n){return malloc(n);}
 Result socInit(void*p,u32 n){assert(n==1024*1024);return soc_result;}void socExit(void){soc_closed++;}
@@ -91,7 +99,15 @@ Result AM_FinishCiaInstall(Handle h){finishes++;return 0;}
 Result AM_CancelCIAInstall(Handle h){cancels++;return 0;}
 Result FSFILE_Close(Handle h){fclose(input_file);return 0;}
 int main(int argc,char**argv){
- initialized=true; status.state=UPDATE_CHECKING;
+ // Reproduce a boot with an existing O2R: the extractor left no RomFS mount.
+ romfs_result=-1;Updater_Init(NULL);assert(!romfs_ready);
+ Updater_Check();assert(status.state==UPDATE_ERROR&&!busy&&!worker);
+ Updater_Shutdown();assert(!romfs_unmounts);
+ romfs_result=0;Updater_Init(NULL);assert(romfs_ready&&romfs_mounts==1);
+ Updater_Init(NULL);assert(romfs_mounts==1);
+ FILE *resource=fopen("romfs:/update-ca.pem","rb");assert(resource);fclose(resource);
+ resource=fopen("romfs:/update-changelog.txt","rb");assert(resource);fclose(resource);
+ status.state=UPDATE_CHECKING;
  // Exercise the actual worker's partial initialization and cleanup paths.
  ac_result=-1;run_job(NULL);assert(status.state==UPDATE_ERROR&&!ac_closed&&!soc_closed&&!ssl_closed);
  ac_result=0;soc_result=-2;run_job(NULL);assert(!strcmp(status.message,"SOCKET SERVICE FAILED")&&ac_closed==1&&!soc_closed&&!ssl_closed);
@@ -146,5 +162,8 @@ int main(int argc,char**argv){
    assert(ssl_closed==1&&soc_closed==2&&ac_closed==3&&!busy);
    puts("PASS: live GitHub HTTPS with bundled CA, and both release channels");
  }
+ Updater_Shutdown();assert(!romfs_ready&&romfs_unmounts==1);
+ assert(fopen("romfs:/update-ca.pem","rb")==NULL);
+ puts("PASS: updater owns RomFS across checks/notes/downloads and releases it after worker shutdown.");
  puts("PASS: bounded transfer/SHA256; corruption/truncation/cancel/size; title/space/short-write/commit guards. AM is mocked, not console-tested.");
 }

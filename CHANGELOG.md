@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.6-E2
+
+- Fixed updater certificate and offline changelog access
+- Preserved the current course background and race scene in Update
+- Fixed changelog flicker on intermediate presentations
+- Centered page numbering with L/R at the sides
+- Synchronized the white Nintendo-to-title transition on both screens
+
 ## v1.6-E1
 
 - Added a built-in updater with Stable and Experimental channels, download verification and installation confirmation

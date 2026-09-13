@@ -20,6 +20,8 @@ void Mk64BottomUI3DSShowLoadingProgress(const char* title, const char* detail, u
 void Mk64BottomUI3DSPrepareFrame(void);
 void Mk64BottomUI3DSRecordPresentation(void);
 void Mk64BottomUI3DSResetFps(void);
+/* Every presented top image, including interpolation, must include active overlays. */
+bool Mk64BottomUI3DSNeedsTopOverlay(void);
 void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget);
 void Mk64BottomUI3DSDraw(void* existingTopTarget);
 

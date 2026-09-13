@@ -29,6 +29,7 @@ with tempfile.TemporaryDirectory(prefix='mk64-updater-test-') as temporary:
         str(tests / 'updater_host_test.c'), str(source / 'update_manifest.c'),
         str(prefix / 'lib/libjansson.a'), '-lcurl', '-Wl,-dead_strip', '-o', str(host)], check=True)
     (work / 'sdmc:/3ds/MK64/update').mkdir(parents=True)
-    (work / 'romfs:').mkdir()
-    shutil.copyfile(root / 'platform/3ds/romfs/update-ca.pem', work / 'romfs:/update-ca.pem')
+    (work / 'unmounted-romfs').mkdir()
+    shutil.copyfile(root / 'platform/3ds/romfs/update-ca.pem', work / 'unmounted-romfs/update-ca.pem')
+    shutil.copyfile(root / 'platform/3ds/romfs/update-changelog.txt', work / 'unmounted-romfs/update-changelog.txt')
     subprocess.run([str(host)] + (['--live-check'] if args.live_check else []), cwd=work, check=True)

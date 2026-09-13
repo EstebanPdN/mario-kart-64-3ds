@@ -1076,9 +1076,9 @@ void render_pause_menu(MenuItem* arg0) {
         "            case COURSE_DATA_MENU:\n                add_menu_item(MAIN_MENU_BACKGROUND, 0, 0, MENU_ITEM_PRIORITY_2);\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
         SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
     include(platform/3ds/results_layout.cmake)
-    # Capture the exact full-screen black alpha before the stock fade advances.
+    # Observe both white and black startup transitions before the stock timer advances.
     string(REPLACE "void func_8009CA6C(s32 arg0) {"
-        "extern void Mk64BottomUI3DSSetMenuBlackAlpha(unsigned) __attribute__((weak));\nvoid func_8009CA6C(s32 arg0) {\n    if (arg0 == 4 && Mk64BottomUI3DSSetMenuBlackAlpha != NULL) {\n        unsigned alpha = 0;\n        if (gMenuSelection == LOGO_INTRO_MENU) alpha = 255;\n        else if (gMenuSelection == START_MENU && gTransitionType[4] == 1 && gTransitionDuration[4] != 0)\n            alpha = 255 - (gCurrentTransitionTime[4] * 255 / gTransitionDuration[4]);\n        Mk64BottomUI3DSSetMenuBlackAlpha(alpha);\n    }"
+        "extern void Mk64BottomUI3DSSetMenuTransition(int, int, int, unsigned, unsigned) __attribute__((weak));\nvoid func_8009CA6C(s32 arg0) {\n    if (arg0 == 4 && Mk64BottomUI3DSSetMenuTransition != NULL)\n        Mk64BottomUI3DSSetMenuTransition(gMenuSelection == LOGO_INTRO_MENU, gMenuSelection == START_MENU, gTransitionType[4], gCurrentTransitionTime[4], gTransitionDuration[4]);"
         SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
     if(EXISTS "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_MENU_ITEMS_SOURCE}" SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING)

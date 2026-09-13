@@ -29,7 +29,7 @@ static LightLock lock;
 static UpdateStatus status;
 static UpdateRelease release;
 static Thread worker;
-static bool initialized, homebrew, busy, cancel, download_job;
+static bool initialized, homebrew, busy, cancel, download_job, romfs_ready;
 static char launch_file[768];
 
 static bool cancelled(void) { return __atomic_load_n(&cancel, __ATOMIC_ACQUIRE) || aptShouldClose(); }
@@ -322,6 +322,7 @@ done:
 }
 static void start(bool downloading) {
   if (!initialized || Updater_Busy() || Updater_ShouldClose()) return;
+  if (!romfs_ready) { publish(UPDATE_ERROR, "UPDATE RESOURCES UNAVAILABLE"); return; }
   if (worker) { threadJoin(worker, UINT64_MAX); threadFree(worker); worker = NULL; }
   if (downloading) { UpdateStatus s; Updater_GetStatus(&s); if (s.state != UPDATE_AVAILABLE) return; }
   if (!downloading) { LightLock_Lock(&lock); status.version[0] = 0; memset(&release, 0, sizeof(release)); LightLock_Unlock(&lock); }
@@ -364,6 +365,14 @@ void Updater_Init(const char *path) {
   LightLock_Init(&lock); initialized = true; homebrew = envIsHomebrew();
   status.prerelease = strstr(MK64_3DS_VERSION, "-E") != NULL;
   mkdir(UPDATE_DIR, 0777);
+  // Extraction mounts RomFS only temporarily (or skips it with an existing O2R).
+  // Own a separate mount for the full updater lifetime, including offline notes.
+  Result romfs_result = romfsInit();
+  romfs_ready = R_SUCCEEDED(romfs_result);
+  if (!romfs_ready) {
+    UpdateLog("Updater romfsInit failed: %08lx", (unsigned long)romfs_result);
+    publish(UPDATE_ERROR, "UPDATE RESOURCES UNAVAILABLE");
+  }
   if (homebrew && path && !strncmp(path, "sdmc:/", 6) && strlen(path) < sizeof(launch_file) &&
       strlen(path) > 5 && !strcmp(path + strlen(path) - 5, ".3dsx")) strcpy(launch_file, path);
   struct stat st;
@@ -374,6 +383,7 @@ void Updater_Shutdown(void) {
   if (!initialized) return;
   Updater_Cancel();
   if (worker) { threadJoin(worker, UINT64_MAX); threadFree(worker); worker = NULL; }
+  if (romfs_ready) { romfsExit(); romfs_ready = false; }
   initialized = false;
   memset(&status, 0, sizeof(status)); memset(&release, 0, sizeof(release));
 }

@@ -114,15 +114,9 @@ void UpdateText(const char* text, float center, float y, float scale, uint32_t c
     DrawText(text, center, y, scale, color, C2D_AlignCenter, 0.85f, true);
 }
 
-void DrawUpdateBackground(float width) {
-    C2D_DrawRectSolid(0, 0, 0.1f, width, 240, C2D_Color32(0, 0, 0, 255));
-    DrawTexture(sUi.menuBackground, 0, 0, width, 240, 0.2f);
-    C2D_DrawRectSolid(0, 0, 0.3f, width, 240, C2D_Color32(0, 0, 0, 166));
-}
-
 void DrawUpdateBottom() {
     RefreshUpdateStatus();
-    DrawUpdateBackground(320);
+    if (sUi.game.racing) DrawRaceBackground(); else DrawDimMenuBackground();
     const auto white = C2D_Color32(242, 241, 220, 255);
     const auto yellow = C2D_Color32(255, 225, 75, 255);
     const auto green = C2D_Color32(167, 255, 151, 255);
@@ -203,7 +197,8 @@ void RefreshUpdateNotes() {
 
 void DrawUpdateTop() {
     RefreshUpdateNotes();
-    DrawUpdateBackground(400);
+    // Retain the scene already rendered on this top target, including races.
+    C2D_DrawRectSolid(0, 0, 0.3f, 400, 240, C2D_Color32(0, 0, 0, 166));
     const auto white = C2D_Color32(242, 241, 220, 255);
     const auto yellow = C2D_Color32(255, 225, 75, 255);
     UpdateText("CHANGELOG", 200, 14, 1.0f, yellow, 360);
@@ -213,7 +208,9 @@ void DrawUpdateTop() {
         DrawText(sUpdate.lines[i], 17, 43 + row * 15, 0.70f, white, C2D_AlignLeft, 0.85f, true);
     }
     char page[48];
-    std::snprintf(page, sizeof(page), "L  %u / %u  R", sUpdate.page + 1,
+    std::snprintf(page, sizeof(page), "PAGE %u / %u", sUpdate.page + 1,
                   std::max(1U, (sUpdate.lineCount + kUpdateLinesPerPage - 1) / kUpdateLinesPerPage));
-    UpdateText(page, 200, 219, 0.72f, yellow, 360);
+    UpdateText("L", 24, 219, 0.72f, yellow, 24);
+    UpdateText(page, 200, 219, 0.72f, yellow, 300);
+    UpdateText("R", 376, 219, 0.72f, yellow, 24);
 }

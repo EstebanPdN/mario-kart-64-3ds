@@ -29,3 +29,5 @@ Result AM_CancelCIAInstall(Handle);Result FSFILE_Close(Handle);
 Result acInit(void);Result ACU_GetWifiStatus(u32*);void acExit(void);
 void *memalign(size_t,size_t);Result socInit(void*,u32);void socExit(void);
 Thread threadCreate(void(*)(void*),void*,unsigned,int,int,bool);Result threadJoin(Thread,u64);void threadFree(Thread);bool envIsHomebrew(void);
+
+Result romfsInit(void);Result romfsExit(void);

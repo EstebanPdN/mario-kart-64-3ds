@@ -1,4 +1,5 @@
 #include "hud_layout_3ds.hpp"
+#include "menu_transition_3ds.hpp"
 #include "render_policy_3ds.hpp"
 #include "bottom_ui_3ds.h"
 #include "updater.h"
@@ -206,7 +207,7 @@ struct BottomUiState {
 
 BottomUiState sUi;
 bool sRenderSliderDragging = false;
-unsigned sMenuBlackAlpha = 255;
+mk64_3ds::MenuTransition3DS sMenuTransition;
 void OpenUpdate();
 void CloseUpdate();
 void HandleUpdateInput(const Mk64DiagnosticsInput3DS& input);
@@ -2004,7 +2005,7 @@ void DrawDataTop() {
 }
 
 void DrawBottom() {
-    if (sMenuBlackAlpha == 255) return;
+    if (sMenuTransition.blankBackdrop) return;
     if (UpdateIsOpen()) { DrawUpdateBottom(); return; }
     if (DataActive() && !sUi.modalOpen) { DrawDataBottom(); return; }
     if (Mk64Settings3DSGetOverlayEnabled()) {
@@ -2049,12 +2050,16 @@ void DrawBottomBatch() {
     Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(sUi.bottomTarget);
     DrawBottom();
-    if (sMenuBlackAlpha) C2D_DrawRectSolid(0, 0, 0.99f, 320, 240, C2D_Color32(0, 0, 0, sMenuBlackAlpha));
+    if (sMenuTransition.alpha) {
+        const auto shade = sMenuTransition.shade;
+        C2D_DrawRectSolid(0, 0, 0.99f, 320, 240,
+                          C2D_Color32(shade, shade, shade, sMenuTransition.alpha));
+    }
     C2D_Flush();
 }
 
 void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
-    if (topTarget == nullptr || (!Mk64Settings3DSGetShowFpsEnabled() && !DrawsTopRaceHud() && !DataActive() && !UpdateIsOpen())) return;
+    if (topTarget == nullptr || !Mk64BottomUI3DSNeedsTopOverlay()) return;
     // Preserve the completed game color buffer and clear only reverse-depth so
     // the overlay cannot be hidden behind scene geometry.
     // Split the queued lower-screen commands before clearing top depth.
@@ -2075,10 +2080,12 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
 
 } // namespace
 
-extern "C" void Mk64BottomUI3DSSetMenuBlackAlpha(unsigned alpha) {
-    alpha = std::min(alpha, 255U);
-    if (sMenuBlackAlpha != alpha) sUi.bottomDirty = true;
-    sMenuBlackAlpha = alpha;
+extern "C" void Mk64BottomUI3DSSetMenuTransition(int logo, int title, int type,
+                                                    unsigned time, unsigned duration) {
+    const auto next = mk64_3ds::ResolveMenuTransition(logo != 0, title != 0, type, time, duration);
+    if (sMenuTransition.blankBackdrop != next.blankBackdrop || sMenuTransition.shade != next.shade ||
+        sMenuTransition.alpha != next.alpha) sUi.bottomDirty = true;
+    sMenuTransition = next;
 }
 
 extern "C" bool Mk64BottomUI3DSInit() {
@@ -2292,7 +2299,7 @@ extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
     // to release before issuing any new Citro2D commands.
     DrainRetiredTextures();
     Mk64BottomUI3DSRecordPresentation();
-    const bool drawTopFps = Mk64Settings3DSGetShowFpsEnabled() || DrawsTopRaceHud() || DataActive() || UpdateIsOpen();
+    const bool drawTopFps = Mk64BottomUI3DSNeedsTopOverlay();
     if (!sUi.bottomDirty && !drawTopFps) return;
     if (sUi.bottomDirty) {
         DrawBottomBatch();
@@ -2358,11 +2365,13 @@ extern "C" void Mk64BottomUI3DSRecordPresentation() {
     UpdateFpsCounter();
 }
 
+extern "C" bool Mk64BottomUI3DSNeedsTopOverlay() {
+    return sUi.initialized && (Mk64Settings3DSGetShowFpsEnabled() || DrawsTopRaceHud() ||
+                              DataActive() || UpdateIsOpen());
+}
+
 extern "C" void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget) {
-    if (!sUi.initialized || existingTopTarget == nullptr ||
-        (!Mk64Settings3DSGetShowFpsEnabled() && !DrawsTopRaceHud())) {
-        return;
-    }
+    if (!Mk64BottomUI3DSNeedsTopOverlay() || existingTopTarget == nullptr) return;
     DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
 }
 
