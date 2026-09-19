@@ -34,6 +34,7 @@ class ReadAheadFile {
         if (file) std::fclose(file);
         cached.clear(); cachedBytes = 0;
         resident.reset();
+        EndBulkRead();
         file = nullptr; size = position = readCalls = readBytes = 0; next = 0;
         for (auto& page : pages) page.valid = 0;
     }
@@ -42,6 +43,13 @@ class ReadAheadFile {
     std::uint64_t ReadBytes() const { return readBytes; }
     void CloseBackingFile() { if (file) std::fclose(file); file = nullptr; cached.clear(); cachedBytes = 0; }
     bool IsResident() const { return resident != nullptr; }
+    // Startup walks tens of thousands of tiny ZIP entries. Amortize SD IPC
+    // with one temporary large page while keeping compact payload residency.
+    void BeginBulkRead() {
+        bulk.reset(new (std::nothrow) unsigned char[kBulkSize]);
+        bulkValid = 0;
+    }
+    void EndBulkRead() { bulk.reset(); bulkValid = 0; }
     // Commit only after a complete sequential read. Closing the SD handle is
     // deliberate: successful residency cannot silently fall back to disk.
     bool MakeResident(std::size_t budget, void (*progress)(unsigned) = nullptr) {
@@ -67,6 +75,24 @@ class ReadAheadFile {
         if (resident) {
             std::memcpy(destination, resident.get() + offset, length);
             return length;
+        }
+        if (bulk) {
+            auto* out = static_cast<unsigned char*>(destination);
+            std::size_t done = 0;
+            while (done < length) {
+                const auto at = offset + done;
+                if (bulkValid == 0 || at < bulkOffset || at - bulkOffset >= bulkValid) {
+                    bulkOffset = at;
+                    bulkValid = ReadDirect(at, bulk.get(), static_cast<std::size_t>(
+                        std::min<std::uint64_t>(kBulkSize, size - at)));
+                    if (bulkValid == 0) break;
+                }
+                const auto within = static_cast<std::size_t>(at - bulkOffset);
+                const auto count = std::min(length - done, bulkValid - within);
+                std::memcpy(out + done, bulk.get() + within, count);
+                done += count;
+            }
+            return done;
         }
         auto range = std::upper_bound(cached.begin(), cached.end(), offset,
             [](std::uint64_t at, const CachedRange& item) { return at < item.offset; });
@@ -129,6 +155,10 @@ class ReadAheadFile {
     std::vector<CachedRange> cached;
     std::unique_ptr<unsigned char[]> resident;
     std::size_t cachedBytes = 0;
+    static constexpr std::size_t kBulkSize = 256u * 1024u;
+    std::unique_ptr<unsigned char[]> bulk;
+    std::uint64_t bulkOffset = 0;
+    std::size_t bulkValid = 0;
   private:
     ReadAheadFile(const ReadAheadFile&) = delete;
     ReadAheadFile& operator=(const ReadAheadFile&) = delete;

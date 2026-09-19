@@ -9,6 +9,9 @@
 #include "bottom_ui_3ds.h"
 #include "resource_runtime_3ds.h"
 #include "ram_log_3ds.hpp"
+#include "native_geometry_3ds.hpp"
+#include "native_lighting_3ds.h"
+#include "fast3d_reuse_3ds.hpp"
 #include <citro3d.h>
 extern "C" void Mk64Perf3DSLogFlush(uint64_t);
 
@@ -614,6 +617,25 @@ void WriteQuickDump(const char* trigger, bool fullMemory) {
                      static_cast<unsigned long>(gMk64DistanceFogBypassed3DS),
                      static_cast<unsigned long>(gMk64DistanceFogBinds3DS));
         std::fprintf(info, "Data cache clean path: %s\n", Mk64System3DSDataCacheMode());
+        const auto& native = mk64_3ds::gNativeGeometry3DS.counters;
+        const auto& reuse = mk64_3ds::gFast3DReuseStats;
+        std::fprintf(info, "Native geometry lifetime loads / CPU XY materializations / eligible triangles / state switches: %llu / %llu / %llu / %llu\n",
+                     static_cast<unsigned long long>(native.loaded),
+                     static_cast<unsigned long long>(native.materialized),
+                     static_cast<unsigned long long>(native.nativeTriangles),
+                     static_cast<unsigned long long>(native.stateSwitches));
+        std::fprintf(info, "Native geometry fallback disabled / mixed matrix / near eye / ineligible: %llu / %llu / %llu / %llu\n",
+                     static_cast<unsigned long long>(native.fallbackDisabled),
+                     static_cast<unsigned long long>(native.fallbackMixedMatrix),
+                     static_cast<unsigned long long>(native.fallbackNearEye),
+                     static_cast<unsigned long long>(native.fallbackIneligible));
+        std::fprintf(info, "Native lighting lifetime loads / CPU materializations / eligible triangles: %llu / %llu / %llu\n",
+                     static_cast<unsigned long long>(gMk64NativeLightLoaded3DS),
+                     static_cast<unsigned long long>(gMk64NativeLightMaterialized3DS),
+                     static_cast<unsigned long long>(gMk64NativeLightTriangles3DS));
+        std::fprintf(info, "Exact reuse matrix hits / misses / depth block hits / misses: %lu / %lu / %lu / %lu\n",
+                     static_cast<unsigned long>(reuse.matrixHits), static_cast<unsigned long>(reuse.matrixMisses),
+                     static_cast<unsigned long>(reuse.positionHits), static_cast<unsigned long>(reuse.positionMisses));
         std::fprintf(info, "Audio missing envelopes silenced: %u\n",
                      __atomic_load_n(&gMk64AudioMissingEnvelope3DS, __ATOMIC_RELAXED));
         std::fprintf(info, "Captured Citro2D linear span: %lu bytes\n",

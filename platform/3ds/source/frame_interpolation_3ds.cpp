@@ -14,9 +14,9 @@
 // That allocator-heavy implementation exhausted the Old 3DS during v0.11.
 // The 3DS port only needs the final matrices consumed by Fast3D, so keep two
 // bounded recordings and match them by stable render scopes. Their storage is
-// allocated once only when the New-3DS 400 px presentation mode is active, so
-// Old 3DS does not pay the roughly 330 KiB BSS cost. The frame path itself
-// performs no node allocations.
+// allocated once for adaptive presentation on either model. Recording is
+// suspended while the required image has no measured CPU/GPU headroom.
+// The frame path itself performs no node allocations.
 namespace {
 
 constexpr size_t kMaxRecordedMatrices = 2048;
@@ -589,8 +589,20 @@ bool check_if_recording() {
     return sEnabled && sRecording;
 }
 
+extern "C" bool Mk64Graphics3DSHasInterpolationHeadroom() __attribute__((weak));
+
 void FrameInterpolation_StartRecord() {
     if (!sEnabled) {
+        return;
+    }
+    if (Mk64Graphics3DSHasInterpolationHeadroom != nullptr &&
+        !Mk64Graphics3DSHasInterpolationHeadroom()) {
+        // Avoid recording optional matrices while the mandatory image is
+        // already too costly. Two fresh recordings are required on recovery.
+        sStorage->frames[0].count = sStorage->frames[1].count = 0;
+        sPreparedActive = false;
+        sRecording = false;
+        sScopeDepth = 0;
         return;
     }
     sPreviousFrame = sCurrentFrame;

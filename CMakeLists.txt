@@ -1087,6 +1087,14 @@ void render_menus(MenuItem* arg0) {
     if(NOT SPAGHETTIKART_3DS_MENU_ITEMS_TEXT MATCHES "extern bool Mk64BottomUI3DSIsUpdateOpen")
         message(FATAL_ERROR "The upstream updater background render point changed")
     endif()
+    # Coalesce first-run EEPROM repairs without deferring normal game saves.
+    string(FIND "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}" "            load_save_data();" MK64_SAVE_INIT_ANCHOR)
+    if(MK64_SAVE_INIT_ANCHOR EQUAL -1)
+        message(FATAL_ERROR "The upstream initial save load changed")
+    endif()
+    string(REPLACE "            load_save_data();"
+        "            extern void Mk64LoadSaveData3DS(void);\n            Mk64LoadSaveData3DS();"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
     include(platform/3ds/results_layout.cmake)
     # Observe both white and black startup transitions before the stock timer advances.
     string(REPLACE "void func_8009CA6C(s32 arg0) {"
@@ -3855,6 +3863,8 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
         endif()
         file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
         include(platform/3ds/triangle_math.cmake)
+        include(platform/3ds/fast3d_reuse.cmake)
+        include(platform/3ds/cmake/native_geometry_3ds.cmake)
         file(WRITE "${SPAGHETTIKART_3DS_INTERPRETER_SOURCE}" "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
 
         add_library(mk64-3ds-fast3d-interpreter STATIC
@@ -3906,6 +3916,7 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
 
         add_executable(mk64-3ds-interpreter-probe
             platform/3ds/source/interpreter_probe.cpp
+            platform/3ds/source/performance_trace_3ds.cpp
         )
         target_compile_features(mk64-3ds-interpreter-probe PRIVATE cxx_std_20)
         target_compile_definitions(mk64-3ds-interpreter-probe PRIVATE F3DEX_GBI=1)

@@ -29,7 +29,7 @@ https://discord.gg/SMW49UMkw
 * Bilinear, Blur, and CRT filters
 * Dual-screen HUD and touch controls
 * Optimized PICA200 rendering
-* Original 30 Hz simulation with adaptive New 3DS interpolation
+* Original 30 Hz simulation with adaptive frame interpolation
 * On-device ROM validation and extraction
 * Diagnostic dumps with `SELECT`
 
@@ -37,8 +37,8 @@ Multiplayer is planned but is not currently available.
 
 ## Performance
 
-Mario Kart 64 retains its original 30 Hz game simulation. On New Nintendo 3DS
-systems using the 400-pixel top-screen mode, the port may render an additional
+Mario Kart 64 retains its original 30 Hz game simulation. On Old and New Nintendo
+3DS, in either supported resolution, the port may render an additional
 matrix-interpolated midpoint frame when recent frame, GPU, audio, and resource
 activity leave enough headroom. It automatically falls back to the required
 30 Hz keyframes under pressure.

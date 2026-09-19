@@ -76,6 +76,8 @@ std::atomic<bool> sWorkerRunning{ false };
 std::atomic<bool> sJobOutstanding{ false };
 std::atomic<bool> sLastJobQueued{ false };
 std::atomic<uint32_t> sLastJobMicroseconds{ 0 };
+std::atomic<uint32_t> sLastJobBlocks{ 0 };
+std::atomic<bool> sRenderWindowOpen{ false };
 std::atomic<bool> sPaused{ false };
 std::atomic<uint16_t> sVolumePercent{ 100 };
 int sWorkerCore = -1;
@@ -221,12 +223,27 @@ void AudioWorkerMain(void*) {
         // worker consumes them, and the main thread waits for completion
         // before beginning the next logic tick, so libultraship's emulated
         // N64 message queues are never accessed concurrently across ticks.
-        const auto synthesisStart = mk64_3ds::PerformanceNow();
-        sLastJobQueued.store(
-            SynthesizeAndQueue(sVolumePercent.load(std::memory_order_relaxed)),
-            std::memory_order_release);
-        sLastJobMicroseconds.store(static_cast<uint32_t>(
-            mk64_3ds::PerformanceNow() - synthesisStart), std::memory_order_relaxed);
+        uint32_t blocks = 0;
+        uint32_t synthesisUs = 0;
+        bool queued = true;
+        // The main thread only renders until WaitForWorkerJob closes this
+        // window. Keep feeding NDSP throughout a long render, instead of
+        // returning after one block and starving while the CPU is still busy.
+        do {
+            if (NeedsSynthesis()) {
+                const auto start = mk64_3ds::PerformanceNow();
+                queued = SynthesizeAndQueue(sVolumePercent.load(std::memory_order_relaxed));
+                synthesisUs += static_cast<uint32_t>(mk64_3ds::PerformanceNow() - start);
+                if (!queued) break;
+                ++blocks;
+            } else if (sRenderWindowOpen.load(std::memory_order_acquire)) {
+                svcSleepThread(1000000LL);
+            }
+        } while (sRenderWindowOpen.load(std::memory_order_acquire) &&
+                 sWorkerRunning.load(std::memory_order_acquire));
+        sLastJobBlocks.store(blocks, std::memory_order_relaxed);
+        sLastJobQueued.store(queued, std::memory_order_release);
+        sLastJobMicroseconds.store(synthesisUs, std::memory_order_relaxed);
         LightEvent_Signal(&sWorkerDone);
     }
 }
@@ -287,7 +304,7 @@ bool StartAudioWorker() {
     return true;
 }
 
-bool ScheduleWorkerJob() {
+bool ScheduleWorkerJob(bool duringRender = false) {
     if (sWorkerThread == nullptr || !sWorkerRunning.load(std::memory_order_acquire) ||
         sPaused.load(std::memory_order_acquire)) {
         return false;
@@ -298,11 +315,13 @@ bool ScheduleWorkerJob() {
     }
     sVolumePercent.store(Mk64Settings3DSGetMasterVolumePercent(), std::memory_order_relaxed);
     sLastJobQueued.store(false, std::memory_order_relaxed);
+    sRenderWindowOpen.store(duringRender, std::memory_order_release);
     LightEvent_Signal(&sWorkerStart);
     return true;
 }
 
 bool WaitForWorkerJob() {
+    sRenderWindowOpen.store(false, std::memory_order_release);
     if (!sJobOutstanding.load(std::memory_order_acquire)) return true;
     {
         mk64_3ds::PerformanceTimer timer(mk64_3ds::PerformanceCurrent().audio_wait_us);
@@ -344,11 +363,11 @@ extern "C" void Mk64GameAudio3DSSetPaused(bool paused) {
 }
 
 extern "C" void Mk64GameAudio3DSBeginFrame() {
-    if (!sReady || sPaused.load(std::memory_order_acquire) || !NeedsSynthesis()) return;
+    if (!sReady || sPaused.load(std::memory_order_acquire)) return;
     // Starting immediately before the display-list interpreter overlaps the
     // expensive mixer with CPU/GPU rendering instead of appending it to the
     // critical path after every rendered frame.
-    ScheduleWorkerJob();
+    ScheduleWorkerJob(true);
 }
 
 extern "C" void Mk64GameAudio3DSPump() {
@@ -367,7 +386,8 @@ extern "C" void Mk64GameAudio3DSPump() {
 
     const bool jobWasStartedDuringRender = sJobOutstanding.load(std::memory_order_acquire);
     const bool renderJobQueued = !jobWasStartedDuringRender || WaitForWorkerJob();
-    uint32_t synthesizedThisPump = jobWasStartedDuringRender && renderJobQueued ? 1u : 0u;
+    uint32_t synthesizedThisPump = jobWasStartedDuringRender
+        ? sLastJobBlocks.load(std::memory_order_relaxed) : 0u;
     if (sPaused.load(std::memory_order_acquire)) {
         FinishPumpTelemetry(bufferedBefore, synthesizedThisPump, false);
         return;
@@ -445,6 +465,7 @@ extern "C" void Mk64GameAudio3DSAbortForProcessExit() {
     // new work and wake the worker, then let _Exit release process-owned
     // services and memory without waiting on either endpoint.
     sPaused.store(true, std::memory_order_release);
+    sRenderWindowOpen.store(false, std::memory_order_release);
     sWorkerRunning.store(false, std::memory_order_release);
     if (sWorkerThread != nullptr) {
         LightEvent_Signal(&sWorkerStart);

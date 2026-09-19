@@ -157,6 +157,11 @@ bool O2rArchiveReader::MakeResident(std::size_t budget, void (*progress)(unsigne
         }
         std::unique_ptr<uint8_t[]> data(new (std::nothrow) uint8_t[std::max<size_t>(1, total)]);
         if (!data) return false;
+        struct BulkReadScope {
+            ReadAheadFile& file;
+            explicit BulkReadScope(ReadAheadFile& value) : file(value) { file.BeginBulkRead(); }
+            ~BulkReadScope() { file.EndBulkRead(); }
+        } bulkRead(mImpl->file);
         if (progress) progress(0);
         for (size_t i = 0; i < count; ++i) {
             const size_t length = (i + 1 < count ? offsets[i + 1] : total) - offsets[i];

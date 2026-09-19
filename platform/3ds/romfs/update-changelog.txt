@@ -1,16 +1,23 @@
 ## Changelog
 
-- Fixed the red lower screen during the Nintendo logo.
-- Removed menu labels and race HUD text behind the Update changelog.
-- Preserved the synchronized white startup transition and current backgrounds.
-- Fixed access to the updater certificate and bundled offline release notes.
-- Kept the race scene above and the current course background below in Update.
-- Fixed changelog flicker during intermediate presentations.
-- Added centered page numbering with L and R at the sides.
-- Synchronized the white Nintendo-to-title transition on both screens.
+Changes since v1.5.
 
-- Added Update below Close Options in Options - Game, and in the pause menu.
-- Stable and Experimental channels with version checks, download progress and confirmation before installation.
-- Updates verify HTTPS, size and SHA-256. CIA updates also verify the title ID before installation.
-- CIA and complete 3DSX updates preserve game data, saves and settings.
-- The lower screen stays black during Nintendo before both screens fade through white to the title.
+- Show instantaneous FPS from consecutive presented images in the corner counter.
+- Add a touch-adjustable volume slider matching the render slider.
+- Allow adaptive interpolation on Old and New 3DS in both supported resolutions.
+- Skip interpolation recording when CPU or GPU work exceeds its budget.
+- Batch O2R startup reads while retaining compact RAM residency and CRC checks.
+- Avoid repeated black-screen redraws during loading.
+- Combine initial EEPROM repairs into one atomic save and skip unchanged writes.
+- Refill audio throughout long rendering work, with a barrier before game logic resumes.
+- Restore early CPU face rejection before texture processing and vertex submission.
+- Avoid renderer state changes for rejected triangles and cache copies for small vertex loads.
+- Add eligible GPU vertex transforms and directional lighting with CPU compatibility paths.
+- Add bounded matrix and vertex-depth reuse, faster command dispatch, and diagnostic counters.
+- Fix the red lower screen during the Nintendo logo and synchronize the white title transition.
+- Remove menu labels and race HUD text behind the Update changelog.
+- Fix updater certificates, offline notes, flicker, backgrounds, and page navigation.
+- Add Update below Close Options with the native Mario Kart menu font.
+- Add Stable and Experimental channels with verified CIA/3DSX updates and installation confirmation.
+
+The original 30 Hz simulation is preserved. Presentation is adaptive up to the 60 Hz display limit. E5 physical-console performance and compatibility remain unverified.
