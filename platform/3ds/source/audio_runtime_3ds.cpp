@@ -40,6 +40,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 
 extern "C" void create_next_audio_buffer(int16_t* samples, uint32_t sampleCount);
 
@@ -61,6 +62,7 @@ constexpr size_t kAudioWorkerStackSize = 64u * 1024u;
 constexpr int32_t kAudioWorkerPriority = 0x18;
 
 bool sReady = false;
+bool sSuspended = false;
 uint32_t sSynthesisBlockCount = 0;
 uint32_t sPumpCallCount = 0;
 uint32_t sMultiBlockPumpCount = 0;
@@ -255,6 +257,24 @@ void RestoreCpuLimit() {
     }
 }
 
+// Stop the producer before APT hands DSP/GPU ownership to HOME. Never free
+// its stack or restore the shared-core budget while the thread is alive.
+void StopAudioWorker() {
+    sRenderWindowOpen.store(false, std::memory_order_release);
+    sWorkerRunning.store(false, std::memory_order_release);
+    if (sWorkerThread != nullptr) {
+        LightEvent_Signal(&sWorkerStart);
+        if (R_FAILED(threadJoin(sWorkerThread, 500ULL * 1000ULL * 1000ULL))) {
+            svcExitProcess();
+        }
+        threadFree(sWorkerThread);
+        sWorkerThread = nullptr;
+    }
+    sJobOutstanding.store(false, std::memory_order_release);
+    sWorkerCore = -1;
+    RestoreCpuLimit();
+}
+
 bool StartAudioWorker() {
     const bool isNewModel = Mk64Graphics3DSResolvedPerformanceProfile() ==
                             MK64_PERFORMANCE_PROFILE_NEW_3DS;
@@ -276,6 +296,10 @@ bool StartAudioWorker() {
                 RestoreCpuLimit();
                 continue;
             }
+            char checkpoint[80];
+            snprintf(checkpoint, sizeof(checkpoint), "audio-core1-limit-%lu-previous-%lu",
+                     static_cast<unsigned long>(actual), static_cast<unsigned long>(sPreviousCpuLimit));
+            Mk64Diagnostics3DSCheckpoint(checkpoint);
             sWorkerCore = 1;
             break;
         }
@@ -336,6 +360,7 @@ bool WaitForWorkerJob() {
 }
 
 extern "C" bool Mk64GameAudio3DSInit() {
+    sSuspended = false;
     sReady = Mk64Audio3DSInit(kSampleRate);
     if (sReady) {
         sSynthesisBlockCount = 0;
@@ -362,8 +387,22 @@ extern "C" void Mk64GameAudio3DSSetPaused(bool paused) {
     }
 }
 
+extern "C" void Mk64GameAudio3DSSuspend() {
+    if (!sReady || sSuspended) return;
+    sSuspended = true;
+    StopAudioWorker();
+    Mk64Audio3DSSetPaused(true);
+}
+
+extern "C" void Mk64GameAudio3DSResume() {
+    if (!sReady || !sSuspended) return;
+    sSuspended = false;
+    StartAudioWorker();
+    Mk64Audio3DSSetPaused(sPaused.load(std::memory_order_acquire));
+}
+
 extern "C" void Mk64GameAudio3DSBeginFrame() {
-    if (!sReady || sPaused.load(std::memory_order_acquire)) return;
+    if (!sReady || sSuspended || sPaused.load(std::memory_order_acquire)) return;
     // Starting immediately before the display-list interpreter overlaps the
     // expensive mixer with CPU/GPU rendering instead of appending it to the
     // critical path after every rendered frame.
@@ -433,18 +472,10 @@ extern "C" void Mk64GameAudio3DSPump() {
 }
 
 extern "C" void Mk64GameAudio3DSShutdown() {
-    if (sWorkerThread != nullptr) {
-        WaitForWorkerJob();
-        sWorkerRunning.store(false, std::memory_order_release);
-        LightEvent_Signal(&sWorkerStart);
-        threadJoin(sWorkerThread, U64_MAX);
-        threadFree(sWorkerThread);
-        sWorkerThread = nullptr;
-    }
-    sWorkerCore = -1;
-    RestoreCpuLimit();
+    StopAudioWorker();
     Mk64Audio3DSShutdown();
     sReady = false;
+    sSuspended = false;
     sSynthesisBlockCount = 0;
     sPumpCallCount = 0;
     sMultiBlockPumpCount = 0;
@@ -472,7 +503,9 @@ extern "C" void Mk64GameAudio3DSAbortForProcessExit() {
         if (R_SUCCEEDED(threadJoin(sWorkerThread, 250ULL * 1000ULL * 1000ULL))) {
             threadFree(sWorkerThread);
         } else {
-            threadDetach(sWorkerThread);
+            // The kernel terminates every thread together. A detached producer
+            // could otherwise touch its stack after libctru unmaps the heap.
+            svcExitProcess();
         }
         sWorkerThread = nullptr;
     }

@@ -28,6 +28,7 @@ void Mk64Graphics3DSSuppressNextPresentation(bool suppress);
 void Mk64Graphics3DSResumeAfterDiagnosticPause(void);
 void Mk64Graphics3DSSetExternalLinearBufferRange(const void* address, size_t size);
 void Mk64Graphics3DSMarkExternalLinearBuffersDirty(void);
+void Mk64Graphics3DSPollEvents(void);
 
 #ifdef __cplusplus
 }

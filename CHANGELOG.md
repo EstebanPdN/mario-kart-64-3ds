@@ -1,9 +1,18 @@
 # Changelog
 
-## v1.6-E6
+## v1.6-E7
 
 Changes since v1.5.
 
+- Default to 1.0 render scale on both Old and New 3DS.
+- Clean the actual HUD buffer allocations instead of the gaps between them.
+- Move texture scaling and tile clamping to the GPU vertex shader.
+- Service HOME before starting game logic and audio rendering work.
+- Stop the audio producer and release its shared-core reservation during suspension.
+- Restart audio and reset presentation timing after returning from HOME or sleep.
+- Suspend diagnostic input polling while the application is inactive.
+- Bound shutdown waits and prevent live worker stacks from being freed on timeout.
+- Record startup stages, shared-core reservations, vertex packing and HUD cache costs.
 - Fix Old 3DS startup aborts caused by mandatory archive RAM residency.
 - Keep optional interpolation storage out of the ordinary archive heap.
 - Load compressed resources in small blocks to tolerate heap fragmentation.
@@ -28,7 +37,7 @@ Changes since v1.5.
 - Add Update below Close Options with the native Mario Kart menu font.
 - Add Stable and Experimental channels with verified CIA/3DSX updates and installation confirmation.
 
-The game simulation remains at 30 Hz; adaptive presentation can reach the 60 Hz display limit when workload permits. E6 performance and compatibility still require physical-console validation.
+The game simulation remains at 30 Hz; adaptive presentation can reach the 60 Hz display limit when workload permits. E7 performance and compatibility still require physical-console validation.
 
 ## v1.5
 

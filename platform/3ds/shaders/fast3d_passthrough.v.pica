@@ -4,6 +4,7 @@
 
 .fvec projection[4]
 .fvec distanceFog[1]
+.fvec textureScale, textureClamp
 .bool nativeGeometryEnabled
 .bool nativeLightingEnabled
 .fvec nativeMatrix[4], nativeAspect
@@ -46,8 +47,12 @@
     min r0.z, shaderConstants.y, r0.z
     max r0.z, r0.z, -r0.w
     mov outpos, r0
-    mov outtc0, intex0
-    mov outtc1, intex1
+    ; Texture dimensions and tile clamps are draw state, not CPU vertex work.
+    min r6.xy, textureClamp, intex0
+    min r6.zw, textureClamp, intex1.xyxy
+    mul r6, textureScale, r6
+    mov outtc0.xy, r6
+    mov outtc1.xy, r6.zwzw
     ; Perspective w is eye-space distance in the game cameras. Generate a
     ; third texture coordinate without increasing the packed vertex size.
     mov r1, shaderConstants.yyyy

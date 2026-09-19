@@ -48,6 +48,7 @@ constexpr uint64_t kRuntimeFlushIntervalMilliseconds = 15000;
 std::atomic<bool> sRunning{ false };
 std::atomic<bool> sInputReady{ false };
 std::atomic<bool> sDumpPaused{ false };
+std::atomic<bool> sAptSuspended{ false };
 std::atomic<unsigned> sDumpRequest{ 0 };
 std::atomic<uint32_t> sKeysHeld{ 0 };
 std::atomic<uint32_t> sKeysDownLatched{ 0 };
@@ -638,7 +639,7 @@ void WriteQuickDump(const char* trigger, bool fullMemory) {
                      static_cast<unsigned long>(reuse.positionHits), static_cast<unsigned long>(reuse.positionMisses));
         std::fprintf(info, "Audio missing envelopes silenced: %u\n",
                      __atomic_load_n(&gMk64AudioMissingEnvelope3DS, __ATOMIC_RELAXED));
-        std::fprintf(info, "Captured Citro2D linear span: %lu bytes\n",
+        std::fprintf(info, "Captured Citro2D allocation bytes: %lu bytes\n",
                      static_cast<unsigned long>(
                          Mk64System3DSCapturedLinearAllocationSize()));
         std::fprintf(info, "Kernel / FIRM / system core: 0x%08lX / 0x%08lX / 0x%08lX\n",
@@ -705,6 +706,11 @@ void DiagnosticThread(void*) {
     bool selectWasHeld = false;
     uint64_t lastRuntimeFlush = osGetTime();
     while (sRunning.load(std::memory_order_acquire)) {
+        if (sAptSuspended.load(std::memory_order_acquire)) {
+            selectWasHeld = false;
+            svcSleepThread(16000000LL);
+            continue;
+        }
         hidScanInput();
         const uint32_t keys = hidKeysHeld();
         const uint32_t pressedKeys = hidKeysDown();
@@ -913,6 +919,10 @@ extern "C" void Mk64Diagnostics3DSEmergency(const char* reason) {
 
 extern "C" bool Mk64Diagnostics3DSOwnsHid() {
     return sRunning.load(std::memory_order_acquire);
+}
+
+extern "C" void Mk64Diagnostics3DSSetAptSuspended(bool suspended) {
+    sAptSuspended.store(suspended, std::memory_order_release);
 }
 
 extern "C" bool Mk64Diagnostics3DSIsPaused() {
