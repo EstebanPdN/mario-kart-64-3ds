@@ -33,7 +33,7 @@ constexpr Settings kDefaults = {
     false,
     MK64_HUD_LAYOUT_3DS_MKDS_2,
     400,
-    75,
+    100,
     MK64_DISPLAY_FILTER_3DS_BILINEAR,
     MK64_RENDER_DISTANCE_3DS_LOW,
     1,

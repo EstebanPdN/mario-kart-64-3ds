@@ -1,7 +1,10 @@
 #include "gfx_citro3d.h"
 #include "system_3ds.h"
+extern "C" bool Mk64System3DSCleanCapturedLinearAllocations(void) __attribute__((weak));
+extern "C" size_t Mk64System3DSCapturedLinearAllocationSize(void) __attribute__((weak));
 #include "render_policy_3ds.hpp"
 #include "gpu_command_budget_3ds.hpp"
+#include "performance_trace_3ds.hpp"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -410,6 +413,11 @@ struct GfxRenderingAPICitro3D::Impl {
     shaderProgram_s shaderProgram = {};
     int projectionUniform = -1;
     int distanceFogUniform = -1;
+    int textureScaleUniform = -1;
+    int textureClampUniform = -1;
+    std::array<float, 4> textureScaleState{};
+    std::array<float, 4> textureClampState{};
+    bool textureTransformValid = false;
     int nativeGeometryUniform = -1;
     int nativeMatrixUniform = -1;
     int nativeAspectUniform = -1;
@@ -1143,6 +1151,45 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
             textureScaleV[texture] *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
         }
     }
+    std::array<float, 4> uvScale = {textureScaleU[0], textureScaleV[0],
+                                    textureScaleU[1], textureScaleV[1]};
+    // Raw signed N64 texture coordinates, including tile shifts, are far
+    // below this exactly representable bound. Unused clamps remain inactive.
+    std::array<float, 4> uvClamp = {0x1p30f, 0x1p30f, 0x1p30f, 0x1p30f};
+    for (int texture = 0; texture < 2; ++texture) {
+        if (!program->usedTextures[texture]) continue;
+        uint8_t offset = program->textureOffsets[texture] + 2;
+        for (int axis = 0; axis < 2; ++axis)
+            if (program->clamp[texture][axis]) uvClamp[texture * 2 + axis] = drawVertices[offset++];
+    }
+    // A batch can retain per-vertex tile bounds across a tile-state change.
+    // Such batches preserve CPU clamping; one uniform must not replace them.
+    bool uniformClamps = true;
+    for (int texture = 0; texture < 2 && uniformClamps; ++texture) {
+        if (!program->usedTextures[texture]) continue;
+        uint8_t offset = program->textureOffsets[texture] + 2;
+        for (int axis = 0; axis < 2 && uniformClamps; ++axis) {
+            if (!program->clamp[texture][axis]) continue;
+            for (size_t vertex = 1; vertex < vertexCount; ++vertex)
+                if (drawVertices[vertex * program->strideFloats + offset] != uvClamp[texture * 2 + axis]) {
+                    uniformClamps = false;
+                    break;
+                }
+            ++offset;
+        }
+    }
+    if (!uniformClamps) uvClamp.fill(0x1p30f);
+    if (!mImpl->textureTransformValid || mImpl->textureScaleState != uvScale ||
+        mImpl->textureClampState != uvClamp) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureScaleUniform,
+                     uvScale[0], uvScale[1], uvScale[2], uvScale[3]);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureClampUniform,
+                     uvClamp[0], uvClamp[1], uvClamp[2], uvClamp[3]);
+        mImpl->textureScaleState = uvScale;
+        mImpl->textureClampState = uvClamp;
+        mImpl->textureTransformValid = true;
+    }
+    const auto packStarted = mk64_3ds::PerformanceNow();
     for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
         const float* source = drawVertices + vertex * program->strideFloats;
         PackedVertex& destination = mImpl->packedVertices[firstVertex + vertex];
@@ -1158,15 +1205,11 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                 const uint8_t textureOffset = program->textureOffsets[texture];
                 u = source[textureOffset];
                 v = source[textureOffset + 1];
-                uint8_t clampOffset = textureOffset + 2;
-                if (program->clamp[texture][0]) {
-                    u = std::min(u, source[clampOffset++]);
+                if (!uniformClamps) {
+                    uint8_t offset = textureOffset + 2;
+                    if (program->clamp[texture][0]) u = std::min(u, source[offset++]);
+                    if (program->clamp[texture][1]) v = std::min(v, source[offset]);
                 }
-                if (program->clamp[texture][1]) {
-                    v = std::min(v, source[clampOffset]);
-                }
-                u *= textureScaleU[texture];
-                v *= textureScaleV[texture];
             }
             float* texcoord = texture == 0 ? destination.texcoord0 : destination.texcoord1;
             texcoord[0] = u;
@@ -1186,6 +1229,8 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
             destination.color[3] = 255;
         }
     }
+
+    mk64_3ds::PerformanceCurrent().vertex_pack_us += static_cast<uint32_t>(mk64_3ds::PerformanceNow() - packStarted);
 
     std::array<float, 4> grayscaleColor = { 1.0f, 1.0f, 1.0f, 0.0f };
     if (program->grayscale) {
@@ -1525,9 +1570,12 @@ void GfxRenderingAPICitro3D::PresentSceneToTopTarget() {
     mImpl->activeTarget = mImpl->topTarget;
 
     C3D_BindProgram(&mImpl->shaderProgram);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureScaleUniform, 1, 1, 1, 1);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureClampUniform, 0x1p30f, 0x1p30f, 0x1p30f, 0x1p30f);
     C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeGeometryUniform, false);
     C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeLightingUniform, false);
     mImpl->nativeVertexStateDirty = true;
+    mImpl->textureTransformValid = false;
     C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
     AttrInfo_Init(attributeInfo);
     AttrInfo_AddLoader(attributeInfo, 0, GPU_FLOAT, 4);
@@ -1678,6 +1726,7 @@ void GfxRenderingAPICitro3D::RestoreFast3DState() {
     mImpl->distanceFogTextureBound = false;
     C3D_BindProgram(&mImpl->shaderProgram);
     mImpl->nativeVertexStateDirty = true;
+    mImpl->textureTransformValid = false;
 
     C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
     AttrInfo_Init(attributeInfo);
@@ -1832,6 +1881,8 @@ void GfxRenderingAPICitro3D::Init() {
     shaderProgramSetVsh(&mImpl->shaderProgram, &mImpl->shaderBinary->DVLE[0]);
     C3D_BindProgram(&mImpl->shaderProgram);
     mImpl->projectionUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "projection");
+    mImpl->textureScaleUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "textureScale");
+    mImpl->textureClampUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "textureClamp");
     mImpl->distanceFogUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "distanceFog");
     mImpl->nativeGeometryUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeGeometryEnabled");
     mImpl->nativeMatrixUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeMatrix");
@@ -1840,7 +1891,8 @@ void GfxRenderingAPICitro3D::Init() {
     mImpl->nativeLightDirectionUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightDirection");
     mImpl->nativeLightDiffuseUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightDiffuse");
     mImpl->nativeLightAmbientUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightAmbient");
-    if (mImpl->projectionUniform < 0 || mImpl->distanceFogUniform < 0 ||
+    if (mImpl->textureScaleUniform < 0 || mImpl->textureClampUniform < 0 ||
+        mImpl->projectionUniform < 0 || mImpl->distanceFogUniform < 0 ||
         mImpl->nativeGeometryUniform < 0 || mImpl->nativeMatrixUniform < 0 ||
         mImpl->nativeAspectUniform < 0 || mImpl->nativeLightingUniform < 0 ||
         mImpl->nativeLightDirectionUniform < 0 || mImpl->nativeLightDiffuseUniform < 0 ||
@@ -1969,7 +2021,7 @@ void GfxRenderingAPICitro3D::EndFrame() {
     // Citro3D's default C3D_FrameEnd(0) path asks the GSP sysmodule to flush
     // the entire linear heap. Citro2D's vertex and index allocations are
     // captured during its initialization, so normal UI frames can clean only
-    // that bounded span and avoid both the broad scan and the blocking service
+    // those allocations, excluding fragmented holes, and avoid the broad scan and service
     // round trip.
     const void* linearCleanBase = mImpl->externalLinearBufferBase;
     size_t linearCleanSize = mImpl->externalLinearBufferSize;
@@ -1978,8 +2030,18 @@ void GfxRenderingAPICitro3D::EndFrame() {
             reinterpret_cast<void*>(static_cast<uintptr_t>(__ctru_linear_heap));
         linearCleanSize = __ctru_linear_heap_size;
     }
-    const bool linearHeapClean = !needsLinearHeapFlush ||
+    const auto cleanStarted = mk64_3ds::PerformanceNow();
+    const bool capturedClean = needsLinearHeapFlush &&
+        Mk64System3DSCleanCapturedLinearAllocations != nullptr &&
+        Mk64System3DSCleanCapturedLinearAllocations();
+    const bool linearHeapClean = !needsLinearHeapFlush || capturedClean ||
         Mk64System3DSCleanDataCache(linearCleanBase, linearCleanSize);
+    if (needsLinearHeapFlush) {
+        mk64_3ds::PerformanceCurrent().ui_clean_us += static_cast<uint32_t>(mk64_3ds::PerformanceNow() - cleanStarted);
+        mk64_3ds::PerformanceCurrent().ui_clean_bytes +=
+            capturedClean && Mk64System3DSCapturedLinearAllocationSize != nullptr ?
+            Mk64System3DSCapturedLinearAllocationSize() : linearCleanSize;
+    }
     // If both direct and fallback cleaning unexpectedly failed, retain
     // Citro3D's established full-heap path as a final correctness fallback.
     C3D_FrameEnd(linearHeapClean ? GX_CMDLIST_FLUSH : 0);

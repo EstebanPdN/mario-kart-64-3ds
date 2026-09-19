@@ -414,6 +414,10 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sLastPerformanceSampleFrame = 0;
 }
 
+extern "C" void Mk64Graphics3DSPollEvents(void) {
+    if (sInterpreter != nullptr) sInterpreter->HandleWindowEvents();
+}
+
 extern "C" void Graphics_PushFrame(Gfx* commands) {
     if (commands == nullptr || sInterpreter == nullptr || sWindow == nullptr) {
         return;
@@ -421,8 +425,8 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     auto& perf = mk64_3ds::PerformanceCurrent();
     mk64_3ds::PerformanceTimer graphicsTimer(perf.graphics_us);
     // The audio runtime may dispatch synthesis to a worker here. Keep the
-    // weak hook before event/frame-readiness early returns so every valid game
-    // frame offers exactly one opportunity to overlap synthesis with graphics.
+    // weak hook runs after the main loop has handled APT events, so HOME can
+    // never suspend the process with this render window left open.
     if (Mk64GameAudio3DSBeginFrame != nullptr) {
         Mk64GameAudio3DSBeginFrame();
     }
@@ -433,7 +437,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     Mk64Diagnostics3DSSetDisplayList(commands, listBytes);
     Mk64Diagnostics3DSSetStage("renderer-frame-start");
     SetRendererStage("renderer-window-events");
-    sInterpreter->HandleWindowEvents();
+    if (!sWindow->IsRunning()) return;
     const bool suppressPresentation = sSuppressNextPresentation;
     sSuppressNextPresentation = false;
     // When optional midpoints are active, recover a half-tick of lateness by

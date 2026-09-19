@@ -6,7 +6,7 @@
 
 namespace mk64_3ds {
 // Fixed storage, single game-thread writer. No allocations or SD writes in
-// the measured path. Each 256-tick window remains below 72 KiB on Old 3DS too.
+// the measured path. Each 256-tick window remains below 80 KiB on Old 3DS too.
 // A second window retains the start of the latest race after the rolling one wraps.
 #define MK64_PERF_FIELDS(X) \
     X(tick) X(epoch) X(interval_us) X(total_us) X(prepare_us) X(iteration_us) \
@@ -20,7 +20,8 @@ namespace mk64_3ds {
     X(log_flushes) X(log_flush_us) X(scale) X(distance) X(layout) X(profile) X(width) X(filter) \
     X(interp_result) X(interp_current) X(interp_previous) X(interp_matched) X(interp_total) X(interp_flags) \
     X(game_state) X(race_state) X(course_timer_ms) \
-    X(audio_synth_us) X(audio_wait_us) X(audio_blocks) X(catchup_key) X(sync_grace)
+    X(audio_synth_us) X(audio_wait_us) X(audio_blocks) X(catchup_key) X(sync_grace) \
+    X(vertex_pack_us) X(ui_clean_us) X(ui_clean_bytes)
 struct PerformanceTick {
     std::uint64_t start_us = 0;
 #define MK64_PERF_MEMBER(name) std::uint32_t name = 0;
@@ -45,7 +46,7 @@ template <std::size_t Capacity> class PerformanceHistory {
     std::size_t next = 0;
     std::size_t count = 0;
 };
-static_assert(sizeof(PerformanceHistory<256>) + sizeof(PerformanceTick) < 72 * 1024);
+static_assert(sizeof(PerformanceHistory<256>) + sizeof(PerformanceTick) < 80 * 1024);
 PerformanceTick& PerformanceCurrent();
 std::uint64_t PerformanceNow();
 void PerformanceBegin();

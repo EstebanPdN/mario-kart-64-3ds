@@ -9,6 +9,8 @@ extern "C" {
 bool Mk64GameAudio3DSInit(void);
 void Mk64GameAudio3DSSetPaused(bool paused);
 void Mk64GameAudio3DSBeginFrame(void);
+void Mk64GameAudio3DSSuspend(void);
+void Mk64GameAudio3DSResume(void);
 void Mk64GameAudio3DSPump(void);
 void Mk64GameAudio3DSShutdown(void);
 void Mk64GameAudio3DSAbortForProcessExit(void);

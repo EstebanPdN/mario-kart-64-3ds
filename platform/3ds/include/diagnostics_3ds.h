@@ -35,6 +35,7 @@ void Mk64Diagnostics3DSAbortForProcessExit(void);
 void Mk64Diagnostics3DSEmergency(const char* reason);
 bool Mk64Diagnostics3DSOwnsHid(void);
 bool Mk64Diagnostics3DSIsPaused(void);
+void Mk64Diagnostics3DSSetAptSuspended(bool suspended);
 bool Mk64Diagnostics3DSServiceDumpIfRequested(void);
 bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input);
 bool Mk64Diagnostics3DSConsumeInput(Mk64DiagnosticsInput3DS* input);

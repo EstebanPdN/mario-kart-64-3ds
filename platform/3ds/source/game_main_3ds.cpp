@@ -51,6 +51,37 @@ uint32_t __ctru_linear_heap_size = 24 * 1024 * 1024;
 namespace {
 constexpr int32_t kLogoIntroMenu = 8;
 constexpr uint64_t kSimulationRate = 30;
+aptHookCookie sAptHook;
+bool sResumePending = false;
+void AppletTransition(APT_HookType event, void*) {
+    if (event == APTHOOK_ONSUSPEND || event == APTHOOK_ONSLEEP) {
+        Mk64Diagnostics3DSCheckpoint("apt-suspend-enter");
+        Mk64Diagnostics3DSSetAptSuspended(true);
+        Mk64GameAudio3DSSuspend();
+        Mk64Diagnostics3DSCheckpoint("apt-suspend-ready");
+        sResumePending = true;
+    }
+}
+
+void CloseServices(void*) {
+    Mk64Diagnostics3DSCheckpoint("close-updater");
+    Updater_Shutdown();
+    Mk64Diagnostics3DSCheckpoint("close-audio");
+    Mk64GameAudio3DSShutdown();
+    Mk64Diagnostics3DSCheckpoint("close-gsp");
+    gfxExit();
+    Mk64Diagnostics3DSCheckpoint("close-diagnostics");
+    Mk64Diagnostics3DSStop();
+}
+
+[[noreturn]] void CloseProcess() {
+    // Bound all potentially blocking SDK joins and service IPC as one unit.
+    // On timeout, the kernel destroys all threads without unmapping live stacks.
+    Thread closer = threadCreate(CloseServices, nullptr, 64u * 1024u, 0x30, -2, false);
+    if (closer == nullptr || R_FAILED(threadJoin(closer, 3000000000ULL))) svcExitProcess();
+    threadFree(closer);
+    std::_Exit(0);
+}
 
 void ArchiveLoadProgress(unsigned percent) {
     if (Mk64Loading3DSActive()) return;
@@ -96,9 +127,13 @@ void ArchiveLoadProgress(unsigned percent) {
 int main(int argc, char** argv) {
     std::set_terminate(TerminateHandler);
     Mk64Diagnostics3DSStart();
+    Mk64Diagnostics3DSCheckpoint("loading-screen-init");
     Mk64Loading3DSStart(nullptr);
+    Mk64Diagnostics3DSCheckpoint("loading-screen-ready");
     Mk64Settings3DSSetHardwareModel(Mk64Diagnostics3DSIsNewModel());
+    Mk64Diagnostics3DSCheckpoint("settings-load");
     Mk64Settings3DSLoad();
+    Mk64Diagnostics3DSCheckpoint("settings-ready");
     Mk64Diagnostics3DSCheckpoint("game-data-init");
     const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
     if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
@@ -223,10 +258,26 @@ int main(int argc, char** argv) {
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-ready");
 
     Updater_Init(argc > 0 ? argv[0] : nullptr);
+    aptHook(&sAptHook, AppletTransition, nullptr);
     uint64_t nextSimulationDeadline = svcGetSystemTick();
     uint64_t deadlineRemainder = 0;
     bool suppressNextPresentation = false;
     while (WindowIsRunning() && !Updater_ShouldClose()) {
+        Mk64Graphics3DSPollEvents();
+        if (!WindowIsRunning()) break;
+        if (sResumePending) {
+            // aptMainLoop has now finished restoring DSP and GPU ownership.
+            sResumePending = false;
+            Mk64GameAudio3DSResume();
+            Mk64Diagnostics3DSSetAptSuspended(false);
+            Mk64Graphics3DSResumeAfterDiagnosticPause();
+            Mk64BottomUI3DSResetFps();
+            mk64_3ds::PerformanceResume();
+            nextSimulationDeadline = svcGetSystemTick();
+            deadlineRemainder = 0;
+            suppressNextPresentation = false;
+            Mk64Diagnostics3DSCheckpoint("apt-resume-ready");
+        }
         if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
             Mk64Graphics3DSResumeAfterDiagnosticPause();
             Mk64BottomUI3DSResetFps();
@@ -260,9 +311,7 @@ int main(int argc, char** argv) {
         Mk64Graphics3DSSuppressNextPresentation(suppressNextPresentation);
         suppressNextPresentation = false;
         { mk64_3ds::PerformanceTimer timer(perf.iteration_us); thread5_iteration(); }
-        // HandleEvents() runs inside the display-list iteration and is where
-        // aptMainLoop() observes HOME -> Close Software. Do not enter the
-        // audio worker wait or frame pacer after that close request.
+        // Do not enter the audio worker or pacer if game logic closes the window.
         if (!WindowIsRunning()) break;
         Mk64Diagnostics3DSSetStage("game-loop-audio");
         { mk64_3ds::PerformanceTimer timer(perf.audio_pump_us); Mk64GameAudio3DSPump(); }
@@ -308,11 +357,8 @@ int main(int argc, char** argv) {
     // and diagnostics workers while NDSP/HID and their stacks are still mapped,
     // then keep the immediate exit that avoids GPU/resource teardown after
     // Citro3D has disabled its VBlank callbacks during the APT transition.
-    Updater_Shutdown();
-    Mk64Diagnostics3DSCheckpoint("game-loop-exit-requested");
-    Mk64GameAudio3DSShutdown();
-    Mk64Diagnostics3DSStop();
-    std::_Exit(0);
+    aptUnhook(&sAptHook);
+    CloseProcess();
 }
 
 extern "C" void userAppExit() {

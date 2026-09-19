@@ -2409,6 +2409,7 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
     if(MK64_3DS_BUILD_RENDERER_PROBE)
         add_executable(mk64-3ds-renderer-probe
             platform/3ds/source/renderer_probe.cpp
+            platform/3ds/source/performance_trace_3ds.cpp
         )
         target_compile_features(mk64-3ds-renderer-probe PRIVATE cxx_std_17)
         target_compile_options(mk64-3ds-renderer-probe PRIVATE
