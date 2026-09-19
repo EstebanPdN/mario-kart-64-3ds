@@ -8,6 +8,8 @@
 #include <unordered_map>
 
 #include "fast/backends/gfx_rendering_api.h"
+#include "native_geometry_3ds.hpp"
+#include "native_lighting_3ds.h"
 
 namespace Fast {
 
@@ -66,6 +68,10 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void SetScissor(int x, int y, int width, int height) override;
     void SetUseAlpha(bool useAlpha) override;
     void DrawTriangles(float bufVbo[], size_t bufVboLen, size_t bufVboNumTris) override;
+    bool NativeGeometryMatches(const mk64_3ds::NativeGeometryDraw* state) const;
+    void SetNativeGeometry(const mk64_3ds::NativeGeometryDraw* state);
+    bool NativeLightingMatches(const mk64_3ds::NativeLightingState* state) const;
+    void SetNativeLighting(const mk64_3ds::NativeLightingState* state);
     void Init() override;
     void OnResize() override;
     void StartFrame() override;
@@ -116,6 +122,7 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void UploadProjectionForActiveTarget();
     void PresentSceneToTopTarget();
     void RestoreFast3DState();
+    void ApplyNativeVertexState();
     float GetPresentedFps(uint64_t windowMilliseconds) const;
 
     struct Impl;

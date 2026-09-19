@@ -196,6 +196,8 @@ struct BottomUiState {
     uint64_t statusExpiresAt = 0;
     char status[64] = {};
 
+    uint64_t previousPresentationTick = 0;
+    float instantaneousFps = 0.0f;
     uint64_t fpsWindowStartedAt = 0;
     uint32_t fpsWindowFrames = 0;
     std::array<FpsSample, kFpsHistoryCount> fpsHistory = {};
@@ -207,6 +209,8 @@ struct BottomUiState {
 
 BottomUiState sUi;
 bool sRenderSliderDragging = false;
+bool sVolumeSliderDragging = false;
+bool sLoadingBlanked = false;
 mk64_3ds::MenuTransition3DS sMenuTransition;
 void OpenUpdate();
 void CloseUpdate();
@@ -1047,6 +1051,10 @@ void OpenOptions(bool fromPause) {
 
 void CloseOptions() {
     if (UpdateIsOpen()) CloseUpdate();
+    if (sVolumeSliderDragging) {
+        sVolumeSliderDragging = false;
+        SaveChangedSetting("VOLUME SAVED");
+    }
     if (sRenderSliderDragging) {
         sRenderSliderDragging = false;
         SaveChangedSetting("RENDER SCALE SAVED");
@@ -1078,6 +1086,10 @@ void DismissOptions(mk64_3ds::ModalDismissAction3DS action) {
 }
 
 void SetTab(OptionsTab tab) {
+    if (sVolumeSliderDragging) {
+        sVolumeSliderDragging = false;
+        SaveChangedSetting("VOLUME SAVED");
+    }
     if (sRenderSliderDragging) {
         sRenderSliderDragging = false;
         SaveChangedSetting("RENDER SCALE SAVED");
@@ -1228,6 +1240,11 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
                 Mk64Settings3DSSetRenderScalePercent(mk64_3ds::RenderScaleFromTouch(x));
                 sUi.bottomDirty = true;
                 sRenderSliderDragging = true;
+            } else if (sUi.tab == OptionsTab::Gameplay && row == 1) {
+                Mk64Settings3DSSetMasterVolumePercent(kVolumeSteps[
+                    (std::clamp<int>(x, 146, 246) - 146 + 10) / 20]);
+                sUi.bottomDirty = true;
+                sVolumeSliderDragging = true;
             } else {
                 ActivateSelectedRow(1);
             }
@@ -1242,6 +1259,16 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
 
 void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
     if (UpdateIsOpen()) { HandleUpdateInput(input); return; }
+    if (sVolumeSliderDragging) {
+        if (input.touchHeld) {
+            Mk64Settings3DSSetMasterVolumePercent(kVolumeSteps[
+                (std::clamp<int>(input.touchX, 146, 246) - 146 + 10) / 20]);
+            sUi.bottomDirty = true;
+        } else {
+            sVolumeSliderDragging = false;
+            SaveChangedSetting("VOLUME SAVED");
+        }
+    }
     if (sRenderSliderDragging) {
         if (input.touchHeld) {
             Mk64Settings3DSSetRenderScalePercent(mk64_3ds::RenderScaleFromTouch(input.touchX));
@@ -1300,6 +1327,12 @@ void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
 }
 
 void UpdateFpsCounter() {
+    const uint64_t tick = svcGetSystemTick();
+    if (sUi.previousPresentationTick != 0 && tick > sUi.previousPresentationTick) {
+        sUi.instantaneousFps = static_cast<float>(SYSCLOCK_ARM11) /
+            static_cast<float>(tick - sUi.previousPresentationTick);
+    }
+    sUi.previousPresentationTick = tick;
     const uint64_t now = osGetTime();
     if (sUi.fpsWindowStartedAt == 0) sUi.fpsWindowStartedAt = now;
     ++sUi.fpsWindowFrames;
@@ -1575,8 +1608,8 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
                 *label = "TURBO SPEED";
                 std::snprintf(value, valueSize, "X%u  C-STICK", Mk64Settings3DSGetTurboMultiplier());
             } else {
-                *label = "MASTER VOLUME";
-                std::snprintf(value, valueSize, "%u PCT", Mk64Settings3DSGetMasterVolumePercent());
+                *label = "VOLUME";
+                std::snprintf(value, valueSize, "%u%%", Mk64Settings3DSGetMasterVolumePercent());
             }
             break;
         case OptionsTab::Developer:
@@ -1635,14 +1668,22 @@ void DrawOptions() {
                  selected ? C2D_Color32(167, 255, 151, 255)
                           : C2D_Color32(198, 222, 210, 240),
                  C2D_AlignRight, 0.74f);
-        if (sUi.tab == OptionsTab::Screen && row == 2) {
-            // Original racing-style rail: yellow lane, eleven markers and a
+        if ((sUi.tab == OptionsTab::Screen && row == 2) ||
+            (sUi.tab == OptionsTab::Gameplay && row == 1)) {
+            // Original racing-style rail: yellow lane, step markers and a
             // red/white chequered grip. No external slider artwork is used.
             C2D_DrawRectSolid(141, y + 9, 0.75f, 110, 8, C2D_Color32(20, 20, 20, 255));
             C2D_DrawRectSolid(146, y + 12, 0.76f, 100, 2, C2D_Color32(255, 219, 66, 255));
-            for (int tick = 0; tick <= 10; ++tick)
-                C2D_DrawRectSolid(146 + tick * 10, y + 10, 0.77f, 1, 6, C2D_Color32(235, 235, 215, 255));
-            const float grip = 146 + (Mk64Settings3DSGetRenderScalePercent() - 50) * 2;
+            const bool volume = sUi.tab == OptionsTab::Gameplay;
+            const int ticks = volume ? 5 : 10;
+            for (int tick = 0; tick <= ticks; ++tick)
+                C2D_DrawRectSolid(146 + tick * (100 / ticks), y + 10, 0.77f, 1, 6, C2D_Color32(235, 235, 215, 255));
+            int position = (Mk64Settings3DSGetRenderScalePercent() - 50) * 2;
+            if (volume) {
+                for (size_t i = 0; i < kVolumeSteps.size(); ++i)
+                    if (kVolumeSteps[i] == Mk64Settings3DSGetMasterVolumePercent()) position = i * 20;
+            }
+            const float grip = 146 + position;
             C2D_DrawRectSolid(grip - 4, y + 7, 0.78f, 9, 12, C2D_Color32(235, 45, 35, 255));
             for (int cell = 0; cell < 6; ++cell)
                 if ((cell / 2 + cell % 2) % 2 == 0)
@@ -1775,8 +1816,8 @@ void DrawTopFps(C3D_RenderTarget* topTarget) {
     // Fast3D renders into the 800-wide high-density target.
     constexpr float topWidth = 400.0f;
     char fps[32] = {};
-    if (sUi.fpsHistorySize == 0) std::snprintf(fps, sizeof(fps), "FPS --");
-    else std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.currentFps);
+    if (sUi.instantaneousFps <= 0) std::snprintf(fps, sizeof(fps), "FPS --");
+    else std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.instantaneousFps);
     DrawText(fps, topWidth - 8.0f, DrawsTopRaceHud() ? mk64_3ds::TopHudFpsY(Mk64Settings3DSGetHudLayout()) : 6.0f, 0.62f,
              C2D_Color32(125, 255, 145, 255), C2D_AlignRight, 0.9f, true);
 }
@@ -2348,10 +2389,17 @@ extern "C" void Mk64BottomUI3DSShowProgress(const char* title, const char* detai
 }
 
 extern "C" void Mk64BottomUI3DSShowLoadingProgress(const char* title, const char* detail, unsigned percent) {
-    ShowProgress(title, detail, percent, Mk64Settings3DSGetShowLoadingScreens());
+    const bool artwork = Mk64Settings3DSGetShowLoadingScreens();
+    // With loading artwork disabled, one black presentation lasts until the
+    // next game image. Do not perform two GPU/VBlank waits per progress step.
+    if (!artwork && sLoadingBlanked) return;
+    ShowProgress(title, detail, percent, artwork);
+    sLoadingBlanked = !artwork;
 }
 
 extern "C" void Mk64BottomUI3DSResetFps() {
+    sUi.previousPresentationTick = 0;
+    sUi.instantaneousFps = 0;
     sUi.fpsWindowStartedAt = 0;
     sUi.fpsWindowFrames = 0;
     sUi.fpsHistory = {};
@@ -2363,6 +2411,7 @@ extern "C" void Mk64BottomUI3DSResetFps() {
 
 extern "C" void Mk64BottomUI3DSRecordPresentation() {
     if (!sUi.initialized) return;
+    sLoadingBlanked = false;
     UpdateFpsCounter();
 }
 

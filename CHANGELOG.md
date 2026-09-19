@@ -1,25 +1,28 @@
 # Changelog
 
-## v1.6-E3
+## v1.6-E5
 
-- Fixed the red lower screen during the Nintendo logo.
-- Removed menu labels and race HUD text behind the Update changelog.
-- Preserved the synchronized white startup transition and current backgrounds.
+Changes since v1.5.
 
-## v1.6-E2
+- Show instantaneous FPS from consecutive presented images in the corner counter.
+- Add a touch-adjustable volume slider matching the render slider.
+- Allow adaptive interpolation on Old and New 3DS in both supported resolutions.
+- Skip interpolation recording when CPU or GPU work exceeds its budget.
+- Batch O2R startup reads while retaining compact RAM residency and CRC checks.
+- Avoid repeated black-screen redraws during loading.
+- Combine initial EEPROM repairs into one atomic save and skip unchanged writes.
+- Refill audio throughout long rendering work, with a barrier before game logic resumes.
+- Restore early CPU face rejection before texture processing and vertex submission.
+- Avoid renderer state changes for rejected triangles and cache copies for small vertex loads.
+- Add eligible GPU vertex transforms and directional lighting with CPU compatibility paths.
+- Add bounded matrix and vertex-depth reuse, faster command dispatch, and diagnostic counters.
+- Fix the red lower screen during the Nintendo logo and synchronize the white title transition.
+- Remove menu labels and race HUD text behind the Update changelog.
+- Fix updater certificates, offline notes, flicker, backgrounds, and page navigation.
+- Add Update below Close Options with the native Mario Kart menu font.
+- Add Stable and Experimental channels with verified CIA/3DSX updates and installation confirmation.
 
-- Fixed updater certificate and offline changelog access
-- Preserved the current course background and race scene in Update
-- Fixed changelog flicker on intermediate presentations
-- Centered page numbering with L/R at the sides
-- Synchronized the white Nintendo-to-title transition on both screens
-
-## v1.6-E1
-
-- Added a built-in updater with Stable and Experimental channels, download verification and installation confirmation
-- Added Update below Close Options, using the native menu font and Mario Kart backgrounds
-- Added paged release notes on the upper screen and complete CIA/3DSX update support
-- Kept the lower screen black during the Nintendo intro and synchronized its title-menu fade
+The game simulation remains at 30 Hz; adaptive presentation can reach the 60 Hz display limit when workload permits. E5 performance and compatibility still require physical-console validation.
 
 ## v1.5
 

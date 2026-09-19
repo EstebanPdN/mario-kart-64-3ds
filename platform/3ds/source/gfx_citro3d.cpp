@@ -410,6 +410,17 @@ struct GfxRenderingAPICitro3D::Impl {
     shaderProgram_s shaderProgram = {};
     int projectionUniform = -1;
     int distanceFogUniform = -1;
+    int nativeGeometryUniform = -1;
+    int nativeMatrixUniform = -1;
+    int nativeAspectUniform = -1;
+    int nativeLightingUniform = -1;
+    int nativeLightDirectionUniform = -1;
+    int nativeLightDiffuseUniform = -1;
+    int nativeLightAmbientUniform = -1;
+    mk64_3ds::NativeGeometryDraw nativeGeometry;
+    mk64_3ds::NativeLightingState nativeLighting;
+    bool nativeLightingEnabled = false;
+    bool nativeVertexStateDirty = true;
     C3D_Tex distanceFogTexture = {};
     bool distanceFogTextureInitialized = false;
     bool distanceFogTextureBound = false;
@@ -923,6 +934,62 @@ void GfxRenderingAPICitro3D::SetUseAlpha(bool useAlpha) {
                    useAlpha ? GPU_ONE_MINUS_SRC_ALPHA : GPU_ZERO, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
 }
 
+bool GfxRenderingAPICitro3D::NativeGeometryMatches(const mk64_3ds::NativeGeometryDraw* state) const {
+    if (state == nullptr) return !mImpl->nativeGeometry.enabled;
+    return mk64_3ds::SameNativeGeometryDraw(mImpl->nativeGeometry, *state);
+}
+
+void GfxRenderingAPICitro3D::SetNativeGeometry(const mk64_3ds::NativeGeometryDraw* state) {
+    if (NativeGeometryMatches(state)) return;
+    mImpl->nativeGeometry = state != nullptr ? *state : mk64_3ds::NativeGeometryDraw{};
+    mImpl->nativeVertexStateDirty = true;
+}
+
+bool GfxRenderingAPICitro3D::NativeLightingMatches(const mk64_3ds::NativeLightingState* state) const {
+    return mImpl->nativeLightingEnabled == (state != nullptr) &&
+        (state == nullptr || mImpl->nativeLighting == *state);
+}
+
+void GfxRenderingAPICitro3D::SetNativeLighting(const mk64_3ds::NativeLightingState* state) {
+    if (NativeLightingMatches(state)) return;
+    mImpl->nativeLightingEnabled = state != nullptr;
+    if (state != nullptr) mImpl->nativeLighting = *state;
+    mImpl->nativeVertexStateDirty = true;
+}
+
+void GfxRenderingAPICitro3D::ApplyNativeVertexState() {
+    if (!mImpl->nativeVertexStateDirty) return;
+    const auto& geometry = mImpl->nativeGeometry;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeGeometryUniform, geometry.enabled);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeLightingUniform, mImpl->nativeLightingEnabled);
+    if (geometry.enabled) {
+        // N64 matrices use row-vector multiplication. Upload their columns as
+        // shader dot-product rows, preserving the load-time matrix snapshot.
+        for (int column = 0; column < 4; ++column) {
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->nativeMatrixUniform + column,
+                geometry.matrix[0][column], geometry.matrix[1][column],
+                geometry.matrix[2][column], geometry.matrix[3][column]);
+        }
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->nativeAspectUniform, geometry.aspect, 0, 0, 0);
+    }
+    if (mImpl->nativeLightingEnabled) {
+        const auto& light = mImpl->nativeLighting;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->nativeLightDirectionUniform,
+            light.direction[0], light.direction[1], light.direction[2], 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->nativeLightDiffuseUniform,
+            light.diffuse[0], light.diffuse[1], light.diffuse[2], 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->nativeLightAmbientUniform,
+            light.ambient[0], light.ambient[1], light.ambient[2], 0);
+    }
+    GPU_CULLMODE cull = GPU_CULL_NONE;
+    if (geometry.enabled) {
+        if (geometry.cull == mk64_3ds::NativeGeometryCull::Front) cull = GPU_CULL_FRONT_CCW;
+        if (geometry.cull == mk64_3ds::NativeGeometryCull::Back) cull = GPU_CULL_BACK_CCW;
+    }
+    C3D_CullFace(cull);
+    mImpl->nativeVertexStateDirty = false;
+}
+
 void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, size_t bufVboNumTris) {
     ShaderProgram* program = mImpl->currentProgram;
     if (!mImpl->frameActive || program == nullptr || program->invisible || bufVbo == nullptr ||
@@ -990,7 +1057,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     const size_t firstVertex = mImpl->packedVertexCount;
 
     bool coverNativeFullscreenTexture = false;
-    if (mImpl->activeTarget == mImpl->gameTarget &&
+    if (!mImpl->nativeGeometry.enabled && mImpl->activeTarget == mImpl->gameTarget &&
         !mImpl->originalAspect &&
         IsNativeFullscreenQuad(drawVertices, vertexCount, program->strideFloats)) {
         for (int texture = 0; texture < 2; ++texture) {
@@ -1311,6 +1378,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         mImpl->dirtyVertexBegin = firstVertex;
     }
     mImpl->dirtyVertexEnd = firstVertex + vertexCount;
+    ApplyNativeVertexState();
     C3D_DrawArrays(GPU_TRIANGLES, static_cast<int>(firstVertex), static_cast<int>(vertexCount));
     ++mImpl->drawCallCount;
     mImpl->triangleCount += vertexCount / 3;
@@ -1457,6 +1525,9 @@ void GfxRenderingAPICitro3D::PresentSceneToTopTarget() {
     mImpl->activeTarget = mImpl->topTarget;
 
     C3D_BindProgram(&mImpl->shaderProgram);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeGeometryUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeLightingUniform, false);
+    mImpl->nativeVertexStateDirty = true;
     C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
     AttrInfo_Init(attributeInfo);
     AttrInfo_AddLoader(attributeInfo, 0, GPU_FLOAT, 4);
@@ -1606,6 +1677,7 @@ void GfxRenderingAPICitro3D::RestoreFast3DState() {
     mImpl->tevStateValid = false;
     mImpl->distanceFogTextureBound = false;
     C3D_BindProgram(&mImpl->shaderProgram);
+    mImpl->nativeVertexStateDirty = true;
 
     C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
     AttrInfo_Init(attributeInfo);
@@ -1761,6 +1833,18 @@ void GfxRenderingAPICitro3D::Init() {
     C3D_BindProgram(&mImpl->shaderProgram);
     mImpl->projectionUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "projection");
     mImpl->distanceFogUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "distanceFog");
+    mImpl->nativeGeometryUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeGeometryEnabled");
+    mImpl->nativeMatrixUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeMatrix");
+    mImpl->nativeAspectUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeAspect");
+    mImpl->nativeLightingUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightingEnabled");
+    mImpl->nativeLightDirectionUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightDirection");
+    mImpl->nativeLightDiffuseUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightDiffuse");
+    mImpl->nativeLightAmbientUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightAmbient");
+    if (mImpl->projectionUniform < 0 || mImpl->distanceFogUniform < 0 ||
+        mImpl->nativeGeometryUniform < 0 || mImpl->nativeMatrixUniform < 0 ||
+        mImpl->nativeAspectUniform < 0 || mImpl->nativeLightingUniform < 0 ||
+        mImpl->nativeLightDirectionUniform < 0 || mImpl->nativeLightDiffuseUniform < 0 ||
+        mImpl->nativeLightAmbientUniform < 0) return;
     // An independently generated 8x8 intensity ramp, shared by all courses.
     // It blends the final textured RGB while leaving alpha and depth intact.
     mImpl->distanceFogTextureInitialized = C3D_TexInit(&mImpl->distanceFogTexture, 8, 8, GPU_RGBA8);

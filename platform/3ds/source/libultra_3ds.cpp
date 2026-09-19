@@ -5,6 +5,7 @@
 #include "input_3ds.h"
 #include "system_3ds.h"
 #include "save_file_3ds.hpp"
+#include "diagnostics_3ds.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -39,6 +40,8 @@ uint64_t sTimeOffset = 0;
 uint32_t sAudioRate = 32000;
 uint8_t sEeprom[kEepromSize] = {};
 bool sEepromLoaded = false;
+bool sEepromDirty = true;
+bool sEepromBatch = false;
 bool sVirtualPakLoaded = false;
 bool sVirtualPakExists = false;
 OSPfsState sVirtualPakState = {};
@@ -64,6 +67,7 @@ void LoadEeprom() {
     std::memset(sEeprom, 0xFF, sizeof(sEeprom));
     mk64_3ds::RecoverSaveBackup(kEepromPath);
     FILE* file = std::fopen(kEepromPath, "rb");
+    const bool currentPath = file != nullptr;
     if (file == nullptr) {
         // v0.14 and older accidentally used the SpaghettiKart directory and a
         // 2 KiB EEPROM image. Accept the first 512 bytes so an existing save is
@@ -74,6 +78,7 @@ void LoadEeprom() {
         uint8_t loaded[kEepromSize] = {};
         if (std::fread(loaded, 1, sizeof(loaded), file) == sizeof(loaded)) {
             std::memcpy(sEeprom, loaded, sizeof(sEeprom));
+            sEepromDirty = !currentPath;
         }
         std::fclose(file);
     }
@@ -87,7 +92,9 @@ bool StoreEeprom() {
         return false;
     }
     const bool ok = std::fwrite(sEeprom, 1, sizeof(sEeprom), file) == sizeof(sEeprom);
-    return FinishAtomicWrite(file, kEepromTempPath, kEepromPath, ok);
+    const bool stored = FinishAtomicWrite(file, kEepromTempPath, kEepromPath, ok);
+    if (stored) sEepromDirty = false;
+    return stored;
 }
 
 void LoadVirtualPak() {
@@ -461,7 +468,11 @@ s32 osEepromLongWrite(OSMesgQueue*, u8 address, u8* buffer, int nbytes) {
     if (offset > sizeof(sEeprom) || bytes > sizeof(sEeprom) - offset) {
         return -1;
     }
-    std::memcpy(sEeprom + offset, buffer, bytes);
+    if (std::memcmp(sEeprom + offset, buffer, bytes) != 0) {
+        std::memcpy(sEeprom + offset, buffer, bytes);
+        sEepromDirty = true;
+    }
+    if (!sEepromDirty || sEepromBatch) return 0;
     return StoreEeprom() ? 0 : -1;
 }
 
@@ -534,3 +545,15 @@ void lusprintf(const char*, int32_t, int32_t, const char*, ...) {
 }
 
 } // extern "C"
+
+// Fresh/invalid EEPROM initialization repairs many small N64 blocks. Commit
+// the complete repaired image once, preserving the existing atomic backup.
+extern "C" void load_save_data(void);
+extern "C" void Mk64LoadSaveData3DS(void) {
+    sEepromBatch = true;
+    load_save_data();
+    sEepromBatch = false;
+    if (sEepromDirty && !StoreEeprom()) {
+        Mk64Diagnostics3DSFailure("save-initialization", "EEPROM commit failed");
+    }
+}

@@ -324,7 +324,9 @@ extern "C" bool Mk64Graphics3DSInit() {
     if (sOutputWidth == 800 && !Mk64Diagnostics3DSSupportsWideMode()) {
         sOutputWidth = 400;
     }
-    sUseIntermediatePresentation = sResolvedNewModel && sOutputWidth == 400;
+    // Presentation eligibility follows measured headroom, not a model or
+    // resolution cap. Keep distinct memory/CPU profiles and the 30 Hz logic.
+    sUseIntermediatePresentation = true;
     sTextureCacheCapacity = sResolvedNewModel && sOutputWidth == 400 ? 384U : 256U;
     Mk64FrameInterpolation3DSSetEnabled(sUseIntermediatePresentation);
     sUseIntermediatePresentation = sUseIntermediatePresentation &&
@@ -460,9 +462,8 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         return;
     }
 
-    // Simulation remains the original 30 Hz. At 400 px, New 3DS may present a
-    // bounded matrix-interpolated midpoint followed by the key frame; Old 3DS
-    // and the 800 px quality mode present only the key frame.
+    // Simulation remains the original 30 Hz. Either model/resolution may
+    // present a midpoint when measured CPU/GPU/audio headroom permits it.
     ++sFrameCounter;
     struct CounterSample {
         Fast::GfxRenderingAPICitro3D* renderer;
@@ -727,6 +728,12 @@ extern "C" size_t Mk64Graphics3DSTextureCacheCapacity() {
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth() {
     return sOutputWidth;
 }
+extern "C" bool Mk64Graphics3DSHasInterpolationHeadroom() {
+    return sUseIntermediatePresentation && sHasPresentedTopFrame &&
+        C3D_GetProcessingTime() <= kBusyProcessingMilliseconds &&
+        C3D_GetDrawingTime() <= kBusyDrawingMilliseconds;
+}
+
 extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation() {
     return sUseIntermediatePresentation;
 }
