@@ -4007,6 +4007,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         platform/3ds/source/bottom_ui_3ds.cpp
         platform/3ds/source/diagnostics_3ds.cpp
         platform/3ds/source/game_main_3ds.cpp
+        platform/3ds/source/loading_screen_3ds.cpp
         platform/3ds/source/linear_allocation_capture_3ds.cpp
     )
     target_include_directories(mk64-3ds-game PRIVATE

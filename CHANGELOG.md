@@ -1,15 +1,21 @@
 # Changelog
 
-## v1.6-E5
+## v1.6-E6
 
 Changes since v1.5.
 
+- Fix Old 3DS startup aborts caused by mandatory archive RAM residency.
+- Keep optional interpolation storage out of the ordinary archive heap.
+- Load compressed resources in small blocks to tolerate heap fragmentation.
+- Distinguish memory limits from archive read errors in startup diagnostics.
+- Show a small animated Lakitu flag on black screens while the game starts.
+- Cache the 32 loading frames locally and release their memory before gameplay.
 - Show instantaneous FPS from consecutive presented images in the corner counter.
 - Add a touch-adjustable volume slider matching the render slider.
 - Allow adaptive interpolation on Old and New 3DS in both supported resolutions.
 - Skip interpolation recording when CPU or GPU work exceeds its budget.
 - Batch O2R startup reads while retaining compact RAM residency and CRC checks.
-- Avoid repeated black-screen redraws during loading.
+- Avoid repeated black-screen redraws during course loading.
 - Combine initial EEPROM repairs into one atomic save and skip unchanged writes.
 - Refill audio throughout long rendering work, with a barrier before game logic resumes.
 - Restore early CPU face rejection before texture processing and vertex submission.
@@ -22,7 +28,7 @@ Changes since v1.5.
 - Add Update below Close Options with the native Mario Kart menu font.
 - Add Stable and Experimental channels with verified CIA/3DSX updates and installation confirmation.
 
-The game simulation remains at 30 Hz; adaptive presentation can reach the 60 Hz display limit when workload permits. E5 performance and compatibility still require physical-console validation.
+The game simulation remains at 30 Hz; adaptive presentation can reach the 60 Hz display limit when workload permits. E6 performance and compatibility still require physical-console validation.
 
 ## v1.5
 

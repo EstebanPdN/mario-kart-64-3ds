@@ -17,6 +17,10 @@ enum class O2rReadResult : std::uint8_t {
     ReadFailed,
 };
 
+enum class O2rResidentResult : std::uint8_t {
+    Ready, NotOpen, BudgetExceeded, AllocationFailed, ReadFailed
+};
+
 // Read-only ZIP access for an owner-supplied SpaghettiKart .o2r archive.
 // The game archive stays on the SD card and is never embedded in the app.
 class O2rArchiveReader final {
@@ -32,6 +36,8 @@ class O2rArchiveReader final {
     bool IsOpen() const;
     bool MakeResident(std::size_t budget, void (*progress)(unsigned) = nullptr);
     bool IsResident() const;
+    O2rResidentResult ResidentResult() const;
+    std::size_t ResidentRequiredBytes() const;
     std::uint64_t ArchiveBytes() const;
     std::uint64_t PhysicalReadCalls() const;
     std::uint64_t PhysicalReadBytes() const;

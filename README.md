@@ -103,9 +103,13 @@ view with records, preview and map above, and course actions below. Time Trial
 and Grand Prix results use centered text and shadows. Time Trial ghosts use the
 two original save slots in `sd:/3ds/MK64/controller-pak.bin`.
 
-Loading screens are optional under Display > Show loading screens. They are
-disabled by default: both screens stay black during loading. Enabling them
-shows progress during startup and course changes. Errors remain visible.
+Startup shows a small animated Lakitu with a checkered flag at the center of
+the upper screen, with black backgrounds on both screens. Its 32 native frames
+are loaded from your O2R and cached in `sd:/3ds/MK64/cache/loading-lakitu-v1.bin`.
+The cache rebuilds when missing, damaged, or when the archive changes. Its
+memory and animation worker are released before gameplay. First-time ROM
+extraction keeps its progress display. Course loading artwork remains optional
+under Display > Show loading screens. Errors remain visible.
 
 ## Installation
 
@@ -191,10 +195,12 @@ without a separate dark panel.
 Developer > Clean dumps deletes all contents of the diagnostic folder, including
 expanded RAM captures, and starts a fresh runtime log. The next capture restarts at `000`; game data, settings and saves are unaffected.
 
-Before entering the game, the port loads every compressed resource from the
-owner-generated O2R archive into RAM and closes its SD file handle. ZIP names
-and headers are not duplicated in the payload buffer. Kart angles, course
-resources and effects then use RAM, with decompression and CRC validation.
+Before entering the game, the port attempts to load every compressed resource
+from the owner-generated O2R archive into RAM in small blocks, without requiring
+one large contiguous allocation. On success it closes the SD file handle; kart
+angles, course resources and effects then use RAM with decompression and CRC
+validation. ZIP names and headers are not duplicated in the payload blocks.
+Optional interpolation storage uses the separate linear heap.
 The CIA requests expanded application memory on Old 3DS (80MB system mode)
 and New 3DS (124MB system mode). Old-model launch/exit can take longer while
 the system changes memory mode. The ordinary heap retains at least an 8 MiB
@@ -202,9 +208,11 @@ reserve at preload time for later game allocations; this is not a guarantee
 of sustained frame rate or a bound on every future allocation.
 
 Use the installed CIA for this path. A 3DSX launcher must grant enough memory;
-if the archive cannot fit with the reserve, startup stops with an actionable
-message instead of silently returning to SD streaming. Existing O2R archives
-work without re-extraction. Save data and controller pak reads happen at boot;
+if the archive cannot fit with the reserve, the validated SD reader remains
+available so startup can continue. Diagnostics explicitly report this fallback,
+its memory budget and the required bytes; read errors are reported separately.
+SD fallback can add loading/gameplay stalls. Existing O2R archives work without
+re-extraction. Save data and controller pak reads happen at boot;
 intentional save writes and requested diagnostics still use the SD card.
 
 During the game, diagnostic logging uses a bounded 64 KiB RAM ring. Automatic

@@ -23,8 +23,11 @@ struct O2rArchiveReader::Impl {
     ReadAheadFile file;
     std::vector<std::string> entries;
     std::vector<mz_uint> archiveIndices;
-    std::unique_ptr<std::uint8_t[]> resident;
-    std::vector<std::size_t> residentOffsets;
+    std::vector<std::unique_ptr<std::uint8_t[]>> residentBlocks;
+    std::vector<const std::uint8_t*> residentEntries;
+    bool resident = false;
+    O2rResidentResult residentResult = O2rResidentResult::NotOpen;
+    size_t residentRequired = 0;
     bool open = false;
 };
 
@@ -129,8 +132,11 @@ void O2rArchiveReader::Close() {
     }
     std::memset(&mImpl->archive, 0, sizeof(mImpl->archive));
     mImpl->file.Close();
-    mImpl->resident.reset();
-    mImpl->residentOffsets.clear();
+    mImpl->residentBlocks.clear();
+    mImpl->residentEntries.clear();
+    mImpl->resident = false;
+    mImpl->residentResult = O2rResidentResult::NotOpen;
+    mImpl->residentRequired = 0;
     mImpl->entries.clear();
     mImpl->archiveIndices.clear();
     mImpl->open = false;
@@ -140,42 +146,95 @@ std::size_t O2rArchiveReader::CachedBytes() const { return mImpl->file.CachedByt
 bool O2rArchiveReader::MakeResident(std::size_t budget, void (*progress)(unsigned)) {
     if (!mImpl->open) return false;
     if (mImpl->resident) return true;
+    mImpl->residentResult = O2rResidentResult::AllocationFailed;
     try {
-        // The central directory is already resident in miniz. Retain only
-        // compressed payloads here, avoiding a second copy of ZIP names and
-        // headers. This fits the supported Old-model 80MB launch mode.
+        // Keep each compressed entry contiguous, but never require one giant
+        // allocation for the entire archive. Old 3DS can have enough total
+        // free memory split across smaller holes after startup resource loads.
+        constexpr size_t blockLimit = 256u * 1024u;
         const auto count = mImpl->archiveIndices.size();
-        if (count > budget / sizeof(size_t)) return false;
-        std::vector<size_t> offsets(count);
-        size_t total = 0;
+        if (count > SIZE_MAX / sizeof(const uint8_t*)) {
+            mImpl->residentResult = O2rResidentResult::ReadFailed; return false;
+        }
+        size_t total = count * sizeof(const uint8_t*);
+        size_t blockCount = 0, blockBytes = 0;
         for (size_t i = 0; i < count; ++i) {
             mz_zip_archive_file_stat stat = {};
             if (!mz_zip_reader_file_stat(&mImpl->archive, mImpl->archiveIndices[i], &stat) ||
-                stat.m_comp_size > budget - count * sizeof(size_t) - total) return false;
-            offsets[i] = total;
-            total += static_cast<size_t>(stat.m_comp_size);
+                stat.m_comp_size > SIZE_MAX - total) {
+                mImpl->residentResult = O2rResidentResult::ReadFailed;
+                return false;
+            }
+            // Zero-size entries still get an address (they need no payload).
+            const size_t length = std::max<size_t>(1, stat.m_comp_size);
+            if (length > SIZE_MAX - total) {
+                mImpl->residentResult = O2rResidentResult::ReadFailed; return false;
+            }
+            if (blockBytes && length > blockLimit - std::min(blockLimit, blockBytes)) {
+                ++blockCount; blockBytes = 0;
+            }
+            blockBytes += length;
+            total += length;
         }
-        std::unique_ptr<uint8_t[]> data(new (std::nothrow) uint8_t[std::max<size_t>(1, total)]);
-        if (!data) return false;
+        if (blockBytes) ++blockCount;
+        if (blockCount > (SIZE_MAX - total) / sizeof(std::unique_ptr<uint8_t[]>)) {
+            mImpl->residentResult = O2rResidentResult::ReadFailed;
+            return false;
+        }
+        total += blockCount * sizeof(std::unique_ptr<uint8_t[]>);
+        mImpl->residentRequired = total;
+        if (total > budget) {
+            mImpl->residentResult = O2rResidentResult::BudgetExceeded;
+            return false;
+        }
+        std::vector<const uint8_t*> entries(count);
+        std::vector<std::unique_ptr<uint8_t[]>> blocks;
+        blocks.reserve(blockCount);
         struct BulkReadScope {
             ReadAheadFile& file;
             explicit BulkReadScope(ReadAheadFile& value) : file(value) { file.BeginBulkRead(); }
             ~BulkReadScope() { file.EndBulkRead(); }
         } bulkRead(mImpl->file);
         if (progress) progress(0);
-        for (size_t i = 0; i < count; ++i) {
-            const size_t length = (i + 1 < count ? offsets[i + 1] : total) - offsets[i];
-            if (!mz_zip_reader_extract_to_mem(&mImpl->archive, mImpl->archiveIndices[i],
-                                             data.get() + offsets[i], length, MZ_ZIP_FLAG_COMPRESSED_DATA)) return false;
-            if (progress) progress(static_cast<unsigned>((i + 1) * 100ULL / count));
+        for (size_t first = 0; first < count;) {
+            size_t end = first, bytes = 0;
+            while (end < count) {
+                mz_zip_archive_file_stat stat = {};
+                if (!mz_zip_reader_file_stat(&mImpl->archive, mImpl->archiveIndices[end], &stat)) {
+                    mImpl->residentResult = O2rResidentResult::ReadFailed; return false;
+                }
+                const size_t length = std::max<size_t>(1, stat.m_comp_size);
+                if (end > first && length > blockLimit - std::min(blockLimit, bytes)) break;
+                bytes += length; ++end;
+            }
+            std::unique_ptr<uint8_t[]> block(new (std::nothrow) uint8_t[bytes]);
+            if (!block) return false;
+            size_t offset = 0;
+            for (size_t i = first; i < end; ++i) {
+                mz_zip_archive_file_stat stat = {};
+                if (!mz_zip_reader_file_stat(&mImpl->archive, mImpl->archiveIndices[i], &stat) ||
+                    !mz_zip_reader_extract_to_mem(&mImpl->archive, mImpl->archiveIndices[i],
+                        block.get() + offset, stat.m_comp_size, MZ_ZIP_FLAG_COMPRESSED_DATA)) {
+                    mImpl->residentResult = O2rResidentResult::ReadFailed; return false;
+                }
+                entries[i] = block.get() + offset;
+                offset += std::max<size_t>(1, stat.m_comp_size);
+                if (progress) progress(static_cast<unsigned>((i + 1) * 100ULL / count));
+            }
+            blocks.push_back(std::move(block));
+            first = end;
         }
-        mImpl->resident = std::move(data);
-        mImpl->residentOffsets = std::move(offsets);
+        mImpl->residentBlocks = std::move(blocks);
+        mImpl->residentEntries = std::move(entries);
+        mImpl->resident = true;
+        mImpl->residentResult = O2rResidentResult::Ready;
         mImpl->file.CloseBackingFile();
         return true;
     } catch (const std::bad_alloc&) { return false; }
 }
-bool O2rArchiveReader::IsResident() const { return mImpl->resident != nullptr; }
+bool O2rArchiveReader::IsResident() const { return mImpl->resident; }
+O2rResidentResult O2rArchiveReader::ResidentResult() const { return mImpl->residentResult; }
+std::size_t O2rArchiveReader::ResidentRequiredBytes() const { return mImpl->residentRequired; }
 std::uint64_t O2rArchiveReader::ArchiveBytes() const { return mImpl->file.Size(); }
 std::uint64_t O2rArchiveReader::PhysicalReadCalls() const { return mImpl->file.ReadCalls(); }
 std::uint64_t O2rArchiveReader::PhysicalReadBytes() const { return mImpl->file.ReadBytes(); }
@@ -245,7 +304,7 @@ O2rReadResult O2rArchiveReader::ReadEntryByIndex(std::size_t entryIndex,
         return O2rReadResult::EntryNotFound;
     }
     return ExtractEntry(&mImpl->archive, mImpl->archiveIndices[entryIndex], bytes,
-        mImpl->resident ? mImpl->resident.get() + mImpl->residentOffsets[entryIndex] : nullptr);
+        mImpl->resident ? mImpl->residentEntries[entryIndex] : nullptr);
 }
 
 O2rReadResult O2rArchiveReader::GetEntryUncompressedSizeByIndex(std::size_t entryIndex,

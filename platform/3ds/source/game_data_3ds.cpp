@@ -32,6 +32,8 @@ bool Mk64Torch3DSBuildO2R(const char* rom, const char* sourceDir, const char* de
                           const char* additionalFile, char* error, size_t errorSize);
 #endif
 
+extern "C" void Mk64Loading3DSStop(void) __attribute__((weak));
+
 static std::atomic<bool> gExtractionCancelRequested{false};
 static uint64_t gExtractionLastInputPollMs = 0;
 
@@ -1400,6 +1402,7 @@ extern "C" Mk64GameData3DSResult Mk64GameData3DSEnsure(void) {
         }
     }
 
+    if (Mk64Loading3DSStop) Mk64Loading3DSStop();
     gfxInitDefault();
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
     gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
