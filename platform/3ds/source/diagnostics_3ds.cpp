@@ -844,6 +844,7 @@ extern "C" bool Mk64Diagnostics3DSStart() {
         }
         return false;
     }
+    LogLine("build: ", MK64_3DS_VERSION, true);
     Mk64Diagnostics3DSCheckpoint("diagnostics-started");
     return true;
 }

@@ -8,6 +8,11 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#ifdef __3DS__
+extern "C" void* linearAlloc(size_t);
+extern "C" void linearFree(void*);
+extern "C" uint32_t linearSpaceFree(void);
+#endif
 #include <unordered_map>
 
 // The desktop recorder builds a deeply nested collection tree every frame.
@@ -87,7 +92,16 @@ struct RecorderStorage {
     std::array<ScopeState, kMaxScopeDepth> scopes = {};
 };
 
-std::unique_ptr<RecorderStorage> sStorage;
+struct RecorderDeleter {
+    void operator()(RecorderStorage* storage) const {
+#ifdef __3DS__
+        if (storage) { storage->~RecorderStorage(); linearFree(storage); }
+#else
+        delete storage;
+#endif
+    }
+};
+std::unique_ptr<RecorderStorage, RecorderDeleter> sStorage;
 float sPreparedStep = 0.5f;
 bool sPreparedActive = false;
 unsigned sCurrentFrame = 0;
@@ -400,7 +414,17 @@ bool InterpolationWriteDiagnostic(const char* directory) {
 extern "C" void Mk64FrameInterpolation3DSSetEnabled(bool enabled) {
     sStorage.reset();
     if (enabled) {
+#ifdef __3DS__
+        // Optional interpolation must not consume the ordinary heap budget
+        // needed for the resident archive on Old 3DS. Keep 4 MiB linear spare
+        // for later GPU allocations; keyframe rendering needs no recorder.
+        if (linearSpaceFree() > sizeof(RecorderStorage) + 4u * 1024u * 1024u) {
+            if (void* memory = linearAlloc(sizeof(RecorderStorage)))
+                sStorage.reset(new (memory) RecorderStorage{});
+        }
+#else
         sStorage.reset(new (std::nothrow) RecorderStorage{});
+#endif
     }
     sEnabled = enabled && sStorage != nullptr;
     sRecording = false;

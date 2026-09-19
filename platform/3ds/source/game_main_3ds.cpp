@@ -10,6 +10,7 @@
 #include "audio_ndsp_3ds.h"
 #include "resource_runtime_3ds.h"
 #include "settings_3ds.h"
+#include "loading_screen_3ds.h"
 
 #include <3ds.h>
 
@@ -52,6 +53,7 @@ constexpr int32_t kLogoIntroMenu = 8;
 constexpr uint64_t kSimulationRate = 30;
 
 void ArchiveLoadProgress(unsigned percent) {
+    if (Mk64Loading3DSActive()) return;
     static unsigned previous = 101;
     if (percent == previous) return;
     previous = percent;
@@ -71,11 +73,13 @@ void ArchiveLoadProgress(unsigned percent) {
             reason = "uncaught non-standard C++ exception";
         }
     }
+    Mk64Loading3DSStop();
     Mk64Diagnostics3DSEmergency(reason);
     std::_Exit(1);
 }
 
 [[noreturn]] void ExitWithError(const char* message) {
+    Mk64Loading3DSStop();
     gfxInitDefault();
     consoleInit(GFX_TOP, nullptr);
     std::printf("Mario Kart 64 3DS\n\n%s\n\nPress START to exit.\n", message);
@@ -92,6 +96,7 @@ void ArchiveLoadProgress(unsigned percent) {
 int main(int argc, char** argv) {
     std::set_terminate(TerminateHandler);
     Mk64Diagnostics3DSStart();
+    Mk64Loading3DSStart(nullptr);
     Mk64Settings3DSSetHardwareModel(Mk64Diagnostics3DSIsNewModel());
     Mk64Settings3DSLoad();
     Mk64Diagnostics3DSCheckpoint("game-data-init");
@@ -102,6 +107,7 @@ int main(int argc, char** argv) {
         ExitWithError(data.message);
     }
     Mk64Diagnostics3DSCheckpoint("game-data-ready");
+    Mk64Loading3DSStart(data.archivePath);
 
     // First-run extraction needs the regular heap for Torch's ROM buffer and
     // per-file YAML data. Reserve the vanilla arena only after mk64.o2r is
@@ -121,6 +127,7 @@ int main(int argc, char** argv) {
         ExitWithError("mk64.o2r could not be opened or is not a supported archive.");
     }
     Mk64Diagnostics3DSCheckpoint("resource-runtime-ready");
+    Mk64Loading3DSPauseDisplay();
     Mk64Diagnostics3DSCheckpoint("graphics-init");
     if (!Mk64Graphics3DSInit()) {
         Mk64Diagnostics3DSCheckpoint("graphics-init-failed");
@@ -129,6 +136,7 @@ int main(int argc, char** argv) {
         ExitWithError("The native Citro3D renderer could not be initialized.");
     }
     Mk64Diagnostics3DSCheckpoint("graphics-ready");
+    Mk64Loading3DSResumeDisplay();
 
     Mk64Diagnostics3DSCheckpoint("libultra-init");
     osInitialize();
@@ -136,6 +144,7 @@ int main(int argc, char** argv) {
     Mk64Diagnostics3DSCheckpoint("game-state-init");
     if (!Mk64GameState3DSInit()) {
         Mk64Diagnostics3DSCheckpoint("game-state-init-failed");
+        Mk64Loading3DSStop();
         Mk64Graphics3DSShutdown();
         Mk64Resource3DSShutdown();
         Mk64Diagnostics3DSStop();
@@ -150,6 +159,7 @@ int main(int argc, char** argv) {
         Mk64Diagnostics3DSCheckpoint("audio-ready");
     } else {
         Mk64Diagnostics3DSCheckpoint("audio-init-failed");
+        Mk64Loading3DSStop();
         Mk64Graphics3DSShutdown();
         Mk64Resource3DSShutdown();
         Mk64Diagnostics3DSStop();
@@ -160,6 +170,7 @@ int main(int argc, char** argv) {
     if (!Mk64BottomUI3DSInit()) {
         Mk64Diagnostics3DSCheckpoint("bottom-ui-init-failed");
         Mk64GameAudio3DSShutdown();
+        Mk64Loading3DSStop();
         Mk64Graphics3DSShutdown();
         Mk64Resource3DSShutdown();
         Mk64Diagnostics3DSStop();
@@ -175,18 +186,35 @@ int main(int argc, char** argv) {
     constexpr size_t reserve = 8u * 1024u * 1024u;
     const size_t budget = heapSize > used && heapSize - used > reserve
         ? heapSize - used - reserve : 0;
+    Mk64Diagnostics3DSMemory("before-archive-residency", Mk64Resource3DSLoadedCount(), 0, 0, 0, 0, 0);
     Mk64Diagnostics3DSCheckpoint("archive-ram-loading");
-    if (!Mk64Resource3DSMakeResident(budget, ArchiveLoadProgress)) {
-        Mk64Diagnostics3DSFailure("archive-ram-loading", "insufficient RAM or archive read failed");
+    const bool resident = Mk64Resource3DSMakeResident(budget, ArchiveLoadProgress);
+    char residency[192];
+    std::snprintf(residency, sizeof(residency),
+        "archive-residency %s heap=%lu used=%lu reserve=%lu budget=%lu required=%lu reads=%llu",
+        Mk64Resource3DSResidencyStatus(), static_cast<unsigned long>(heapSize),
+        static_cast<unsigned long>(used), static_cast<unsigned long>(reserve),
+        static_cast<unsigned long>(budget), static_cast<unsigned long>(Mk64Resource3DSResidentRequiredBytes()),
+        static_cast<unsigned long long>(Mk64Resource3DSPhysicalReadCalls()));
+    Mk64Diagnostics3DSCheckpoint(residency);
+    if (!resident && !Mk64Resource3DSResidencyMemoryLimited()) {
+        Mk64Diagnostics3DSFailure("archive-ram-loading", Mk64Resource3DSResidencyStatus());
+        Mk64Loading3DSStop();
         Mk64BottomUI3DSShutdown();
         Mk64GameAudio3DSShutdown();
         Mk64Graphics3DSShutdown();
         Mk64Resource3DSShutdown();
         Mk64Diagnostics3DSStop();
-        ExitWithError("Could not load mk64.o2r into RAM.\nUse the installed CIA for expanded memory\non Old/New 3DS. Check the SD archive if\nalready using the CIA.");
+        ExitWithError("Could not read mk64.o2r.\nCheck the archive and SD card.\nDetails: sd:/3ds/MK64/dump/runtime.log");
     }
-    Mk64Diagnostics3DSCheckpoint("archive-ram-ready-sd-closed");
+    // RAM residency is an optimization, not a requirement to open the game.
+    // Preserve the validated reader on unusually constrained launches; partial
+    // resident allocations have already been discarded transactionally.
+    Mk64Diagnostics3DSCheckpoint(resident ? "archive-ram-ready-sd-closed" : "archive-streaming-memory-fallback");
+    Mk64Diagnostics3DSMemory("after-archive-residency", Mk64Resource3DSLoadedCount(), 0, 0, 0, 0, 0);
     Mk64Diagnostics3DSBufferRuntimeLog();
+
+    Mk64Loading3DSStop();
 
     // Skip the desktop-only Harbour Masters splash and enter the stock logo.
     gMenuSelection = kLogoIntroMenu;
@@ -288,6 +316,7 @@ int main(int argc, char** argv) {
 }
 
 extern "C" void userAppExit() {
+    Mk64Loading3DSStop();
     // libctru invokes this hook before hidExit() unmaps HID shared memory.
     // Quiesce the audio worker before waiting on the diagnostics HID poller so
     // it cannot keep using services while process teardown is in progress.

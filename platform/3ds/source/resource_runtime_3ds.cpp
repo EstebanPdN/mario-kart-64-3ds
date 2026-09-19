@@ -990,6 +990,23 @@ extern "C" bool Mk64Resource3DSPrefetchKart(const char* name, size_t* cachedByte
 extern "C" bool Mk64Resource3DSMakeResident(size_t budget, void (*progress)(unsigned)) {
     return sArchive != nullptr && sArchive->MakeResident(budget, progress);
 }
+extern "C" bool Mk64Resource3DSResidencyMemoryLimited(void) {
+    return sArchive && (sArchive->ResidentResult() == mk64_3ds::O2rResidentResult::BudgetExceeded ||
+        sArchive->ResidentResult() == mk64_3ds::O2rResidentResult::AllocationFailed);
+}
+extern "C" const char* Mk64Resource3DSResidencyStatus(void) {
+    if (!sArchive) return "archive-not-open";
+    switch (sArchive->ResidentResult()) {
+        case mk64_3ds::O2rResidentResult::Ready: return "ready";
+        case mk64_3ds::O2rResidentResult::BudgetExceeded: return "budget-exceeded";
+        case mk64_3ds::O2rResidentResult::AllocationFailed: return "allocation-failed";
+        case mk64_3ds::O2rResidentResult::ReadFailed: return "archive-read-failed";
+        default: return "archive-not-open";
+    }
+}
+extern "C" size_t Mk64Resource3DSResidentRequiredBytes(void) {
+    return sArchive ? sArchive->ResidentRequiredBytes() : 0;
+}
 extern "C" bool Mk64Resource3DSIsResident(void) {
     return sArchive != nullptr && sArchive->IsResident();
 }
