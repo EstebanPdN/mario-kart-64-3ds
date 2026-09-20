@@ -1,4 +1,6 @@
 #include "gfx_citro3d.h"
+#include "startup_trace_3ds.h"
+#include "frame_begin_3ds.hpp"
 #include "system_3ds.h"
 extern "C" bool Mk64System3DSCleanCapturedLinearAllocations(void) __attribute__((weak));
 extern "C" size_t Mk64System3DSCapturedLinearAllocationSize(void) __attribute__((weak));
@@ -1973,9 +1975,8 @@ void GfxRenderingAPICitro3D::StartFrame() {
     const bool displayAdvanced = mImpl->hasSubmittedFrame &&
         C3D_FrameCounter(0) != mImpl->submittedVBlank[0] &&
         C3D_FrameCounter(1) != mImpl->submittedVBlank[1];
-    if (!C3D_FrameBegin(displayAdvanced ? 0 : C3D_FRAME_SYNCDRAW)) {
-        return;
-    }
+    if (!mk64_3ds::BeginFrame3DS(displayAdvanced ? 0 : C3D_FRAME_SYNCDRAW,
+                                "startup-gpu-queue-wait-enter")) return;
     mImpl->frameBeginWaitMicroseconds = static_cast<uint32_t>((svcGetSystemTick() - beginTick) * 1000000ULL / SYSCLOCK_ARM11);
     mImpl->frameActive = true;
     gMk64DistanceFar3DS = Mk64GameState3DSDistanceFog != nullptr
@@ -2015,7 +2016,9 @@ void GfxRenderingAPICitro3D::EndFrame() {
     // Fast3D cleans its exact VBO and texture ranges. Citro2D owns private
     // linear vertex/index buffers, so only frames that actually submit a C2D
     // batch need the separately captured range below.
+    Mk64StartupStage("frame-present-scene-enter");
     PresentSceneToTopTarget();
+    Mk64StartupStage("frame-vbo-clean-enter");
     FlushPackedVertices();
     const bool needsLinearHeapFlush = mImpl->externalLinearBuffersDirty;
     // Citro3D's default C3D_FrameEnd(0) path asks the GSP sysmodule to flush
@@ -2030,6 +2033,7 @@ void GfxRenderingAPICitro3D::EndFrame() {
             reinterpret_cast<void*>(static_cast<uintptr_t>(__ctru_linear_heap));
         linearCleanSize = __ctru_linear_heap_size;
     }
+    Mk64StartupStage("frame-ui-cache-clean-enter");
     const auto cleanStarted = mk64_3ds::PerformanceNow();
     const bool capturedClean = needsLinearHeapFlush &&
         Mk64System3DSCleanCapturedLinearAllocations != nullptr &&
@@ -2044,7 +2048,9 @@ void GfxRenderingAPICitro3D::EndFrame() {
     }
     // If both direct and fallback cleaning unexpectedly failed, retain
     // Citro3D's established full-heap path as a final correctness fallback.
+    Mk64StartupStage("frame-c3d-submit-enter");
     C3D_FrameEnd(linearHeapClean ? GX_CMDLIST_FLUSH : 0);
+    Mk64StartupStage("frame-c3d-submit-returned");
     mImpl->submittedVBlank[0] = C3D_FrameCounter(0);
     mImpl->submittedVBlank[1] = C3D_FrameCounter(1);
     mImpl->hasSubmittedFrame = true;

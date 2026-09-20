@@ -11,6 +11,7 @@
 #include "resource_runtime_3ds.h"
 #include "settings_3ds.h"
 #include "loading_screen_3ds.h"
+#include "startup_trace_3ds.h"
 
 #include <3ds.h>
 
@@ -55,21 +56,27 @@ aptHookCookie sAptHook;
 bool sResumePending = false;
 void AppletTransition(APT_HookType event, void*) {
     if (event == APTHOOK_ONSUSPEND || event == APTHOOK_ONSLEEP) {
+        Mk64StartupStage("apt-suspend-enter");
         Mk64Diagnostics3DSCheckpoint("apt-suspend-enter");
         Mk64Diagnostics3DSSetAptSuspended(true);
         Mk64GameAudio3DSSuspend();
+        Mk64StartupStage("apt-suspend-ready");
         Mk64Diagnostics3DSCheckpoint("apt-suspend-ready");
         sResumePending = true;
     }
 }
 
 void CloseServices(void*) {
+    Mk64StartupStage("close-updater");
     Mk64Diagnostics3DSCheckpoint("close-updater");
     Updater_Shutdown();
+    Mk64StartupStage("close-audio");
     Mk64Diagnostics3DSCheckpoint("close-audio");
     Mk64GameAudio3DSShutdown();
+    Mk64StartupStage("close-gsp");
     Mk64Diagnostics3DSCheckpoint("close-gsp");
     gfxExit();
+    Mk64StartupStage("close-diagnostics");
     Mk64Diagnostics3DSCheckpoint("close-diagnostics");
     Mk64Diagnostics3DSStop();
 }
@@ -127,20 +134,28 @@ void ArchiveLoadProgress(unsigned percent) {
 int main(int argc, char** argv) {
     std::set_terminate(TerminateHandler);
     Mk64Diagnostics3DSStart();
+    Mk64Startup3DSStart();
+    Mk64StartupStage("loading-screen-init");
     Mk64Diagnostics3DSCheckpoint("loading-screen-init");
     Mk64Loading3DSStart(nullptr);
+    Mk64StartupStage("loading-screen-ready");
     Mk64Diagnostics3DSCheckpoint("loading-screen-ready");
     Mk64Settings3DSSetHardwareModel(Mk64Diagnostics3DSIsNewModel());
+    Mk64StartupStage("settings-load");
     Mk64Diagnostics3DSCheckpoint("settings-load");
     Mk64Settings3DSLoad();
+    Mk64StartupStage("settings-ready");
     Mk64Diagnostics3DSCheckpoint("settings-ready");
+    Mk64StartupStage("game-data-init");
     Mk64Diagnostics3DSCheckpoint("game-data-init");
     const Mk64GameData3DSResult data = Mk64GameData3DSEnsure();
     if (data.status != MK64_GAME_DATA_READY || data.archivePath == nullptr) {
+        Mk64StartupStage("game-data-failed");
         Mk64Diagnostics3DSCheckpoint("game-data-failed");
         Mk64Diagnostics3DSStop();
         ExitWithError(data.message);
     }
+    Mk64StartupStage("game-data-ready");
     Mk64Diagnostics3DSCheckpoint("game-data-ready");
     Mk64Loading3DSStart(data.archivePath);
 
@@ -149,35 +164,46 @@ int main(int argc, char** argv) {
     // ready, but still before the resource index and Citro3D allocate memory.
     initialize_memory_pool();
     if (!Mk64MemoryArena3DSIsReady()) {
+        Mk64StartupStage("game-arena-init-failed");
         Mk64Diagnostics3DSCheckpoint("game-arena-init-failed");
         Mk64Diagnostics3DSStop();
         ExitWithError("Not enough application memory for the 8 MiB game arena.");
     }
+    Mk64StartupStage("game-arena-ready");
     Mk64Diagnostics3DSCheckpoint("game-arena-ready");
 
+    Mk64StartupStage("resource-runtime-init");
     Mk64Diagnostics3DSCheckpoint("resource-runtime-init");
     if (!Mk64Resource3DSInit(data.archivePath)) {
+        Mk64StartupStage("resource-runtime-init-failed");
         Mk64Diagnostics3DSCheckpoint("resource-runtime-init-failed");
         Mk64Diagnostics3DSStop();
         ExitWithError("mk64.o2r could not be opened or is not a supported archive.");
     }
+    Mk64StartupStage("resource-runtime-ready");
     Mk64Diagnostics3DSCheckpoint("resource-runtime-ready");
     Mk64Loading3DSPauseDisplay();
+    Mk64StartupStage("graphics-init");
     Mk64Diagnostics3DSCheckpoint("graphics-init");
     if (!Mk64Graphics3DSInit()) {
+        Mk64StartupStage("graphics-init-failed");
         Mk64Diagnostics3DSCheckpoint("graphics-init-failed");
         Mk64Resource3DSShutdown();
         Mk64Diagnostics3DSStop();
         ExitWithError("The native Citro3D renderer could not be initialized.");
     }
+    Mk64StartupStage("graphics-ready");
     Mk64Diagnostics3DSCheckpoint("graphics-ready");
     Mk64Loading3DSResumeDisplay();
 
+    Mk64StartupStage("libultra-init");
     Mk64Diagnostics3DSCheckpoint("libultra-init");
     osInitialize();
     Mk64Input3DSInit();
+    Mk64StartupStage("game-state-init");
     Mk64Diagnostics3DSCheckpoint("game-state-init");
     if (!Mk64GameState3DSInit()) {
+        Mk64StartupStage("game-state-init-failed");
         Mk64Diagnostics3DSCheckpoint("game-state-init-failed");
         Mk64Loading3DSStop();
         Mk64Graphics3DSShutdown();
@@ -185,14 +211,18 @@ int main(int argc, char** argv) {
         Mk64Diagnostics3DSStop();
         ExitWithError("The vanilla game state could not be initialized.");
     }
+    Mk64StartupStage("game-state-ready");
     Mk64Diagnostics3DSCheckpoint("game-state-ready");
 
+    Mk64StartupStage("audio-init");
     Mk64Diagnostics3DSCheckpoint("audio-init");
     audio_init();
     sound_init();
     if (Mk64GameAudio3DSInit()) {
+        Mk64StartupStage("audio-ready");
         Mk64Diagnostics3DSCheckpoint("audio-ready");
     } else {
+        Mk64StartupStage("audio-init-failed");
         Mk64Diagnostics3DSCheckpoint("audio-init-failed");
         Mk64Loading3DSStop();
         Mk64Graphics3DSShutdown();
@@ -201,8 +231,10 @@ int main(int argc, char** argv) {
         ExitWithError("DSP audio could not start. Dump DSP firmware with a current homebrew setup, then try again.");
     }
 
+    Mk64StartupStage("bottom-ui-init");
     Mk64Diagnostics3DSCheckpoint("bottom-ui-init");
     if (!Mk64BottomUI3DSInit()) {
+        Mk64StartupStage("bottom-ui-init-failed");
         Mk64Diagnostics3DSCheckpoint("bottom-ui-init-failed");
         Mk64GameAudio3DSShutdown();
         Mk64Loading3DSStop();
@@ -211,6 +243,7 @@ int main(int argc, char** argv) {
         Mk64Diagnostics3DSStop();
         ExitWithError("The bottom-screen interface could not be initialized.");
     }
+    Mk64StartupStage("bottom-ui-ready");
     Mk64Diagnostics3DSCheckpoint("bottom-ui-ready");
 
     // Retain the compressed archive, not every decoded/GPU texture. CIA
@@ -222,6 +255,7 @@ int main(int argc, char** argv) {
     const size_t budget = heapSize > used && heapSize - used > reserve
         ? heapSize - used - reserve : 0;
     Mk64Diagnostics3DSMemory("before-archive-residency", Mk64Resource3DSLoadedCount(), 0, 0, 0, 0, 0);
+    Mk64StartupStage("archive-ram-loading");
     Mk64Diagnostics3DSCheckpoint("archive-ram-loading");
     const bool resident = Mk64Resource3DSMakeResident(budget, ArchiveLoadProgress);
     char residency[192];
@@ -247,23 +281,36 @@ int main(int argc, char** argv) {
     // resident allocations have already been discarded transactionally.
     Mk64Diagnostics3DSCheckpoint(resident ? "archive-ram-ready-sd-closed" : "archive-streaming-memory-fallback");
     Mk64Diagnostics3DSMemory("after-archive-residency", Mk64Resource3DSLoadedCount(), 0, 0, 0, 0, 0);
-    Mk64Diagnostics3DSBufferRuntimeLog();
+    Mk64StartupStage("archive-residency-complete");
 
     Mk64Loading3DSStop();
 
     // Skip the desktop-only Harbour Masters splash and enter the stock logo.
     gMenuSelection = kLogoIntroMenu;
+    Mk64StartupStage("vanilla-loop-init");
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-init");
     thread5_game_loop();
+    // Its rendering_init() submits a blank frame before func_800C5CB8().
+    // That frame must not start synthesis against half-initialized game state.
+    Mk64GameAudio3DSFinishInitialization();
+    Mk64StartupStage("vanilla-loop-ready");
     Mk64Diagnostics3DSCheckpoint("vanilla-loop-ready");
 
+    Mk64StartupStage("updater-init-enter");
     Updater_Init(argc > 0 ? argv[0] : nullptr);
+    Mk64StartupStage("updater-init-returned");
     aptHook(&sAptHook, AppletTransition, nullptr);
     uint64_t nextSimulationDeadline = svcGetSystemTick();
     uint64_t deadlineRemainder = 0;
     bool suppressNextPresentation = false;
+    bool startupTraceSampled = false;
     while (WindowIsRunning() && !Updater_ShouldClose()) {
+        // Also protect the first tick and exceptional/early renderer returns.
+        // APT callbacks and all UI/game logic must own the audio globals.
+        Mk64GameAudio3DSBeginLogic();
+        Mk64StartupStage("apt-poll-enter");
         Mk64Graphics3DSPollEvents();
+        Mk64StartupStage("apt-poll-returned");
         if (!WindowIsRunning()) break;
         if (sResumePending) {
             // aptMainLoop has now finished restoring DSP and GPU ownership.
@@ -276,6 +323,7 @@ int main(int argc, char** argv) {
             nextSimulationDeadline = svcGetSystemTick();
             deadlineRemainder = 0;
             suppressNextPresentation = false;
+            Mk64StartupStage("apt-resume-ready");
             Mk64Diagnostics3DSCheckpoint("apt-resume-ready");
         }
         if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
@@ -295,10 +343,13 @@ int main(int argc, char** argv) {
             suppressNextPresentation = false;
             continue;
         }
+        Mk64StartupStage("first-iteration-enter");
         mk64_3ds::PerformanceBegin();
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
         auto& perf = mk64_3ds::PerformanceCurrent();
+        Mk64StartupStage("bottom-ui-prepare-enter");
         { mk64_3ds::PerformanceTimer timer(perf.prepare_us); Mk64BottomUI3DSPrepareFrame(); }
+        Mk64StartupStage("bottom-ui-prepare-returned");
         perf.game_state = static_cast<uint32_t>(gGamestate);
         mk64_3ds::PerformanceRaceState(gGamestate == 4, static_cast<uint32_t>(gRaceState),
             gCourseTimer > 0.0f ? static_cast<uint32_t>(gCourseTimer * 1000.0f) : 0);
@@ -311,10 +362,26 @@ int main(int argc, char** argv) {
         Mk64Graphics3DSSuppressNextPresentation(suppressNextPresentation);
         suppressNextPresentation = false;
         { mk64_3ds::PerformanceTimer timer(perf.iteration_us); thread5_iteration(); }
+        Mk64Startup3DSGameState(gGamestate, gMenuSelection);
+        Mk64StartupStage("first-iteration-returned");
         // Do not enter the audio worker or pacer if game logic closes the window.
         if (!WindowIsRunning()) break;
         Mk64Diagnostics3DSSetStage("game-loop-audio");
+        Mk64StartupStage("audio-pump-enter");
         { mk64_3ds::PerformanceTimer timer(perf.audio_pump_us); Mk64GameAudio3DSPump(); }
+        Mk64StartupStage("audio-pump-returned");
+        if (!startupTraceSampled && gGamestate != 7 && Mk64Startup3DSHasSubmittedFrames()) {
+            startupTraceSampled = true;
+            Mk64StartupStage("startup-trace-switch-to-sampling");
+            Mk64Diagnostics3DSCheckpoint("startup-trace-switch-to-sampling");
+            Mk64Diagnostics3DSBufferRuntimeLog();
+            // Keep evidence through the logo/menu without per-stage SD waits.
+            // Joining this optional worker here could terminate a healthy game
+            // when filesystem IPC takes longer than the shutdown deadline.
+            Mk64Startup3DSAsync();
+            nextSimulationDeadline = svcGetSystemTick();
+            deadlineRemainder = 0;
+        }
         perf.audio_after = Mk64Audio3DSBufferedFrames();
 
         // Keep the original 30 Hz simulation clock exact. If rendering falls
@@ -362,6 +429,7 @@ int main(int argc, char** argv) {
 }
 
 extern "C" void userAppExit() {
+    Mk64Startup3DSStop();
     Mk64Loading3DSStop();
     // libctru invokes this hook before hidExit() unmaps HID shared memory.
     // Quiesce the audio worker before waiting on the diagnostics HID poller so

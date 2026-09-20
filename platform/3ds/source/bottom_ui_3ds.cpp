@@ -1,4 +1,5 @@
 #include "hud_layout_3ds.hpp"
+#include "frame_begin_3ds.hpp"
 #include "menu_transition_3ds.hpp"
 #include "render_policy_3ds.hpp"
 #include "bottom_ui_3ds.h"
@@ -2351,7 +2352,7 @@ extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
 }
 
 static void ShowProgress(const char* title, const char* detail, unsigned percent, bool showArtwork) {
-    if (!sUi.initialized || !C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return;
+    if (!sUi.initialized || !mk64_3ds::BeginFrame3DS(C3D_FRAME_SYNCDRAW, "loading-progress-previous-frame-wait")) return;
     percent = std::min(percent, 100U);
     const bool firstTopImage = sUi.lastTopTarget == nullptr;
     if (firstTopImage) {
@@ -2380,7 +2381,8 @@ static void ShowProgress(const char* title, const char* detail, unsigned percent
     }
     // Paused diagnostic frames may use Citro3D's full cache-clean path.
     C3D_FrameEnd(0);
-    if (C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    if (mk64_3ds::BeginFrame3DS(C3D_FRAME_SYNCDRAW, "loading-progress-submit-wait"))
+        C3D_FrameEnd(GX_CMDLIST_FLUSH);
     sUi.bottomDirty = true;
 }
 

@@ -1,3 +1,4 @@
+#include "startup_trace_3ds.h"
 #include "gpu_command_budget_3ds.hpp"
 #include "game_runtime_3ds.h"
 
@@ -120,6 +121,7 @@ void UpdateGameViewport() {
 }
 
 void SetRendererStage(const char* stage) {
+    Mk64StartupStage(stage);
     // Persist every boundary of the first few submissions. If real hardware
     // blocks inside Citro3D, runtime.log still identifies the last completed
     // boundary without adding SD writes to steady-state rendering.
@@ -424,12 +426,6 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     }
     auto& perf = mk64_3ds::PerformanceCurrent();
     mk64_3ds::PerformanceTimer graphicsTimer(perf.graphics_us);
-    // The audio runtime may dispatch synthesis to a worker here. Keep the
-    // weak hook runs after the main loop has handled APT events, so HOME can
-    // never suspend the process with this render window left open.
-    if (Mk64GameAudio3DSBeginFrame != nullptr) {
-        Mk64GameAudio3DSBeginFrame();
-    }
 
     const uintptr_t listBegin = reinterpret_cast<uintptr_t>(commands);
     const uintptr_t listEnd = reinterpret_cast<uintptr_t>(gDisplayListHead);
@@ -465,6 +461,11 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     if (!sWindow->IsRunning() || !sInterpreter->IsFrameReady()) {
         return;
     }
+
+    // Dispatch only when there is rendering to overlap. Suppressed frames
+    // reach Pump without a queued job, using its serialized Old 3DS refill.
+    Mk64StartupStage("audio-render-window-enter");
+    if (Mk64GameAudio3DSBeginFrame != nullptr) Mk64GameAudio3DSBeginFrame();
 
     // Simulation remains the original 30 Hz. Either model/resolution may
     // present a midpoint when measured CPU/GPU/audio headroom permits it.
@@ -537,14 +538,21 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         sInterpreter->mInterpolationIndex = 1;
         sInterpreter->mInterpolationIndexTarget = 1;
         sInterpreter->mInterpolationT = 1.0f;
+        SetRendererStage("renderer-start-frame-enter");
         sInterpreter->StartFrame();
+        SetRendererStage("renderer-start-frame-returned");
         perf.previous_gpu_us = PositiveHundredths(C3D_GetDrawingTime()) * 10;
         SetRendererStage("renderer-run-display-list");
         { mk64_3ds::PerformanceTimer timer(perf.interpreter_us); sInterpreter->Run(commands, sNoMatrixReplacements); }
         perf.begin_wait_us += sRenderer->GetFrameBeginWaitMicroseconds();
+        SetRendererStage("renderer-hud-enter");
         { mk64_3ds::PerformanceTimer timer(perf.hud_us); Mk64BottomUI3DSDraw(sRenderer->PrepareForExternalDraw()); }
         SetRendererStage("renderer-end-frame");
         { mk64_3ds::PerformanceTimer timer(perf.submit_us); sInterpreter->EndFrame(); }
+        SetRendererStage("renderer-submit-returned");
+        // Submission is not a completion fence. The next FrameBegin observes
+        // the actual GPU queue; C3D_FrameSync only observes display counters.
+        if (Mk64Startup3DSFrameSubmitted) Mk64Startup3DSFrameSubmitted();
         ++perf.presents;
         perf.key_cpu_us = PositiveHundredths(C3D_GetProcessingTime()) * 10;
         perf.culled += gMk64DistanceCulled3DS;
@@ -634,7 +642,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     LogPerformanceSample();
     sPreviousSynchronizationUs = perf.begin_wait_us;
     sPreviousPresentationDuration = osGetTime() - presentationStart;
-    SetRendererStage("renderer-frame-presented");
+    SetRendererStage("renderer-frame-submitted");
 }
 
 extern "C" void GameEngine_ProcessGfxCommands(Gfx* commands) {

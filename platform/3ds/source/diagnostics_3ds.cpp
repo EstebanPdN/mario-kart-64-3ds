@@ -12,6 +12,7 @@
 #include "native_geometry_3ds.hpp"
 #include "native_lighting_3ds.h"
 #include "fast3d_reuse_3ds.hpp"
+#include "triangle_reuse_3ds.hpp"
 #include <citro3d.h>
 extern "C" void Mk64Perf3DSLogFlush(uint64_t);
 
@@ -620,6 +621,12 @@ void WriteQuickDump(const char* trigger, bool fullMemory) {
         std::fprintf(info, "Data cache clean path: %s\n", Mk64System3DSDataCacheMode());
         const auto& native = mk64_3ds::gNativeGeometry3DS.counters;
         const auto& reuse = mk64_3ds::gFast3DReuseStats;
+        const auto& triangleReuse = mk64_3ds::gTriangleReuseCounters;
+        std::fprintf(info, "Triangle preparation material hits / misses / vertex hits / misses: %llu / %llu / %llu / %llu\n",
+                     static_cast<unsigned long long>(triangleReuse.materialHits),
+                     static_cast<unsigned long long>(triangleReuse.materialMisses),
+                     static_cast<unsigned long long>(triangleReuse.vertexHits),
+                     static_cast<unsigned long long>(triangleReuse.vertexMisses));
         std::fprintf(info, "Native geometry lifetime loads / CPU XY materializations / eligible triangles / state switches: %llu / %llu / %llu / %llu\n",
                      static_cast<unsigned long long>(native.loaded),
                      static_cast<unsigned long long>(native.materialized),
