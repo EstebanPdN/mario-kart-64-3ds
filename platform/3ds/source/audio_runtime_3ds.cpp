@@ -5,6 +5,7 @@
 #include "diagnostics_3ds.h"
 #include "settings_3ds.h"
 #include "performance_trace_3ds.hpp"
+#include "startup_trace_3ds.h"
 
 #include "audio/data.h"
 #include "audio/heap.h"
@@ -62,6 +63,7 @@ constexpr size_t kAudioWorkerStackSize = 64u * 1024u;
 constexpr int32_t kAudioWorkerPriority = 0x18;
 
 bool sReady = false;
+bool sGameStateReady = false;
 bool sSuspended = false;
 uint32_t sSynthesisBlockCount = 0;
 uint32_t sPumpCallCount = 0;
@@ -329,7 +331,7 @@ bool StartAudioWorker() {
 }
 
 bool ScheduleWorkerJob(bool duringRender = false) {
-    if (sWorkerThread == nullptr || !sWorkerRunning.load(std::memory_order_acquire) ||
+    if (!sGameStateReady || sWorkerThread == nullptr || !sWorkerRunning.load(std::memory_order_acquire) ||
         sPaused.load(std::memory_order_acquire)) {
         return false;
     }
@@ -349,7 +351,21 @@ bool WaitForWorkerJob() {
     if (!sJobOutstanding.load(std::memory_order_acquire)) return true;
     {
         mk64_3ds::PerformanceTimer timer(mk64_3ds::PerformanceCurrent().audio_wait_us);
-        LightEvent_Wait(&sWorkerDone);
+        const uint64_t started = mk64_3ds::PerformanceNow();
+        uint64_t remainingUs = 2000000;
+        while (LightEvent_WaitTimeout(&sWorkerDone, remainingUs * 1000LL)) {
+            // The timed arbiter can return timeout when the worker signals
+            // between libctru's state check and its syscall, without sleeping.
+            // Consume that completion before treating the result as a failure.
+            if (LightEvent_TryWait(&sWorkerDone)) break;
+            const uint64_t elapsedUs = mk64_3ds::PerformanceNow() - started;
+            if (elapsedUs >= 2000000) {
+                // Never resume logic or free a producer that has not finished.
+                Mk64StartupFailure("audio-worker-barrier-timeout-kernel-exit");
+                svcExitProcess();
+            }
+            remainingUs = 2000000 - elapsedUs;
+        }
     }
     mk64_3ds::PerformanceCurrent().audio_synth_us +=
         sLastJobMicroseconds.load(std::memory_order_relaxed);
@@ -360,6 +376,7 @@ bool WaitForWorkerJob() {
 }
 
 extern "C" bool Mk64GameAudio3DSInit() {
+    sGameStateReady = false;
     sSuspended = false;
     sReady = Mk64Audio3DSInit(kSampleRate);
     if (sReady) {
@@ -377,6 +394,17 @@ extern "C" bool Mk64GameAudio3DSInit() {
         StartAudioWorker();
     }
     return sReady;
+}
+
+extern "C" void Mk64GameAudio3DSFinishInitialization() {
+    sGameStateReady = sReady;
+}
+
+extern "C" void Mk64GameAudio3DSBeginLogic() {
+    if (!sReady) return;
+    Mk64StartupStage("audio-logic-barrier-enter");
+    WaitForWorkerJob();
+    Mk64StartupStage("audio-logic-barrier-returned");
 }
 
 extern "C" void Mk64GameAudio3DSSetPaused(bool paused) {
@@ -402,7 +430,7 @@ extern "C" void Mk64GameAudio3DSResume() {
 }
 
 extern "C" void Mk64GameAudio3DSBeginFrame() {
-    if (!sReady || sSuspended || sPaused.load(std::memory_order_acquire)) return;
+    if (!sReady || !sGameStateReady || sSuspended || sPaused.load(std::memory_order_acquire)) return;
     // Starting immediately before the display-list interpreter overlaps the
     // expensive mixer with CPU/GPU rendering instead of appending it to the
     // critical path after every rendered frame.
@@ -410,7 +438,7 @@ extern "C" void Mk64GameAudio3DSBeginFrame() {
 }
 
 extern "C" void Mk64GameAudio3DSPump() {
-    if (!sReady) return;
+    if (!sReady || !sGameStateReady || sSuspended) return;
 
     ++sPumpCallCount;
     const uint32_t bufferedBefore = Mk64Audio3DSBufferedFrames();
@@ -472,6 +500,7 @@ extern "C" void Mk64GameAudio3DSPump() {
 }
 
 extern "C" void Mk64GameAudio3DSShutdown() {
+    sGameStateReady = false;
     StopAudioWorker();
     Mk64Audio3DSShutdown();
     sReady = false;
@@ -490,6 +519,7 @@ extern "C" void Mk64GameAudio3DSShutdown() {
 }
 
 extern "C" void Mk64GameAudio3DSAbortForProcessExit() {
+    sGameStateReady = false;
     // aptMainLoop() becoming false means the OS is terminating this process.
     // During that transition NDSP/service IPC and an outstanding worker can
     // stop replying, so the normal unbounded teardown is unsafe. Stop issuing

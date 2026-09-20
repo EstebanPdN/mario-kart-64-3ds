@@ -1233,6 +1233,41 @@ extern bool Mk64BottomUI3DSIsUpdateOpen(void) __attribute__((weak));
     string(REPLACE "void update_gamestate(void) {"
         "extern void Mk64BottomUI3DSShowLoadingProgress(const char*, const char*, unsigned) __attribute__((weak));\nvoid update_gamestate(void) {\n    if (Mk64BottomUI3DSShowLoadingProgress != NULL) Mk64BottomUI3DSShowLoadingProgress(\"LOADING GAME\", \"PLEASE WAIT\", 0);"
         SPAGHETTIKART_3DS_MAIN_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    # Keep startup diagnostics in the generated port copy, not the submodule.
+    # After the startup worker stops these hooks perform no file I/O.
+    string(PREPEND SPAGHETTIKART_3DS_MAIN_TEXT "#include \"startup_trace_3ds.h\"\n")
+    set(MK64_STARTUP_MAIN_BEFORE "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    string(REPLACE
+        "    rendering_init();\n    read_controllers();\n    func_800C5CB8();"
+        "    Mk64StartupStage(\"vanilla-initial-clear-enter\");\n    rendering_init();\n    Mk64StartupStage(\"vanilla-initial-controllers-enter\");\n    read_controllers();\n    Mk64StartupStage(\"vanilla-audio-state-init-enter\");\n    func_800C5CB8();\n    Mk64StartupStage(\"vanilla-audio-state-init-returned\");"
+        SPAGHETTIKART_3DS_MAIN_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    if(MK64_STARTUP_MAIN_BEFORE STREQUAL SPAGHETTIKART_3DS_MAIN_TEXT)
+        message(FATAL_ERROR "The upstream vanilla initialization order changed")
+    endif()
+    set(MK64_STARTUP_MAIN_BEFORE "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    string(REPLACE
+        "void thread5_iteration(void) {\n    func_800CB2C4();\n    calculate_delta_time();"
+        "void thread5_iteration(void) {\n    Mk64StartupStage(\"logic-audio-update-enter\");\n    func_800CB2C4();\n    Mk64StartupStage(\"logic-audio-update-returned\");\n    calculate_delta_time();\n    Mk64StartupStage(\"logic-state-update-enter\");"
+        SPAGHETTIKART_3DS_MAIN_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    if(MK64_STARTUP_MAIN_BEFORE STREQUAL SPAGHETTIKART_3DS_MAIN_TEXT)
+        message(FATAL_ERROR "The upstream first logic/audio boundary changed")
+    endif()
+    set(MK64_STARTUP_MAIN_BEFORE "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    string(REPLACE
+        "    profiler_log_thread5_time(THREAD5_START);\n    config_gfx_pool();\n    read_controllers();"
+        "    Mk64StartupStage(\"logic-state-update-returned\");\n    profiler_log_thread5_time(THREAD5_START);\n    config_gfx_pool();\n    Mk64StartupStage(\"logic-controllers-enter\");\n    read_controllers();\n    Mk64StartupStage(\"logic-controllers-returned\");"
+        SPAGHETTIKART_3DS_MAIN_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    if(MK64_STARTUP_MAIN_BEFORE STREQUAL SPAGHETTIKART_3DS_MAIN_TEXT)
+        message(FATAL_ERROR "The upstream logic/controller boundary changed")
+    endif()
+    set(MK64_STARTUP_MAIN_BEFORE "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    string(REPLACE
+        "    game_state_handler();\n\n    // call_render_hook();"
+        "    Mk64StartupStage(\"logic-game-state-handler-enter\");\n    game_state_handler();\n    Mk64StartupStage(\"logic-game-state-handler-returned\");\n\n    // call_render_hook();"
+        SPAGHETTIKART_3DS_MAIN_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    if(MK64_STARTUP_MAIN_BEFORE STREQUAL SPAGHETTIKART_3DS_MAIN_TEXT)
+        message(FATAL_ERROR "The upstream game-state-handler boundary changed")
+    endif()
     set(SPAGHETTIKART_3DS_MAIN_EXISTING "")
     if(EXISTS "${SPAGHETTIKART_3DS_MAIN_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_MAIN_SOURCE}" SPAGHETTIKART_3DS_MAIN_EXISTING)
@@ -3866,6 +3901,7 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
         include(platform/3ds/triangle_math.cmake)
         include(platform/3ds/fast3d_reuse.cmake)
         include(platform/3ds/cmake/native_geometry_3ds.cmake)
+        include(platform/3ds/cmake/triangle_reuse_3ds.cmake)
         file(WRITE "${SPAGHETTIKART_3DS_INTERPRETER_SOURCE}" "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
 
         add_library(mk64-3ds-fast3d-interpreter STATIC
@@ -4008,6 +4044,7 @@ if(MK64_3DS_BUILD_GAME_CORE AND MK64_3DS_BUILD_GAME_ENGINE AND
         platform/3ds/source/bottom_ui_3ds.cpp
         platform/3ds/source/diagnostics_3ds.cpp
         platform/3ds/source/game_main_3ds.cpp
+        platform/3ds/source/startup_trace_3ds.cpp
         platform/3ds/source/loading_screen_3ds.cpp
         platform/3ds/source/linear_allocation_capture_3ds.cpp
     )

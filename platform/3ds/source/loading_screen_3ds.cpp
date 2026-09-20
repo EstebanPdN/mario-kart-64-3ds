@@ -2,6 +2,7 @@
 #include "loading_animation_3ds.hpp"
 #include "o2r_archive_reader.hpp"
 #include "diagnostics_3ds.h"
+#include "startup_trace_3ds.h"
 #include <3ds.h>
 #include <atomic>
 #include <algorithm>
@@ -57,13 +58,17 @@ bool Draw(bool clear) {
     if (clear) std::memset(top, 0, size_t(width) * height * 3);
     // libctru reports the rotated buffer dimensions (240 by 400/800).
     mk64_3ds::DrawLoadingAnimation(*sAnimation, osGetTime() - sStartedAt, top, height, width);
+    Mk64StartupLoaderPhase("loader-top-cache-flush");
     GSPGPU_FlushDataCache(top, size_t(width) * height * 3);
     auto* bottom = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
     if (clear && bottom && gfxGetScreenFormat(GFX_BOTTOM) == GSP_BGR8_OES) {
         std::memset(bottom, 0, size_t(width) * height * 3);
+        Mk64StartupLoaderPhase("loader-bottom-cache-flush");
         GSPGPU_FlushDataCache(bottom, size_t(width) * height * 3);
     }
+    Mk64StartupLoaderPhase("loader-swap");
     gfxSwapBuffers();
+    Mk64StartupLoaderPhase("loader-draw-returned");
     return true;
 }
 void Animate(void*) {
@@ -71,8 +76,9 @@ void Animate(void*) {
     while (sRunning.load(std::memory_order_acquire)) {
         if (!aptIsActive()) frames = 0;
         else if (Draw(frames < 2)) ++frames;
-        // No VBlank wait: HOME/exit can suspend display events. A bounded
-        // sleep lets Stop always join before graphics teardown or game frames.
+        // Sleep is bounded; graphics IPC above can still stall. Stop must
+        // enforce its own deadline before any buffers or services are freed.
+        Mk64StartupLoaderPhase("loader-sleep");
         svcSleepThread(30000000LL);
     }
 }
@@ -101,8 +107,23 @@ extern "C" void Mk64Loading3DSStart(const char* archivePath) {
 }
 extern "C" void Mk64Loading3DSPauseDisplay(void) {
     sRunning.store(false, std::memory_order_release);
-    if (sThread) { threadJoin(sThread, U64_MAX); threadFree(sThread); sThread = nullptr; }
-    if (sOwnsGraphics) { gfxExit(); sOwnsGraphics = false; }
+    if (sThread) {
+        Mk64StartupStage("loading-worker-join-enter");
+        if (R_FAILED(threadJoin(sThread, 2000000000ULL))) {
+            Mk64StartupFailure("loading-worker-join-timeout-kernel-exit");
+            // All threads die together. Do not free live animation/stack data
+            // or enter libctru heap teardown while the worker still uses it.
+            svcExitProcess();
+        }
+        threadFree(sThread);
+        sThread = nullptr;
+        Mk64StartupStage("loading-worker-join-returned");
+    }
+    if (sOwnsGraphics) {
+        Mk64StartupStage("loading-gfx-exit-enter");
+        gfxExit(); sOwnsGraphics = false;
+        Mk64StartupStage("loading-gfx-exit-returned");
+    }
 }
 extern "C" void Mk64Loading3DSResumeDisplay(void) {
     // The game renderer has initialized its buffers, but has not begun any
@@ -110,6 +131,9 @@ extern "C" void Mk64Loading3DSResumeDisplay(void) {
     Launch();
 }
 extern "C" void Mk64Loading3DSStop(void) {
+    Mk64StartupStage("loading-stop-enter");
     Mk64Loading3DSPauseDisplay();
+    Mk64StartupStage("loading-animation-free-enter");
     if (sAnimation) { sAnimation->~LoadingAnimation(); linearFree(sAnimation); sAnimation = nullptr; }
+    Mk64StartupStage("loading-stop-returned");
 }

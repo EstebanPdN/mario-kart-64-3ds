@@ -51,8 +51,13 @@
     min r6.xy, textureClamp, intex0
     min r6.zw, textureClamp, intex1.xyxy
     mul r6, textureScale, r6
-    mov outtc0.xy, r6
-    mov outtc1.xy, r6.zwzw
+    ; Write complete output vectors, including finite z/w padding, as the
+    ; original passthrough did. Keep all UV clamp/scale arithmetic on PICA.
+    mov r7, shaderConstants.yyyx
+    mov r7.xy, r6
+    mov outtc0, r7
+    mov r7.xy, r6.zwzw
+    mov outtc1, r7
     ; Perspective w is eye-space distance in the game cameras. Generate a
     ; third texture coordinate without increasing the packed vertex size.
     mov r1, shaderConstants.yyyy
