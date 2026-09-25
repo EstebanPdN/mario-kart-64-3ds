@@ -57,6 +57,18 @@ extern "C" bool Mk64System3DSCleanDataCache(const void* address, size_t size) {
     return R_SUCCEEDED(GSPGPU_FlushDataCache(address, cacheSize));
 }
 
+extern "C" bool Mk64System3DSInvalidateDataCache(const void* address, size_t size) {
+    if (address == nullptr || size == 0) return true;
+    if (size > std::numeric_limits<u32>::max()) return false;
+
+    const u32 cacheAddress = static_cast<u32>(reinterpret_cast<uintptr_t>(address));
+    const u32 cacheSize = static_cast<u32>(size);
+    const Result directResult =
+        svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, cacheAddress, cacheSize);
+    if (R_SUCCEEDED(directResult)) return true;
+    return R_SUCCEEDED(GSPGPU_InvalidateDataCache(address, cacheSize));
+}
+
 extern "C" const char* Mk64System3DSDataCacheMode(void) {
     switch (sCacheCleanMode.load(std::memory_order_acquire)) {
         case CacheCleanMode::DirectSvc: return "direct-svc-store";
