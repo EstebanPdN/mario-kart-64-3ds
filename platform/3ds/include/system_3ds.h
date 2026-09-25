@@ -13,6 +13,8 @@ uint64_t Mk64System3DSTicksPerSecond(void);
 /* Make CPU-written linear memory visible to PICA200/NDSP without a service
  * round trip when the current title permissions allow the direct ARM11 SVC. */
 bool Mk64System3DSCleanDataCache(const void* address, size_t size);
+/* Make GPU-written memory visible to the CPU before reading it. */
+bool Mk64System3DSInvalidateDataCache(const void* address, size_t size);
 const char* Mk64System3DSDataCacheMode(void);
 /* Capture the individual linear-memory allocations made by a library initializer.
  * The game executable wraps linearAlloc only while this window is active. */

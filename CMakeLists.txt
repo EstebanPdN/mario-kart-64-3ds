@@ -2036,43 +2036,36 @@ World* World::Instance;]=]
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
     file(WRITE "${SPAGHETTIKART_3DS_TRACK_SOURCE}" "${SPAGHETTIKART_3DS_TRACK_TEXT}")
 
-    # Citro3D's framebuffer readback is intentionally absent, so copying its
-    # zero-filled CPU buffer into six billboard textures and invalidating all
-    # six GPU cache entries every frame only creates stalls. Keep the original
-    # static course textures on 3DS; desktop source and behavior remain intact.
-    set(MK64_3DS_JUMBOTRON_INVALIDATION_BLOCK [=[    // Invalidate Jumbotron textures so they update each frame
-    // This could be more efficient if we exposed the non-opcode based invalidation to be called
-    // inside copy_framebuffers_port
-    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture68272C);
-    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682928);
-    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682B24);
-    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682D20);
-    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture682F1C);
-    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture683118);
-]=])
-
     file(READ "${SPAGHETTIKART_LUIGI_RACEWAY_SOURCE}"
          SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT)
     set(SPAGHETTIKART_3DS_LUIGI_RACEWAY_ORIGINAL
         "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
-    string(REPLACE "${MK64_3DS_JUMBOTRON_INVALIDATION_BLOCK}" ""
+    string(REPLACE
+        "#include <memory>"
+        "#include <memory>\n#include \"jumbotron_3ds.h\""
         SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT
         "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
     if(SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT STREQUAL
        SPAGHETTIKART_3DS_LUIGI_RACEWAY_ORIGINAL)
-        message(FATAL_ERROR "The upstream Luigi Raceway jumbotron invalidation block changed")
+        message(FATAL_ERROR "The upstream Luigi Raceway include block changed")
     endif()
-    set(SPAGHETTIKART_3DS_LUIGI_RACEWAY_INVALIDATION_TEXT
+    set(SPAGHETTIKART_3DS_LUIGI_RACEWAY_INCLUDE_TEXT
         "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
     string(REPLACE
         [=[        CopyJumbotron(D_800DC5DC, D_800DC5E0, currentScreenSection,
                                             (u16*) gPortFramebuffers[prevFrame]);]=]
-        "        /* PLATFORM_3DS: retain the static billboard texture. */"
+        [=[        Mk64Jumbotron3DSUpdate(
+            (u16*) LOAD_ASSET_RAW(gTexture68272C),
+            (u16*) LOAD_ASSET_RAW(gTexture682928),
+            (u16*) LOAD_ASSET_RAW(gTexture682B24),
+            (u16*) LOAD_ASSET_RAW(gTexture682D20),
+            (u16*) LOAD_ASSET_RAW(gTexture682F1C),
+            (u16*) LOAD_ASSET_RAW(gTexture683118));]=]
         SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT
         "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}"
     )
     if(SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT STREQUAL
-       SPAGHETTIKART_3DS_LUIGI_RACEWAY_INVALIDATION_TEXT)
+       SPAGHETTIKART_3DS_LUIGI_RACEWAY_INCLUDE_TEXT)
         message(FATAL_ERROR "The upstream Luigi Raceway jumbotron copy call changed")
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_SOURCE}"
@@ -2082,23 +2075,31 @@ World* World::Instance;]=]
          SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT)
     set(SPAGHETTIKART_3DS_WARIO_STADIUM_ORIGINAL
         "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}")
-    string(REPLACE "${MK64_3DS_JUMBOTRON_INVALIDATION_BLOCK}" ""
+    string(REPLACE
+        "#include <memory>"
+        "#include <memory>\n#include \"jumbotron_3ds.h\""
         SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT
         "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}")
     if(SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT STREQUAL
        SPAGHETTIKART_3DS_WARIO_STADIUM_ORIGINAL)
-        message(FATAL_ERROR "The upstream Wario Stadium jumbotron invalidation block changed")
+        message(FATAL_ERROR "The upstream Wario Stadium include block changed")
     endif()
-    set(SPAGHETTIKART_3DS_WARIO_STADIUM_INVALIDATION_TEXT
+    set(SPAGHETTIKART_3DS_WARIO_STADIUM_INCLUDE_TEXT
         "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}")
     string(REPLACE
         "        CopyJumbotron(D_800DC5DC, D_800DC5E0, currentScreenSection, (u16*) gPortFramebuffers[prevFrame]);"
-        "        /* PLATFORM_3DS: retain the static billboard texture. */"
+        [=[        Mk64Jumbotron3DSUpdate(
+            (u16*) LOAD_ASSET_RAW(gTexture68272C),
+            (u16*) LOAD_ASSET_RAW(gTexture682928),
+            (u16*) LOAD_ASSET_RAW(gTexture682B24),
+            (u16*) LOAD_ASSET_RAW(gTexture682D20),
+            (u16*) LOAD_ASSET_RAW(gTexture682F1C),
+            (u16*) LOAD_ASSET_RAW(gTexture683118));]=]
         SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT
         "${SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT}"
     )
     if(SPAGHETTIKART_3DS_WARIO_STADIUM_TEXT STREQUAL
-       SPAGHETTIKART_3DS_WARIO_STADIUM_INVALIDATION_TEXT)
+       SPAGHETTIKART_3DS_WARIO_STADIUM_INCLUDE_TEXT)
         message(FATAL_ERROR "The upstream Wario Stadium jumbotron copy call changed")
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_WARIO_STADIUM_SOURCE}"
@@ -2266,6 +2267,7 @@ void LoadTrack() {
         platform/3ds/source/game_state_3ds.cpp
         platform/3ds/source/gbi_middleware_3ds.cpp
         platform/3ds/source/install_log_3ds.cpp
+        platform/3ds/source/jumbotron_3ds.cpp
         platform/3ds/source/loading_image_3ds.cpp
         platform/3ds/source/settings_3ds.cpp
         platform/3ds/source/torch_o2r_3ds.cpp
