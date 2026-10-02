@@ -277,7 +277,15 @@ Additional optimization and 3DS implementation techniques were studied from
 other open-source Nintendo 64 ports, including
 [Super Mario 64 3DS Port Ultimate](https://github.com/Epic0522/Super-Mario-64-3ds-port---Ultimate).
 
-## Legal
+## License and legal notice
+
+Licensing is component-specific. The built-in updater includes the
+[GNU GPL v3.0 text](platform/3ds/update/COPYING); its networking dependencies
+retain their [curl](platform/3ds/update-dependencies/LICENSE-curl.txt),
+[mbedTLS](platform/3ds/update-dependencies/LICENSE-mbedTLS.txt) and
+[Jansson](platform/3ds/update-dependencies/LICENSE-Jansson.txt) licenses.
+SpaghettiKart and its libraries retain their upstream notices. No blanket GPL
+license is assigned to the whole repository or to Nintendo game content.
 
 This repository contains source code, build scripts, redistributable
 port-specific artwork, and extraction logic. It does not distribute Mario Kart
