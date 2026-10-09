@@ -22,7 +22,7 @@ Made with help from Codex.
 Join the Discord for project updates, support, bug reports, suggestions, and
 other Nintendo 3DS homebrew projects:
 
-https://discord.gg/SMW49UMkw
+https://discord.gg/zy8BqH5ss
 
 ## Features
 
