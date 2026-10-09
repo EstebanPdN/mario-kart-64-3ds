@@ -285,7 +285,7 @@ bool StartAudioWorker() {
     if (!isNewModel) {
         __3ds_u32 currentLimit = 0;
         const bool hadLimit = R_SUCCEEDED(APT_GetAppCpuTimeLimit(&currentLimit));
-        static constexpr std::array<__3ds_u32, 4> kCore1Limits = { 80, 70, 50, 30 };
+        static constexpr std::array<__3ds_u32, 4> kCore1Limits = { 70, 50, 30 };
         for (const __3ds_u32 candidate : kCore1Limits) {
             if (R_FAILED(APT_SetAppCpuTimeLimit(candidate))) continue;
             // A successful Set has already changed process state even if the
