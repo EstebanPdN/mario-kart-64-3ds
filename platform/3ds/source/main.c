@@ -71,6 +71,8 @@ int main(void) {
 
     if (R_SUCCEEDED(APT_CheckNew3DS(&is_new_3ds)) && is_new_3ds) {
         osSetSpeedupEnable(true);
+    } else {
+        APT_SetAppCpuTimeLimit(30);
     }
 
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);

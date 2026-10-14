@@ -38,6 +38,7 @@ extern u32 __ctru_linear_heap_size;
 }
 
 extern "C" float Mk64GameState3DSDistanceFog(uint32_t*) __attribute__((weak));
+extern "C" const void* Mk64GetCurrentDlistCommand(void) __attribute__((weak));
 extern "C" {
 float gMk64DistanceFar3DS = 0.0f;
 uint32_t gMk64DistanceCulled3DS = 0;
@@ -378,6 +379,15 @@ void ConfigureAlphaPass(C3D_TexEnv* environment) {
 } // namespace
 
 struct GfxRenderingAPICitro3D::Impl {
+    struct StaticVboEntry3DS {
+        uint32_t key = 0;
+        PackedVertex* linearVertices = nullptr;
+        size_t packedVertexCount = 0;
+        size_t allocatedBytes = 0;
+    };
+    static constexpr size_t kStaticVboTableSize = 1024;
+    static constexpr size_t kMaxStaticVboBytes = 2 * 1024 * 1024;
+    static constexpr size_t kMinFreeLinearHeapForStaticVbo = 3 * 1024 * 1024;
     struct TextureSlot {
         C3D_Tex texture = {};
         bool initialized = false;
@@ -397,6 +407,7 @@ struct GfxRenderingAPICitro3D::Impl {
     };
 
     Impl() {
+        staticVboTable.fill({});
         framebuffers.emplace_back(); // ID 0 is the top-screen render target.
     }
 
@@ -505,9 +516,24 @@ struct GfxRenderingAPICitro3D::Impl {
     uint64_t vertexUploadBytes = 0;
     uint64_t linearHeapFlushFrameCount = 0;
 
+    std::array<StaticVboEntry3DS, kStaticVboTableSize> staticVboTable{};
+    size_t staticVboAllocatedBytes = 0;
+    uint64_t staticVboHits = 0;
+    uint64_t staticVboMisses = 0;
+    const PackedVertex* currentVboPointer = nullptr;
+
     uint32_t frameBeginWaitMicroseconds = 0;
 
     ~Impl() {
+        for (auto& entry : staticVboTable) {
+            if (entry.linearVertices != nullptr) {
+                linearFree(entry.linearVertices);
+                entry.linearVertices = nullptr;
+            }
+        }
+        staticVboTable.fill({});
+        staticVboAllocatedBytes = 0;
+
         for (auto& slot : framebuffers) {
             if (slot == nullptr) {
                 continue;
@@ -1000,266 +1026,12 @@ void GfxRenderingAPICitro3D::ApplyNativeVertexState() {
     mImpl->nativeVertexStateDirty = false;
 }
 
-void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, size_t bufVboNumTris) {
-    ShaderProgram* program = mImpl->currentProgram;
-    if (!mImpl->frameActive || program == nullptr || program->invisible || bufVbo == nullptr ||
-        program->strideFloats == 0 || bufVboNumTris == 0) {
-        return;
-    }
-
-    // Fail through the recoverable renderer path before libctru's fatal
-    // capacity assertion. Keep room to submit/close the partial frame safely.
-    RequireGpuCommandRoom(mk64_3ds::kGpuCommandTailWords + mk64_3ds::kGpuCommandDrawWords);
-    const size_t sourceVertexCount = std::min(bufVboNumTris * 3, static_cast<size_t>(kMaxSourceVertices));
-    const size_t sourceTriangleCount = sourceVertexCount / 3;
-    if (program->strideFloats > kMaxVertexStrideFloats ||
-        bufVboLen < sourceVertexCount * program->strideFloats) {
-        return;
-    }
-
-    const float* drawVertices = bufVbo;
-    size_t vertexCount = sourceVertexCount;
-    bool needsClipping = false;
-    bool reachesDistanceFog = false;
-    const float fogStart = gMk64DistanceFar3DS * 0.75f;
-    for (size_t vertex = 0; vertex < sourceVertexCount; ++vertex) {
-        const float w = bufVbo[vertex * program->strideFloats + 3];
-        needsClipping |= w < kClipWEpsilon;
-        reachesDistanceFog |= w > fogStart;
-    }
-    if (needsClipping) {
-        mImpl->clipScratch.resize(sourceTriangleCount * 6 * program->strideFloats);
-        size_t clippedVertexCount = 0;
-        for (size_t triangle = 0; triangle < sourceTriangleCount; ++triangle) {
-            const float* triangleVertices[3] = {
-                bufVbo + (triangle * 3 + 0) * program->strideFloats,
-                bufVbo + (triangle * 3 + 1) * program->strideFloats,
-                bufVbo + (triangle * 3 + 2) * program->strideFloats,
-            };
-            const int insideCount =
-                static_cast<int>(triangleVertices[0][3] >= kClipWEpsilon) +
-                static_cast<int>(triangleVertices[1][3] >= kClipWEpsilon) +
-                static_cast<int>(triangleVertices[2][3] >= kClipWEpsilon);
-            if (insideCount == 3) {
-                std::copy_n(triangleVertices[0], 3 * program->strideFloats,
-                            mImpl->clipScratch.data() +
-                                clippedVertexCount * program->strideFloats);
-                clippedVertexCount += 3;
-                continue;
-            }
-            if (insideCount == 0) {
-                continue;
-            }
-            clippedVertexCount += ClipTriangleAgainstW(
-                triangleVertices, program->strideFloats,
-                mImpl->clipScratch.data() + clippedVertexCount * program->strideFloats);
-        }
-        if (clippedVertexCount == 0) {
-            return;
-        }
-        drawVertices = mImpl->clipScratch.data();
-        vertexCount = std::min(clippedVertexCount, static_cast<size_t>(kMaxDrawVertices));
-    }
-    if (mImpl->packedVertexCount + vertexCount > kVertexBufferCapacity) {
-        throw std::length_error("3DS packed vertex buffer exhausted");
-    }
-
-    const size_t firstVertex = mImpl->packedVertexCount;
-
-    bool coverNativeFullscreenTexture = false;
-    if (!mImpl->nativeGeometry.enabled && mImpl->activeTarget == mImpl->gameTarget &&
-        !mImpl->originalAspect &&
-        IsNativeFullscreenQuad(drawVertices, vertexCount, program->strideFloats)) {
-        for (int texture = 0; texture < 2; ++texture) {
-            if (!program->usedTextures[texture] || mImpl->selectedFramebuffers[texture] != 0) {
-                continue;
-            }
-            const uint32_t textureId = mImpl->selectedTextures[texture];
-            if (textureId < mImpl->textures.size()) {
-                const auto& slot = mImpl->textures[textureId];
-                if (slot.initialized && !slot.hasTransparency && slot.sourceWidth == kNativeWidth &&
-                    slot.sourceHeight == kNativeHeight) {
-                    coverNativeFullscreenTexture = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    std::array<std::array<float, 4>, 7> constants = {};
-    // A program with one combiner input can always source it from the primary
-    // vertex color. This is exact for both uniform and varying batches, avoids
-    // scanning every vertex to rediscover uniformity, and keeps per-draw tint
-    // changes out of the six-stage TEV rebuild path.
-    int varyingInput = program->numInputs == 1 ? 0 : -1;
-    for (uint8_t input = 0; input < program->numInputs; ++input) {
-        const uint8_t inputOffset = program->inputOffsets[input];
-        for (int component = 0; component < 4; ++component) {
-            constants[input][component] =
-                component == 3 && !program->alpha ? 1.0f : drawVertices[inputOffset + component];
-        }
-        // PICA exposes one primary vertex color to the TEV pipeline. Once that
-        // varying input is chosen, every later input is necessarily represented
-        // by its first-vertex constant, so scanning the rest of the batch cannot
-        // affect the generated TEV state.
-        if (varyingInput >= 0) {
-            continue;
-        }
-        bool constant = true;
-        for (size_t vertex = 1; vertex < vertexCount && constant; ++vertex) {
-            const float* source = drawVertices + vertex * program->strideFloats + inputOffset;
-            const int componentCount = program->alpha ? 4 : 3;
-            for (int component = 0; component < componentCount; ++component) {
-                if (std::fabs(source[component] - constants[input][component]) > 1.0e-5f) {
-                    constant = false;
-                    break;
-                }
-            }
-        }
-        if (!constant && varyingInput < 0) {
-            varyingInput = input;
-        }
-    }
-
-    // Uniform inputs still need distinct TEV sources. In particular, karts
-    // use (1 - environment) * texture + primitive: mapping both 1 and a
-    // uniform environment to GPU_CONSTANT turns the subtraction into zero.
-    // Keep the primary-color slot occupied even when every input is uniform.
-    if (varyingInput < 0 && program->numInputs > 0) varyingInput = 0;
-
-    // Scale an opaque 320x240 full-screen backdrop uniformly to 400x300 and
-    // let the top screen crop 30 pixels at the top and bottom. This gives it a
-    // centered "cover" presentation without stretching or moving menus, HUD
-    // elements, portraits, or other sprites.
-    const float coverScale = coverNativeFullscreenTexture ? kFullscreenCoverScale : 1.0f;
-    std::array<float, 2> textureScaleU = { 1.0f, 1.0f };
-    std::array<float, 2> textureScaleV = { 1.0f, 1.0f };
-    for (int texture = 0; texture < 2; ++texture) {
-        if (!program->usedTextures[texture]) {
-            continue;
-        }
-        const uint32_t textureId = mImpl->selectedTextures[texture];
-        if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
-            const auto& slot = mImpl->textures[textureId];
-            textureScaleU[texture] *= static_cast<float>(slot.sourceWidth) / slot.texture.width;
-            textureScaleV[texture] *= static_cast<float>(slot.sourceHeight) / slot.texture.height;
-        }
-        const int framebufferId = mImpl->selectedFramebuffers[texture];
-        if (framebufferId > 0 && framebufferId < static_cast<int>(mImpl->framebuffers.size()) &&
-            mImpl->framebuffers[framebufferId] != nullptr &&
-            mImpl->framebuffers[framebufferId]->initialized) {
-            const auto& slot = *mImpl->framebuffers[framebufferId];
-            textureScaleU[texture] *= static_cast<float>(slot.logicalWidth) / slot.texture.width;
-            textureScaleV[texture] *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
-        }
-    }
-    std::array<float, 4> uvScale = {textureScaleU[0], textureScaleV[0],
-                                    textureScaleU[1], textureScaleV[1]};
-    // Raw signed N64 texture coordinates, including tile shifts, are far
-    // below this exactly representable bound. Unused clamps remain inactive.
-    std::array<float, 4> uvClamp = {0x1p30f, 0x1p30f, 0x1p30f, 0x1p30f};
-    for (int texture = 0; texture < 2; ++texture) {
-        if (!program->usedTextures[texture]) continue;
-        uint8_t offset = program->textureOffsets[texture] + 2;
-        for (int axis = 0; axis < 2; ++axis)
-            if (program->clamp[texture][axis]) uvClamp[texture * 2 + axis] = drawVertices[offset++];
-    }
-    // A batch can retain per-vertex tile bounds across a tile-state change.
-    // Such batches preserve CPU clamping; one uniform must not replace them.
-    bool uniformClamps = true;
-    for (int texture = 0; texture < 2 && uniformClamps; ++texture) {
-        if (!program->usedTextures[texture]) continue;
-        uint8_t offset = program->textureOffsets[texture] + 2;
-        for (int axis = 0; axis < 2 && uniformClamps; ++axis) {
-            if (!program->clamp[texture][axis]) continue;
-            for (size_t vertex = 1; vertex < vertexCount; ++vertex)
-                if (drawVertices[vertex * program->strideFloats + offset] != uvClamp[texture * 2 + axis]) {
-                    uniformClamps = false;
-                    break;
-                }
-            ++offset;
-        }
-    }
-    if (!uniformClamps) uvClamp.fill(0x1p30f);
-    if (!mImpl->textureTransformValid || mImpl->textureScaleState != uvScale ||
-        mImpl->textureClampState != uvClamp) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureScaleUniform,
-                     uvScale[0], uvScale[1], uvScale[2], uvScale[3]);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureClampUniform,
-                     uvClamp[0], uvClamp[1], uvClamp[2], uvClamp[3]);
-        mImpl->textureScaleState = uvScale;
-        mImpl->textureClampState = uvClamp;
-        mImpl->textureTransformValid = true;
-    }
-    const auto packStarted = mk64_3ds::PerformanceNow();
-    for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
-        const float* source = drawVertices + vertex * program->strideFloats;
-        PackedVertex& destination = mImpl->packedVertices[firstVertex + vertex];
-        destination.position[0] = source[0] * coverScale;
-        destination.position[1] = source[1] * coverScale;
-        destination.position[2] = source[2];
-        destination.position[3] = source[3];
-
-        for (int texture = 0; texture < 2; ++texture) {
-            float u = 0.0f;
-            float v = 0.0f;
-            if (program->usedTextures[texture]) {
-                const uint8_t textureOffset = program->textureOffsets[texture];
-                u = source[textureOffset];
-                v = source[textureOffset + 1];
-                if (!uniformClamps) {
-                    uint8_t offset = textureOffset + 2;
-                    if (program->clamp[texture][0]) u = std::min(u, source[offset++]);
-                    if (program->clamp[texture][1]) v = std::min(v, source[offset]);
-                }
-            }
-            float* texcoord = texture == 0 ? destination.texcoord0 : destination.texcoord1;
-            texcoord[0] = u;
-            texcoord[1] = v;
-        }
-
-        if (varyingInput >= 0) {
-            const float* color = source + program->inputOffsets[varyingInput];
-            destination.color[0] = FloatColorToByte(color[0]);
-            destination.color[1] = FloatColorToByte(color[1]);
-            destination.color[2] = FloatColorToByte(color[2]);
-            destination.color[3] = program->alpha ? FloatColorToByte(color[3]) : 255;
-        } else {
-            destination.color[0] = 255;
-            destination.color[1] = 255;
-            destination.color[2] = 255;
-            destination.color[3] = 255;
-        }
-    }
-
-    mk64_3ds::PerformanceCurrent().vertex_pack_us += static_cast<uint32_t>(mk64_3ds::PerformanceNow() - packStarted);
-
-    std::array<float, 4> grayscaleColor = { 1.0f, 1.0f, 1.0f, 0.0f };
-    if (program->grayscale) {
-        const float* color = drawVertices + program->grayscaleOffset;
-        std::copy_n(color, grayscaleColor.size(), grayscaleColor.begin());
-    }
-
-    std::array<uint32_t, 7> packedTevConstants = {};
-    for (size_t index = 0; index < program->numInputs; ++index) {
-        if (static_cast<int>(index) == varyingInput) {
-            continue;
-        }
-        packedTevConstants[index] = PackColor(constants[index]);
-    }
-    const uint32_t packedTevGrayscale =
-        program->grayscale ? PackColor(grayscaleColor) : 0;
-    const bool fogEligible = gMk64DistanceFar3DS > 0 && mImpl->depthTest &&
-                             mImpl->activeTarget == mImpl->gameTarget;
-    // The ramp is exactly zero before fogStart. A triangle whose vertices are
-    // all nearer cannot cross that plane, so omit its texture read/TEV stage.
-    const bool distanceFog = fogEligible && reachesDistanceFog;
-    if (fogEligible && !distanceFog) ++gMk64DistanceFogBypassed3DS;
-    if (distanceFog && !mImpl->distanceFogTextureBound) {
-        C3D_TexBind(2, &mImpl->distanceFogTexture);
-        mImpl->distanceFogTextureBound = true;
-        ++gMk64DistanceFogBinds3DS;
-    }
+void GfxRenderingAPICitro3D::ApplyTevState(ShaderProgram* program, int varyingInput,
+                                           const std::array<std::array<float, 4>, 7>& constants,
+                                           const std::array<float, 4>& grayscaleColor,
+                                           bool distanceFog,
+                                           const std::array<uint32_t, 7>& packedTevConstants,
+                                           uint32_t packedTevGrayscale) {
     const bool updateTevState = !mImpl->tevStateValid ||
                                 mImpl->tevStateDistanceFog != distanceFog ||
                                 mImpl->tevStateProgram != program ||
@@ -1268,7 +1040,9 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                                 mImpl->tevStateGrayscale != packedTevGrayscale ||
                                 mImpl->tevStateDepthTest != mImpl->depthTest ||
                                 mImpl->tevStateDepthWrite != mImpl->depthWrite;
-    if (updateTevState) {
+    if (!updateTevState) {
+        return;
+    }
 
     // The previous-buffer update mask is persistent Citro3D state. Reset it
     // for every draw so a grayscale program cannot leak into the next one.
@@ -1412,15 +1186,328 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                   0x08);
     C3D_DepthTest(mImpl->depthTest, mImpl->depthTest ? GPU_GREATER : GPU_ALWAYS,
                   static_cast<GPU_WRITEMASK>(GPU_WRITE_COLOR | (mImpl->depthWrite ? GPU_WRITE_DEPTH : 0)));
-        mImpl->tevStateValid = true;
-        mImpl->tevStateProgram = program;
-        mImpl->tevStateVaryingInput = varyingInput;
-        mImpl->tevStateConstants = packedTevConstants;
-        mImpl->tevStateGrayscale = packedTevGrayscale;
-        mImpl->tevStateDepthTest = mImpl->depthTest;
-        mImpl->tevStateDepthWrite = mImpl->depthWrite;
-        mImpl->tevStateDistanceFog = distanceFog;
+    mImpl->tevStateValid = true;
+    mImpl->tevStateProgram = program;
+    mImpl->tevStateVaryingInput = varyingInput;
+    mImpl->tevStateConstants = packedTevConstants;
+    mImpl->tevStateGrayscale = packedTevGrayscale;
+    mImpl->tevStateDepthTest = mImpl->depthTest;
+    mImpl->tevStateDepthWrite = mImpl->depthWrite;
+    mImpl->tevStateDistanceFog = distanceFog;
+}
+
+void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, size_t bufVboNumTris) {
+    ShaderProgram* program = mImpl->currentProgram;
+    if (!mImpl->frameActive || program == nullptr || program->invisible || bufVbo == nullptr ||
+        program->strideFloats == 0 || bufVboNumTris == 0) {
+        return;
     }
+
+    // Fail through the recoverable renderer path before libctru's fatal
+    // capacity assertion. Keep room to submit/close the partial frame safely.
+    RequireGpuCommandRoom(mk64_3ds::kGpuCommandTailWords + mk64_3ds::kGpuCommandDrawWords);
+    const size_t sourceVertexCount = std::min(bufVboNumTris * 3, static_cast<size_t>(kMaxSourceVertices));
+    const size_t sourceTriangleCount = sourceVertexCount / 3;
+    if (program->strideFloats > kMaxVertexStrideFloats ||
+        bufVboLen < sourceVertexCount * program->strideFloats) {
+        return;
+    }
+
+    const float* drawVertices = bufVbo;
+    size_t vertexCount = sourceVertexCount;
+    bool needsClipping = false;
+    bool reachesDistanceFog = false;
+    const float fogStart = gMk64DistanceFar3DS * 0.75f;
+    for (size_t vertex = 0; vertex < sourceVertexCount; ++vertex) {
+        const float w = bufVbo[vertex * program->strideFloats + 3];
+        needsClipping |= w < kClipWEpsilon;
+        reachesDistanceFog |= w > fogStart;
+    }
+    if (needsClipping) {
+        mImpl->clipScratch.resize(sourceTriangleCount * 6 * program->strideFloats);
+        size_t clippedVertexCount = 0;
+        for (size_t triangle = 0; triangle < sourceTriangleCount; ++triangle) {
+            const float* triangleVertices[3] = {
+                bufVbo + (triangle * 3 + 0) * program->strideFloats,
+                bufVbo + (triangle * 3 + 1) * program->strideFloats,
+                bufVbo + (triangle * 3 + 2) * program->strideFloats,
+            };
+            const int insideCount =
+                static_cast<int>(triangleVertices[0][3] >= kClipWEpsilon) +
+                static_cast<int>(triangleVertices[1][3] >= kClipWEpsilon) +
+                static_cast<int>(triangleVertices[2][3] >= kClipWEpsilon);
+            if (insideCount == 3) {
+                std::copy_n(triangleVertices[0], 3 * program->strideFloats,
+                            mImpl->clipScratch.data() +
+                                clippedVertexCount * program->strideFloats);
+                clippedVertexCount += 3;
+                continue;
+            }
+            if (insideCount == 0) {
+                continue;
+            }
+            clippedVertexCount += ClipTriangleAgainstW(
+                triangleVertices, program->strideFloats,
+                mImpl->clipScratch.data() + clippedVertexCount * program->strideFloats);
+        }
+        if (clippedVertexCount == 0) {
+            return;
+        }
+        drawVertices = mImpl->clipScratch.data();
+        vertexCount = std::min(clippedVertexCount, static_cast<size_t>(kMaxDrawVertices));
+    }
+
+    const size_t firstVertex = mImpl->packedVertexCount;
+
+    bool coverNativeFullscreenTexture = false;
+    if (!mImpl->nativeGeometry.enabled && mImpl->activeTarget == mImpl->gameTarget &&
+        !mImpl->originalAspect &&
+        IsNativeFullscreenQuad(drawVertices, vertexCount, program->strideFloats)) {
+        for (int texture = 0; texture < 2; ++texture) {
+            if (!program->usedTextures[texture] || mImpl->selectedFramebuffers[texture] != 0) {
+                continue;
+            }
+            const uint32_t textureId = mImpl->selectedTextures[texture];
+            if (textureId < mImpl->textures.size()) {
+                const auto& slot = mImpl->textures[textureId];
+                if (slot.initialized && !slot.hasTransparency && slot.sourceWidth == kNativeWidth &&
+                    slot.sourceHeight == kNativeHeight) {
+                    coverNativeFullscreenTexture = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    std::array<std::array<float, 4>, 7> constants = {};
+    // A program with one combiner input can always source it from the primary
+    // vertex color. This is exact for both uniform and varying batches, avoids
+    // scanning every vertex to rediscover uniformity, and keeps per-draw tint
+    // changes out of the six-stage TEV rebuild path.
+    int varyingInput = program->numInputs == 1 ? 0 : -1;
+    for (uint8_t input = 0; input < program->numInputs; ++input) {
+        const uint8_t inputOffset = program->inputOffsets[input];
+        for (int component = 0; component < 4; ++component) {
+            constants[input][component] =
+                component == 3 && !program->alpha ? 1.0f : drawVertices[inputOffset + component];
+        }
+        // PICA exposes one primary vertex color to the TEV pipeline. Once that
+        // varying input is chosen, every later input is necessarily represented
+        // by its first-vertex constant, so scanning the rest of the batch cannot
+        // affect the generated TEV state.
+        if (varyingInput >= 0) {
+            continue;
+        }
+        bool constant = true;
+        for (size_t vertex = 1; vertex < vertexCount && constant; ++vertex) {
+            const float* source = drawVertices + vertex * program->strideFloats + inputOffset;
+            const int componentCount = program->alpha ? 4 : 3;
+            for (int component = 0; component < componentCount; ++component) {
+                if (std::fabs(source[component] - constants[input][component]) > 1.0e-5f) {
+                    constant = false;
+                    break;
+                }
+            }
+        }
+        if (!constant && varyingInput < 0) {
+            varyingInput = input;
+        }
+    }
+
+    // Uniform inputs still need distinct TEV sources. In particular, karts
+    // use (1 - environment) * texture + primitive: mapping both 1 and a
+    // uniform environment to GPU_CONSTANT turns the subtraction into zero.
+    // Keep the primary-color slot occupied even when every input is uniform.
+    if (varyingInput < 0 && program->numInputs > 0) varyingInput = 0;
+
+    // Scale an opaque 320x240 full-screen backdrop uniformly to 400x300 and
+    // let the top screen crop 30 pixels at the top and bottom. This gives it a
+    // centered "cover" presentation without stretching or moving menus, HUD
+    // elements, portraits, or other sprites.
+    const float coverScale = coverNativeFullscreenTexture ? kFullscreenCoverScale : 1.0f;
+    std::array<float, 2> textureScaleU = { 1.0f, 1.0f };
+    std::array<float, 2> textureScaleV = { 1.0f, 1.0f };
+    for (int texture = 0; texture < 2; ++texture) {
+        if (!program->usedTextures[texture]) {
+            continue;
+        }
+        const uint32_t textureId = mImpl->selectedTextures[texture];
+        if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
+            const auto& slot = mImpl->textures[textureId];
+            textureScaleU[texture] *= static_cast<float>(slot.sourceWidth) / slot.texture.width;
+            textureScaleV[texture] *= static_cast<float>(slot.sourceHeight) / slot.texture.height;
+        }
+        const int framebufferId = mImpl->selectedFramebuffers[texture];
+        if (framebufferId > 0 && framebufferId < static_cast<int>(mImpl->framebuffers.size()) &&
+            mImpl->framebuffers[framebufferId] != nullptr &&
+            mImpl->framebuffers[framebufferId]->initialized) {
+            const auto& slot = *mImpl->framebuffers[framebufferId];
+            textureScaleU[texture] *= static_cast<float>(slot.logicalWidth) / slot.texture.width;
+            textureScaleV[texture] *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
+        }
+    }
+    std::array<float, 4> uvScale = {textureScaleU[0], textureScaleV[0],
+                                    textureScaleU[1], textureScaleV[1]};
+    // Raw signed N64 texture coordinates, including tile shifts, are far
+    // below this exactly representable bound. Unused clamps remain inactive.
+    std::array<float, 4> uvClamp = {0x1p30f, 0x1p30f, 0x1p30f, 0x1p30f};
+    for (int texture = 0; texture < 2; ++texture) {
+        if (!program->usedTextures[texture]) continue;
+        uint8_t offset = program->textureOffsets[texture] + 2;
+        for (int axis = 0; axis < 2; ++axis)
+            if (program->clamp[texture][axis]) uvClamp[texture * 2 + axis] = drawVertices[offset++];
+    }
+    // A batch can retain per-vertex tile bounds across a tile-state change.
+    // Such batches preserve CPU clamping; one uniform must not replace them.
+    bool uniformClamps = true;
+    for (int texture = 0; texture < 2 && uniformClamps; ++texture) {
+        if (!program->usedTextures[texture]) continue;
+        uint8_t offset = program->textureOffsets[texture] + 2;
+        for (int axis = 0; axis < 2 && uniformClamps; ++axis) {
+            if (!program->clamp[texture][axis]) continue;
+            for (size_t vertex = 1; vertex < vertexCount; ++vertex)
+                if (drawVertices[vertex * program->strideFloats + offset] != uvClamp[texture * 2 + axis]) {
+                    uniformClamps = false;
+                    break;
+                }
+            ++offset;
+        }
+    }
+    if (!uniformClamps) uvClamp.fill(0x1p30f);
+    if (!mImpl->textureTransformValid || mImpl->textureScaleState != uvScale ||
+        mImpl->textureClampState != uvClamp) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureScaleUniform,
+                     uvScale[0], uvScale[1], uvScale[2], uvScale[3]);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureClampUniform,
+                     uvClamp[0], uvClamp[1], uvClamp[2], uvClamp[3]);
+        mImpl->textureScaleState = uvScale;
+        mImpl->textureClampState = uvClamp;
+        mImpl->textureTransformValid = true;
+    }
+
+    std::array<float, 4> grayscaleColor = { 1.0f, 1.0f, 1.0f, 0.0f };
+    if (program->grayscale) {
+        const float* color = drawVertices + program->grayscaleOffset;
+        std::copy_n(color, grayscaleColor.size(), grayscaleColor.begin());
+    }
+
+    std::array<uint32_t, 7> packedTevConstants = {};
+    for (size_t index = 0; index < program->numInputs; ++index) {
+        if (static_cast<int>(index) == varyingInput) {
+            continue;
+        }
+        packedTevConstants[index] = PackColor(constants[index]);
+    }
+    const uint32_t packedTevGrayscale =
+        program->grayscale ? PackColor(grayscaleColor) : 0;
+    const bool fogEligible = gMk64DistanceFar3DS > 0 && mImpl->depthTest &&
+                             mImpl->activeTarget == mImpl->gameTarget;
+    // The ramp is exactly zero before fogStart. A triangle whose vertices are
+    // all nearer cannot cross that plane, so omit its texture read/TEV stage.
+    const bool distanceFog = fogEligible && reachesDistanceFog;
+    if (fogEligible && !distanceFog) ++gMk64DistanceFogBypassed3DS;
+    if (distanceFog && !mImpl->distanceFogTextureBound) {
+        C3D_TexBind(2, &mImpl->distanceFogTexture);
+        mImpl->distanceFogTextureBound = true;
+        ++gMk64DistanceFogBinds3DS;
+    }
+
+    if (!mImpl->nativeGeometry.enabled) {
+        C3D_CullFace(GPU_CULL_NONE);
+    }
+
+    const bool canUseStaticVbo = mImpl->nativeGeometry.enabled && !needsClipping && uniformClamps;
+    const uint32_t baseKey = mImpl->nativeGeometry.cacheKey;
+    uint32_t cacheKey = 0;
+    size_t tableIndex = 0;
+    if (canUseStaticVbo && baseKey != 0) {
+        const void* curCmdPtr3DS = Mk64GetCurrentDlistCommand != nullptr ? Mk64GetCurrentDlistCommand() : nullptr;
+        const uint32_t* v0Bits = reinterpret_cast<const uint32_t*>(drawVertices);
+        const uint32_t v0Hash = v0Bits[0] ^ (v0Bits[1] << 7) ^ (v0Bits[2] << 13);
+
+        cacheKey = baseKey;
+        cacheKey ^= ((uint32_t)(uintptr_t)curCmdPtr3DS * 2654435761u);
+        cacheKey ^= static_cast<uint32_t>(vertexCount) * 0x9e3779b9u;
+        cacheKey ^= v0Hash;
+        if (cacheKey == 0) cacheKey = 1;
+
+        tableIndex = cacheKey & (Impl::kStaticVboTableSize - 1);
+        auto& entry = mImpl->staticVboTable[tableIndex];
+        if (entry.linearVertices != nullptr && entry.key == cacheKey && entry.packedVertexCount == vertexCount) {
+            ApplyTevState(program, varyingInput, constants, grayscaleColor, distanceFog,
+                          packedTevConstants, packedTevGrayscale);
+            ApplyNativeVertexState();
+
+            C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
+            BufInfo_Init(bufferInfo);
+            BufInfo_Add(bufferInfo, entry.linearVertices, sizeof(PackedVertex), 4, 0x3210);
+            mImpl->currentVboPointer = entry.linearVertices;
+
+            C3D_DrawArrays(GPU_TRIANGLES, 0, static_cast<int>(entry.packedVertexCount));
+            ++mImpl->drawCallCount;
+            mImpl->triangleCount += entry.packedVertexCount / 3;
+            ++mImpl->staticVboHits;
+            return;
+        }
+    }
+
+    if (mImpl->currentVboPointer != mImpl->packedVertices) {
+        C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
+        BufInfo_Init(bufferInfo);
+        BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 4, 0x3210);
+        mImpl->currentVboPointer = mImpl->packedVertices;
+    }
+
+    if (mImpl->packedVertexCount + vertexCount > kVertexBufferCapacity) {
+        throw std::length_error("3DS packed vertex buffer exhausted");
+    }
+
+    const auto packStarted = mk64_3ds::PerformanceNow();
+    for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+        const float* source = drawVertices + vertex * program->strideFloats;
+        PackedVertex& destination = mImpl->packedVertices[firstVertex + vertex];
+        destination.position[0] = source[0] * coverScale;
+        destination.position[1] = source[1] * coverScale;
+        destination.position[2] = source[2];
+        destination.position[3] = canUseStaticVbo ? 1.0f : source[3];
+
+        for (int texture = 0; texture < 2; ++texture) {
+            float u = 0.0f;
+            float v = 0.0f;
+            if (program->usedTextures[texture]) {
+                const uint8_t textureOffset = program->textureOffsets[texture];
+                u = source[textureOffset];
+                v = source[textureOffset + 1];
+                if (!uniformClamps) {
+                    uint8_t offset = textureOffset + 2;
+                    if (program->clamp[texture][0]) u = std::min(u, source[offset++]);
+                    if (program->clamp[texture][1]) v = std::min(v, source[offset]);
+                }
+            }
+            float* texcoord = texture == 0 ? destination.texcoord0 : destination.texcoord1;
+            texcoord[0] = u;
+            texcoord[1] = v;
+        }
+
+        if (varyingInput >= 0) {
+            const float* color = source + program->inputOffsets[varyingInput];
+            destination.color[0] = FloatColorToByte(color[0]);
+            destination.color[1] = FloatColorToByte(color[1]);
+            destination.color[2] = FloatColorToByte(color[2]);
+            destination.color[3] = program->alpha ? FloatColorToByte(color[3]) : 255;
+        } else {
+            destination.color[0] = 255;
+            destination.color[1] = 255;
+            destination.color[2] = 255;
+            destination.color[3] = 255;
+        }
+    }
+
+    mk64_3ds::PerformanceCurrent().vertex_pack_us += static_cast<uint32_t>(mk64_3ds::PerformanceNow() - packStarted);
+
+    ApplyTevState(program, varyingInput, constants, grayscaleColor, distanceFog,
+                  packedTevConstants, packedTevGrayscale);
+
     if (mImpl->dirtyVertexBegin == mImpl->dirtyVertexEnd) {
         mImpl->dirtyVertexBegin = firstVertex;
     }
@@ -1430,6 +1517,24 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     ++mImpl->drawCallCount;
     mImpl->triangleCount += vertexCount / 3;
     mImpl->packedVertexCount += vertexCount;
+
+    if (canUseStaticVbo && baseKey != 0) {
+        ++mImpl->staticVboMisses;
+        auto& entry = mImpl->staticVboTable[tableIndex];
+        if (entry.linearVertices == nullptr) {
+            const size_t byteSize = vertexCount * sizeof(PackedVertex);
+            if (mImpl->staticVboAllocatedBytes + byteSize <= Impl::kMaxStaticVboBytes &&
+                linearSpaceFree() > Impl::kMinFreeLinearHeapForStaticVbo) {
+                PackedVertex* staticBuffer = static_cast<PackedVertex*>(linearAlloc(byteSize));
+                if (staticBuffer != nullptr) {
+                    std::memcpy(staticBuffer, mImpl->packedVertices + firstVertex, byteSize);
+                    Mk64System3DSCleanDataCache(staticBuffer, byteSize);
+                    mImpl->staticVboAllocatedBytes += byteSize;
+                    entry = { cacheKey, staticBuffer, vertexCount, byteSize };
+                }
+            }
+        }
+    }
 }
 
 void GfxRenderingAPICitro3D::FlushPackedVertices() {
@@ -1739,6 +1844,7 @@ void GfxRenderingAPICitro3D::RestoreFast3DState() {
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 4, 0x3210);
+    mImpl->currentVboPointer = mImpl->packedVertices;
 
     UploadProjectionForActiveTarget();
 
@@ -1927,6 +2033,7 @@ void GfxRenderingAPICitro3D::Init() {
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 4, 0x3210);
+    mImpl->currentVboPointer = mImpl->packedVertices;
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
     // The simulation pacer owns the 30 Hz game clock on both models. A
@@ -1975,7 +2082,7 @@ void GfxRenderingAPICitro3D::StartFrame() {
     const bool displayAdvanced = mImpl->hasSubmittedFrame &&
         C3D_FrameCounter(0) != mImpl->submittedVBlank[0] &&
         C3D_FrameCounter(1) != mImpl->submittedVBlank[1];
-    if (!mk64_3ds::BeginFrame3DS(displayAdvanced ? 0 : C3D_FRAME_SYNCDRAW,
+    if (!mk64_3ds::BeginFrame3DS(0,
                                 "startup-gpu-queue-wait-enter")) return;
     mImpl->frameBeginWaitMicroseconds = static_cast<uint32_t>((svcGetSystemTick() - beginTick) * 1000000ULL / SYSCLOCK_ARM11);
     mImpl->frameActive = true;
@@ -2006,6 +2113,8 @@ void GfxRenderingAPICitro3D::StartFrame() {
     mImpl->originalAspect = Mk64Settings3DSGetAspectRatio != nullptr &&
                             Mk64Settings3DSGetAspectRatio() != 0;
     C3D_FrameDrawOn(mImpl->gameTarget);
+    SetScissor(0, 0, 0, 0);
+    SetViewport(0, 0, kTopLogicalWidth, kTopHeight);
     RestoreFast3DState();
 }
 
@@ -2138,12 +2247,10 @@ void GfxRenderingAPICitro3D::StartDrawToFramebuffer(int fbId, float noiseScale) 
         target = slot->target;
     }
     if (mImpl->frameActive && mImpl->activeTarget != target) {
-        FlushPackedVertices();
-        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+        C3D_FrameDrawOn(target);
+        mImpl->activeTarget = target;
+        UploadProjectionForActiveTarget();
     }
-    C3D_FrameDrawOn(target);
-    mImpl->activeTarget = target;
-    UploadProjectionForActiveTarget();
     if (slot != nullptr && slot->needsClear) {
         C3D_RenderTargetClear(target, C3D_CLEAR_ALL, 0x000000FF, 0);
         slot->needsClear = false;
@@ -2248,6 +2355,46 @@ void GfxRenderingAPICitro3D::ReleaseTextureAllocations() {
         DeleteTexture(textureId);
     }
     mImpl->selectedTextures.fill(0);
+}
+
+void GfxRenderingAPICitro3D::ReleaseStaticVbos() {
+    if (mImpl == nullptr) {
+        return;
+    }
+    if (mImpl->initialized && !mImpl->frameActive) {
+        C3D_FrameSync();
+    }
+    for (auto& entry : mImpl->staticVboTable) {
+        if (entry.linearVertices != nullptr) {
+            linearFree(entry.linearVertices);
+            entry.linearVertices = nullptr;
+        }
+    }
+    mImpl->staticVboTable.fill({});
+    mImpl->staticVboAllocatedBytes = 0;
+    mImpl->currentVboPointer = mImpl->packedVertices;
+}
+
+void GfxRenderingAPICitro3D::ResetTevState() {
+    if (mImpl == nullptr) {
+        return;
+    }
+    mImpl->currentProgram = nullptr;
+    mImpl->tevStateValid = false;
+    mImpl->tevStateProgram = nullptr;
+    mImpl->tevStateVaryingInput = -2;
+    mImpl->tevStateConstants.fill(0);
+    mImpl->tevStateGrayscale = 0;
+    mImpl->tevStateDepthTest = false;
+    mImpl->tevStateDepthWrite = false;
+    mImpl->tevStateDistanceFog = false;
+    mImpl->distanceFogTextureBound = false;
+    for (int stage = 0; stage < 6; ++stage) {
+        C3D_TexEnv* env = C3D_GetTexEnv(stage);
+        C3D_TexEnvInit(env);
+    }
+    C3D_TexEnvBufUpdate(C3D_Both, 0);
+    C3D_TexEnvBufColor(0xFFFFFFFF);
 }
 
 void GfxRenderingAPICitro3D::SetTextureFilter(FilteringMode mode) {
@@ -2375,6 +2522,27 @@ uint64_t GfxRenderingAPICitro3D::GetVertexUploadBytes() const {
 
 uint64_t GfxRenderingAPICitro3D::GetLinearHeapFlushFrameCount() const {
     return mImpl->linearHeapFlushFrameCount;
+}
+
+uint64_t GfxRenderingAPICitro3D::GetStaticVboHits() const {
+    return mImpl ? mImpl->staticVboHits : 0;
+}
+
+uint64_t GfxRenderingAPICitro3D::GetStaticVboMisses() const {
+    return mImpl ? mImpl->staticVboMisses : 0;
+}
+
+size_t GfxRenderingAPICitro3D::GetStaticVboBytes() const {
+    return mImpl ? mImpl->staticVboAllocatedBytes : 0;
+}
+
+size_t GfxRenderingAPICitro3D::GetStaticVboCount() const {
+    if (!mImpl) return 0;
+    size_t count = 0;
+    for (const auto& entry : mImpl->staticVboTable) {
+        if (entry.linearVertices != nullptr) ++count;
+    }
+    return count;
 }
 
 void* GfxRenderingAPICitro3D::PrepareForExternalDraw() {

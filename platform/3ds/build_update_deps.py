@@ -49,7 +49,7 @@ for folder, options in [
     ('jansson-2.14', ['-DJANSSON_BUILD_DOCS=OFF', '-DJANSSON_BUILD_SHARED_LIBS=OFF', '-DJANSSON_WITHOUT_TESTS=ON'])
 ]:
     build = root / (folder + '-build')
-    run(['cmake', '-S', source / folder, '-B', build,
+    run(['cmake', '-G', 'Ninja', '-S', source / folder, '-B', build,
          '-DCMAKE_TOOLCHAIN_FILE=' + str(devkit / 'cmake/3DS.cmake'),
          '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
          '-DCMAKE_INSTALL_PREFIX=' + str(prefix), *options])
@@ -58,16 +58,14 @@ for folder, options in [
 
 # Autoconf/Make need a space-free path for their library flags.
 with tempfile.TemporaryDirectory(prefix='mk64-update-') as temp:
-    alias = Path(temp) / 'deps'
-    alias.symlink_to(root, target_is_directory=True)
-    cp = str(alias / 'prefix')
+    cp = str(prefix).replace('\\', '/')
     env = dict(os.environ)
     env.update(PATH=str(devkit / 'devkitARM/bin') + ':' + env['PATH'],
                CC='arm-none-eabi-gcc', AR='arm-none-eabi-ar', RANLIB='arm-none-eabi-ranlib',
                CFLAGS='-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft -O2 -mword-relocations -ffunction-sections -fdata-sections',
                CPPFLAGS='-D_3DS -D__3DS__ -I' + cp + '/include -I' + str(devkit / 'libctru/include'),
                LDFLAGS='-L' + cp + '/lib -L' + str(devkit / 'libctru/lib') + ' -specs=3dsx.specs', LIBS='-lctru')
-    curl = alias / 'src/curl-8.4.0'
+    curl = source / 'curl-8.4.0'
     run(['./configure', '--prefix=' + cp, '--host=arm-none-eabi', '--disable-shared', '--enable-static',
          '--disable-ipv6', '--disable-unix-sockets', '--disable-threaded-resolver', '--disable-manual',
          '--disable-pthreads', '--disable-socketpair', '--disable-ntlm-wb', '--with-mbedtls=' + cp,

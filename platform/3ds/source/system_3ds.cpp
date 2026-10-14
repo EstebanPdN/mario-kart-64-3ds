@@ -32,28 +32,19 @@ extern "C" bool Mk64System3DSCleanDataCache(const void* address, size_t size) {
 
     const u32 cacheAddress = static_cast<u32>(reinterpret_cast<uintptr_t>(address));
     const u32 cacheSize = static_cast<u32>(size);
-    CacheCleanMode mode = sCacheCleanMode.load(std::memory_order_acquire);
-    if (mode != CacheCleanMode::GspFallback) {
-        // Clean-only is sufficient for CPU-to-GPU/DSP ownership transfers and
-        // avoids invalidating useful ARM11 cache lines. Unlike
-        // GSPGPU_FlushDataCache, this does not block on a sysmodule scheduled
-        // on the Old 3DS auxiliary core.
-        const Result directResult =
-            svcStoreProcessDataCache(CUR_PROCESS_HANDLE, cacheAddress, cacheSize);
-        if (R_SUCCEEDED(directResult)) {
-            if (mode == CacheCleanMode::Unprobed) {
-                sCacheCleanMode.store(CacheCleanMode::DirectSvc,
-                                      std::memory_order_release);
-            }
-            return true;
-        }
-        sCacheCleanMode.store(CacheCleanMode::GspFallback,
-                              std::memory_order_release);
+    // Clean-only is sufficient for CPU-to-GPU/DSP ownership transfers and
+    // avoids invalidating useful ARM11 cache lines. Unlike GSPGPU_FlushDataCache,
+    // this does not block on a sysmodule scheduled on the Old 3DS auxiliary core.
+    const Result directResult =
+        svcStoreProcessDataCache(CUR_PROCESS_HANDLE, cacheAddress, cacheSize);
+    if (R_SUCCEEDED(directResult)) {
+        sCacheCleanMode.store(CacheCleanMode::DirectSvc, std::memory_order_release);
+        return true;
     }
 
-    // Some launch environments can deny the direct cache SVC. Retain the
-    // established libctru service path so a performance optimization can
-    // never become a rendering or audio correctness requirement.
+    // If direct SVC is rejected (e.g. for certain memory ranges), fall back to GSP
+    // for this specific call without permanently degrading subsequent vertex/texture flushes.
+    sCacheCleanMode.store(CacheCleanMode::GspFallback, std::memory_order_release);
     return R_SUCCEEDED(GSPGPU_FlushDataCache(address, cacheSize));
 }
 

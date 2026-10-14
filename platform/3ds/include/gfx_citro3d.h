@@ -112,6 +112,12 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     uint64_t GetVertexUploadBytes() const;
     uint64_t GetLinearHeapFlushFrameCount() const;
     void ReleaseTextureAllocations();
+    void ResetTevState();
+    void ReleaseStaticVbos();
+    uint64_t GetStaticVboHits() const;
+    uint64_t GetStaticVboMisses() const;
+    size_t GetStaticVboBytes() const;
+    size_t GetStaticVboCount() const;
     void* PrepareForExternalDraw();
     void SetExternalLinearBufferRange(const void* address, size_t size);
     void MarkExternalLinearBuffersDirty();
@@ -124,6 +130,12 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void RestoreFast3DState();
     void ApplyNativeVertexState();
     float GetPresentedFps(uint64_t windowMilliseconds) const;
+    void ApplyTevState(ShaderProgram* program, int varyingInput,
+                       const std::array<std::array<float, 4>, 7>& constants,
+                       const std::array<float, 4>& grayscaleColor,
+                       bool distanceFog,
+                       const std::array<uint32_t, 7>& packedTevConstants,
+                       uint32_t packedTevGrayscale);
 
     struct Impl;
     std::unique_ptr<Impl> mImpl;
