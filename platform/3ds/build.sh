@@ -24,9 +24,9 @@ if [[ ! -x "${BANNERTOOL}" && -x "${DEVKITPRO}/tools/bin/bannertool" ]]; then
   BANNERTOOL="${DEVKITPRO}/tools/bin/bannertool"
 fi
 
-if git -C "${TORCH_DIR}" apply --check "${TORCH_PATCH}" >/dev/null 2>&1; then
-  git -C "${TORCH_DIR}" apply "${TORCH_PATCH}"
-elif git -C "${TORCH_DIR}" apply --reverse --check "${TORCH_PATCH}" >/dev/null 2>&1; then
+if git -C "${TORCH_DIR}" apply --ignore-space-change --ignore-whitespace --check "${TORCH_PATCH}" >/dev/null 2>&1; then
+  git -C "${TORCH_DIR}" apply --ignore-space-change --ignore-whitespace "${TORCH_PATCH}"
+elif git -C "${TORCH_DIR}" apply --ignore-space-change --ignore-whitespace --reverse --check "${TORCH_PATCH}" >/dev/null 2>&1; then
   :
 else
   printf 'Could not apply or verify the 3DS Torch compatibility patch.\n' >&2
@@ -38,7 +38,7 @@ if [[ ! -f "${UPDATE_DEPS}/lib/libcurl.a" ]]; then
   python3 "${ROOT}/platform/3ds/build_update_deps.py" "${BUILD}/update-deps"
 fi
 
-cmake -S "${ROOT}" -B "${BUILD}" \
+cmake -G "Ninja" -S "${ROOT}" -B "${BUILD}" \
   -DCMAKE_TOOLCHAIN_FILE="${DEVKITPRO}/cmake/3DS.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
   -DMK64_3DS_UPDATE_DEPS="${UPDATE_DEPS}" \

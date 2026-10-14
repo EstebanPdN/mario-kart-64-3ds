@@ -27,6 +27,7 @@ extern "C" {
 extern int32_t gMenuSelection;
 extern int32_t gGamestate, gRaceState;
 extern float gCourseTimer;
+extern int16_t gCurrentCourseId __attribute__((weak));
 void initialize_memory_pool(void);
 int Mk64MemoryArena3DSIsReady(void);
 void audio_init(void);
@@ -133,6 +134,7 @@ void ArchiveLoadProgress(unsigned percent) {
 
 int main(int argc, char** argv) {
     std::set_terminate(TerminateHandler);
+    APT_SetAppCpuTimeLimit(30);
     Mk64Diagnostics3DSStart();
     Mk64Startup3DSStart();
     Mk64StartupStage("loading-screen-init");
@@ -303,6 +305,9 @@ int main(int argc, char** argv) {
     uint64_t nextSimulationDeadline = svcGetSystemTick();
     uint64_t deadlineRemainder = 0;
     bool suppressNextPresentation = false;
+    uint32_t consecutiveSkipped = 0;
+    int32_t lastGamestate = -1;
+    int16_t lastCourseId = -1;
     bool startupTraceSampled = false;
     while (WindowIsRunning() && !Updater_ShouldClose()) {
         // Also protect the first tick and exceptional/early renderer returns.
@@ -323,6 +328,7 @@ int main(int argc, char** argv) {
             nextSimulationDeadline = svcGetSystemTick();
             deadlineRemainder = 0;
             suppressNextPresentation = false;
+            consecutiveSkipped = 0;
             Mk64StartupStage("apt-resume-ready");
             Mk64Diagnostics3DSCheckpoint("apt-resume-ready");
         }
@@ -333,6 +339,7 @@ int main(int argc, char** argv) {
             nextSimulationDeadline = svcGetSystemTick();
             deadlineRemainder = 0;
             suppressNextPresentation = false;
+            consecutiveSkipped = 0;
             continue;
         }
         if (Mk64Diagnostics3DSIsPaused()) {
@@ -341,8 +348,21 @@ int main(int argc, char** argv) {
             nextSimulationDeadline = svcGetSystemTick();
             deadlineRemainder = 0;
             suppressNextPresentation = false;
+            consecutiveSkipped = 0;
             continue;
         }
+
+        // On game state or track change (e.g. race to menu, course selection, or GP race transition), reset deadline and frame skip
+        const int16_t currentCourseId = (&gCurrentCourseId != nullptr) ? gCurrentCourseId : 0;
+        if (gGamestate != lastGamestate || (lastGamestate != -1 && currentCourseId != lastCourseId)) {
+            lastGamestate = gGamestate;
+            lastCourseId = currentCourseId;
+            nextSimulationDeadline = svcGetSystemTick();
+            deadlineRemainder = 0;
+            consecutiveSkipped = 0;
+            suppressNextPresentation = false;
+        }
+
         Mk64StartupStage("first-iteration-enter");
         mk64_3ds::PerformanceBegin();
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
@@ -359,17 +379,46 @@ int main(int argc, char** argv) {
         perf.filter = Mk64Settings3DSGetDisplayFilter();
         perf.profile = Mk64Graphics3DSResolvedNewModel();
         perf.width = Mk64Graphics3DSResolvedOutputWidth();
+
+        // Strict guard: ensure suppressNextPresentation is never active for more than 1 frame consecutively
+        if (consecutiveSkipped > 1) {
+            suppressNextPresentation = false;
+            consecutiveSkipped = 0;
+        }
         Mk64Graphics3DSSuppressNextPresentation(suppressNextPresentation);
         suppressNextPresentation = false;
+        Mk64GameAudio3DSBeginFrame();
+        const uint64_t iterStartTicks = svcGetSystemTick();
+        gMk64LastGfxCpuTicks = 0;
         { mk64_3ds::PerformanceTimer timer(perf.iteration_us); thread5_iteration(); }
+        const uint64_t iterEndTicks = svcGetSystemTick();
+        const uint64_t totalIterTicks = iterEndTicks >= iterStartTicks ? (iterEndTicks - iterStartTicks) : 0;
+        const uint64_t logicTicks = totalIterTicks > gMk64LastGfxCpuTicks ? (totalIterTicks - gMk64LastGfxCpuTicks) : 0;
+        gMk64TelemetryLogicMs = static_cast<float>(logicTicks * 1000ULL) / static_cast<float>(SYSCLOCK_ARM11);
         Mk64Startup3DSGameState(gGamestate, gMenuSelection);
         Mk64StartupStage("first-iteration-returned");
+
+        // If thread5_iteration triggered a state or track change (e.g. exit to menu, GP next race), discard timing debt immediately
+        const int16_t currentCourseIdPost = (&gCurrentCourseId != nullptr) ? gCurrentCourseId : 0;
+        if (gGamestate != lastGamestate || (lastGamestate != -1 && currentCourseIdPost != lastCourseId)) {
+            lastGamestate = gGamestate;
+            lastCourseId = currentCourseIdPost;
+            nextSimulationDeadline = svcGetSystemTick();
+            deadlineRemainder = 0;
+            consecutiveSkipped = 0;
+            suppressNextPresentation = false;
+        }
+
         // Do not enter the audio worker or pacer if game logic closes the window.
         if (!WindowIsRunning()) break;
+        const uint64_t audioStartTicks = svcGetSystemTick();
         Mk64Diagnostics3DSSetStage("game-loop-audio");
         Mk64StartupStage("audio-pump-enter");
         { mk64_3ds::PerformanceTimer timer(perf.audio_pump_us); Mk64GameAudio3DSPump(); }
         Mk64StartupStage("audio-pump-returned");
+        const uint64_t audioEndTicks = svcGetSystemTick();
+        const uint64_t audioTicks = audioEndTicks >= audioStartTicks ? (audioEndTicks - audioStartTicks) : 0;
+        gMk64TelemetryAudioMs = static_cast<float>(audioTicks * 1000ULL) / static_cast<float>(SYSCLOCK_ARM11);
         if (!startupTraceSampled && gGamestate != 7 && Mk64Startup3DSHasSubmittedFrames()) {
             startupTraceSampled = true;
             Mk64StartupStage("startup-trace-switch-to-sampling");
@@ -404,16 +453,35 @@ int main(int argc, char** argv) {
                 mk64_3ds::PerformanceTimer timer(perf.sleep_us);
                 svcSleepThread(remainingNanoseconds);
             }
+            consecutiveSkipped = 0;
+            suppressNextPresentation = false;
         } else {
             const uint64_t lateness = now - nextSimulationDeadline;
             perf.lateness_us = static_cast<uint32_t>(std::min<uint64_t>(lateness * 1000000ULL / SYSCLOCK_ARM11, UINT32_MAX));
             const uint64_t tickTicks = SYSCLOCK_ARM11 / kSimulationRate;
-            if (lateness > tickTicks * 3U) {
+            // Anti-Spiral of Death: Clamp at 2 ticks. Discard accumulated debt.
+            if (lateness > tickTicks * 2U) {
                 perf.pacer_reset = 1;
                 nextSimulationDeadline = now;
                 deadlineRemainder = 0;
-            } else if (lateness >= tickTicks / 2U) {
-                suppressNextPresentation = true;
+                consecutiveSkipped = 0;
+                suppressNextPresentation = false;
+            } else if (lateness >= (tickTicks / 3U)) {
+                // If late by more than ~11ms, skip next render IF we didn't just skip one
+                if (consecutiveSkipped == 0) {
+                    suppressNextPresentation = true;
+                    consecutiveSkipped = 1;
+                } else {
+                    // Anti-freeze guard: never skip two frames consecutively.
+                    // This maintains an even 1:1 cadence (15 FPS visual, 30 FPS physics).
+                    suppressNextPresentation = false;
+                    consecutiveSkipped = 0;
+                    nextSimulationDeadline = now;
+                    deadlineRemainder = 0;
+                }
+            } else {
+                consecutiveSkipped = 0;
+                suppressNextPresentation = false;
             }
         }
         mk64_3ds::PerformanceEnd();

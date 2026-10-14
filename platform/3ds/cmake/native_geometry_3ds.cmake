@@ -16,7 +16,7 @@ mk64_native_replace(
 
 mk64_native_replace(
     "static float sMk64AspectCorrection3DS = 1.0f;"
-    "static float sMk64AspectCorrection3DS = 1.0f;\nstatic ::mk64_3ds::NativeLightingVertices<MAX_VERTICES + 4> sNativeLights3DS;"
+    "static float sMk64AspectCorrection3DS = 1.0f;\nstatic ::mk64_3ds::NativeLightingVertices<MAX_VERTICES + 4> sNativeLights3DS;\nextern \"C\" const void* Mk64GetCurrentDlistCommand(void) {\n    return g_exec_stack.cmd_stack.empty() ? nullptr : g_exec_stack.currCmd();\n}"
     "lighting sidecar")
 
 mk64_native_replace(
@@ -27,8 +27,9 @@ mk64_native_replace(
 mk64_native_replace(
     [=[    for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const F3DVtx_t* v = &vertices[i].v;]=]
-    [=[    ::mk64_3ds::gNativeGeometry3DS.BeginLoad(
-        dest_index, n_vertices, mRsp->MP_matrix, AdjXForAspectRatio(1.0f));
+    [=[    const uint32_t vtxKey3DS = (dest_index == 0) ? ((uint32_t)(uintptr_t)vertices >> 2) : 0;
+    ::mk64_3ds::gNativeGeometry3DS.BeginLoad(
+        dest_index, n_vertices, mRsp->MP_matrix, AdjXForAspectRatio(1.0f), vtxKey3DS);
     const auto* positionBlock3DS = ::mk64_3ds::BeginFast3DPositionBlock(
         vertices, n_vertices, mRsp->MP_matrix);
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
@@ -107,9 +108,6 @@ mk64_native_replace(
     const auto& nativeDraw3DS = ::mk64_3ds::gNativeGeometry3DS.PrepareTriangle(
         vtx1_idx, vtx2_idx, vtx3_idx, mRsp->loaded_vertices,
         !is_rect && nativeCullMode3DS == 0, nativeCull3DS);
-    // Face-culling lists retain CPU rejection before texture lookup, packing
-    // and submission. Offloading only the final cull kept invisible triangles
-    // on the expensive ARM11 interpreter path and split their matrix batches.
 ]=]
     "triangle preparation")
 

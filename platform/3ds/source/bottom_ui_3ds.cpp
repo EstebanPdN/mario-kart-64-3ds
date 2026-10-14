@@ -1816,11 +1816,18 @@ void DrawTopFps(C3D_RenderTarget* topTarget) {
     // Citro2D keeps a 400x240 logical projection for the top screen even when
     // Fast3D renders into the 800-wide high-density target.
     constexpr float topWidth = 400.0f;
-    char fps[32] = {};
-    if (sUi.instantaneousFps <= 0) std::snprintf(fps, sizeof(fps), "FPS --");
-    else std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.instantaneousFps);
-    DrawText(fps, topWidth - 8.0f, DrawsTopRaceHud() ? mk64_3ds::TopHudFpsY(Mk64Settings3DSGetHudLayout()) : 6.0f, 0.62f,
-             C2D_Color32(125, 255, 145, 255), C2D_AlignRight, 0.9f, true);
+    char fps[128] = {};
+    const float totalCpuMs = gMk64TelemetryLogicMs + gMk64TelemetryGfxCpuMs + gMk64TelemetryAudioMs;
+    if (sUi.instantaneousFps <= 0) {
+        std::snprintf(fps, sizeof(fps), "FPS -- | CPU %.0fms [L:%.0f G:%.0f A:%.0f]",
+                      totalCpuMs, gMk64TelemetryLogicMs, gMk64TelemetryGfxCpuMs, gMk64TelemetryAudioMs);
+    } else {
+        std::snprintf(fps, sizeof(fps), "FPS %.0f | CPU %.0fms [L:%.0f G:%.0f A:%.0f]",
+                      sUi.instantaneousFps, totalCpuMs,
+                      gMk64TelemetryLogicMs, gMk64TelemetryGfxCpuMs, gMk64TelemetryAudioMs);
+    }
+    DrawText(fps, topWidth - 8.0f, DrawsTopRaceHud() ? mk64_3ds::TopHudFpsY(Mk64Settings3DSGetHudLayout()) : 6.0f, 0.45f,
+             C2D_Color32(255, 255, 0, 255), C2D_AlignRight, 0.9f, true);
 }
 
 

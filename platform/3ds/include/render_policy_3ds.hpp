@@ -16,7 +16,7 @@ constexpr uint8_t RenderScaleFromTouch(int x) {
 // High preserves the stock course range. Zero means no additional culling.
 inline float RenderDistanceEnd(float courseFar, int preset) {
     if (!std::isfinite(courseFar) || courseFar <= 0 || preset < 0 || preset >= 2) return 0;
-    return courseFar * (preset == 0 ? 0.50f : 0.75f);
+    return courseFar * (preset == 0 ? 0.25f : 0.50f);
 }
 
 constexpr bool CullDistantTriangle(float a, float b, float c, float end,

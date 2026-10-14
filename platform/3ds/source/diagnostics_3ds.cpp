@@ -19,7 +19,12 @@ extern "C" void Mk64Perf3DSLogFlush(uint64_t);
 extern "C" { extern float gMk64DistanceFar3DS; extern uint32_t gMk64DistanceCulled3DS;
 extern uint32_t gMk64DistanceFogDraws3DS; extern uint32_t gMk64DistanceFogSkipped3DS;
 extern uint32_t gMk64DistanceFogBypassed3DS;
-extern uint32_t gMk64DistanceFogBinds3DS; }
+extern uint32_t gMk64DistanceFogBinds3DS;
+float gMk64TelemetryLogicMs = 0.0f;
+float gMk64TelemetryGfxCpuMs = 0.0f;
+float gMk64TelemetryAudioMs = 0.0f;
+uint64_t gMk64LastGfxCpuTicks = 0;
+}
 extern "C" unsigned int gMk64AudioMissingEnvelope3DS;
 
 #include <3ds.h>

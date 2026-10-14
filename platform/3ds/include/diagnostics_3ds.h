@@ -82,6 +82,11 @@ void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResources, size_t 
 void Mk64Diagnostics3DSGfxWatchdog(const void* command, uint32_t word0, uint32_t word1,
                                    size_t commandCount);
 
+extern float gMk64TelemetryLogicMs;
+extern float gMk64TelemetryGfxCpuMs;
+extern float gMk64TelemetryAudioMs;
+extern uint64_t gMk64LastGfxCpuTicks;
+
 #ifdef __cplusplus
 }
 #endif

@@ -19,13 +19,14 @@ struct NativeGeometryDraw {
     std::uint64_t matrixGeneration = 0;
     float aspect = 1.0f;
     NativeGeometryCull cull = NativeGeometryCull::None;
+    std::uint32_t cacheKey = 0;
     bool enabled = false;
 };
 
 inline bool SameNativeGeometryDraw(const NativeGeometryDraw& a,
                                    const NativeGeometryDraw& b) {
     return a.enabled == b.enabled && (!a.enabled ||
-        (a.cull == b.cull && a.aspect == b.aspect &&
+        (a.cull == b.cull && a.aspect == b.aspect && a.cacheKey == b.cacheKey &&
          ((a.matrixGeneration != 0 && a.matrixGeneration == b.matrixGeneration) ||
           std::memcmp(a.matrix, b.matrix, sizeof(a.matrix)) == 0)));
 }
@@ -71,7 +72,9 @@ public:
     }
 
     void BeginLoad(std::size_t first, std::size_t count,
-                   const float matrix[4][4], float aspect) {
+                   const float matrix[4][4], float aspect,
+                   std::uint32_t cacheKey = 0) {
+        if (first != 0) cacheKey = 0;
         if (first >= kVertexCount || count > kVertexCount - first) return;
         for (std::size_t i = first; i < first + count; ++i) {
             if (vertices_[i].captured) --matrices_[vertices_[i].matrix].references;
@@ -79,7 +82,10 @@ public:
         }
         Matrix& previous = matrices_[loadMatrix_];
         if (previous.valid && previous.aspect == aspect &&
-            std::memcmp(previous.value, matrix, sizeof(previous.value)) == 0) return;
+            std::memcmp(previous.value, matrix, sizeof(previous.value)) == 0) {
+            previous.cacheKey = cacheKey;
+            return;
+        }
         for (std::size_t i = 0; i < matrices_.size(); ++i) {
             if (matrices_[i].references != 0) continue;
             Matrix& destination = matrices_[i];
@@ -87,6 +93,7 @@ public:
             destination.aspect = aspect;
             destination.valid = true;
             destination.finite = std::isfinite(aspect);
+            destination.cacheKey = cacheKey;
             for (const auto& row : destination.value)
                 for (float component : row) destination.finite &= std::isfinite(component);
             destination.generation = ++nextGeneration_;
@@ -167,6 +174,7 @@ public:
                 cachedGeneration_ = matrix.generation;
             }
             result.cull = cull;
+            result.cacheKey = matrix.cacheKey;
             result.enabled = true;
             ++counters.nativeTriangles;
             return result;
@@ -191,6 +199,7 @@ private:
         std::uint8_t references = 0;
         bool valid = false;
         bool finite = false;
+        std::uint32_t cacheKey = 0;
         std::uint64_t generation = 0;
     };
     std::array<Vertex, kVertexCount> vertices_ = {};

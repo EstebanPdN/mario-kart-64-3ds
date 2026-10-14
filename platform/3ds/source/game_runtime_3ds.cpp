@@ -12,6 +12,7 @@
 #include "resource_runtime_3ds.h"
 #include "performance_trace_3ds.hpp"
 #include "interpolation_diagnostics_3ds.hpp"
+#include "native_geometry_3ds.hpp"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <new>
@@ -37,6 +39,8 @@ extern "C" void Mk64FrameInterpolation3DSSetEnabled(bool enabled);
 extern "C" bool Mk64FrameInterpolation3DSIsEnabled(void);
 extern "C" bool Mk64FrameInterpolation3DSPrepare(float step);
 extern "C" void Mk64FrameInterpolation3DSClearPrepared(void);
+extern "C" int32_t gGamestate;
+extern "C" int16_t gCurrentCourseId __attribute__((weak));
 
 namespace {
 std::unique_ptr<Fast::GfxWindowBackend3DS> sWindow;
@@ -52,7 +56,7 @@ bool sHasPresentedTopFrame = false;
 constexpr uint64_t kRendererFaultRecoveryResetFrames = 120;
 constexpr uint32_t kLogicalWidth = 400;
 uint32_t sOutputWidth = 400;
-size_t sTextureCacheCapacity = 256;
+size_t sTextureCacheCapacity = 256U;
 bool sResolvedNewModel = false;
 bool sUseIntermediatePresentation = false;
 bool sSuppressNextPresentation = false;
@@ -328,8 +332,8 @@ extern "C" bool Mk64Graphics3DSInit() {
     }
     // Presentation eligibility follows measured headroom, not a model or
     // resolution cap. Keep distinct memory/CPU profiles and the 30 Hz logic.
-    sUseIntermediatePresentation = true;
-    sTextureCacheCapacity = sResolvedNewModel && sOutputWidth == 400 ? 384U : 256U;
+    sUseIntermediatePresentation = false;
+    sTextureCacheCapacity = sResolvedNewModel ? 384U : 256U;
     Mk64FrameInterpolation3DSSetEnabled(sUseIntermediatePresentation);
     sUseIntermediatePresentation = sUseIntermediatePresentation &&
                                    Mk64FrameInterpolation3DSIsEnabled();
@@ -395,7 +399,7 @@ extern "C" void Mk64Graphics3DSShutdown() {
     sRendererFaultCounter = 0;
     sRendererHealthyFrameCounter = 0;
     sOutputWidth = 400;
-    sTextureCacheCapacity = 256;
+    sTextureCacheCapacity = 768U;
     sResolvedNewModel = false;
     sUseIntermediatePresentation = false;
     sSuppressNextPresentation = false;
@@ -424,6 +428,16 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     if (commands == nullptr || sInterpreter == nullptr || sWindow == nullptr) {
         return;
     }
+    struct GfxCpuScopedTimer {
+        uint64_t startTicks = svcGetSystemTick();
+        ~GfxCpuScopedTimer() {
+            const uint64_t now = svcGetSystemTick();
+            const uint64_t elapsed = now >= startTicks ? (now - startTicks) : 0;
+            gMk64LastGfxCpuTicks = elapsed;
+            gMk64TelemetryGfxCpuMs = static_cast<float>(elapsed * 1000ULL) / static_cast<float>(SYSCLOCK_ARM11);
+        }
+    } gfxCpuScopedTimer;
+
     auto& perf = mk64_3ds::PerformanceCurrent();
     mk64_3ds::PerformanceTimer graphicsTimer(perf.graphics_us);
 
@@ -434,6 +448,29 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     Mk64Diagnostics3DSSetStage("renderer-frame-start");
     SetRendererStage("renderer-window-events");
     if (!sWindow->IsRunning()) return;
+
+    static int32_t sLastGamestateRuntime = -1;
+    static int16_t sLastCourseIdRuntime = -1;
+    static uint64_t sLastLowMemoryClearFrame = 0;
+    const int16_t currentCourseId = (&gCurrentCourseId != nullptr) ? gCurrentCourseId : 0;
+    const bool isTrackChange = (sLastGamestateRuntime != -1 && currentCourseId != sLastCourseIdRuntime);
+    if (gGamestate != sLastGamestateRuntime || isTrackChange) {
+        const bool isStateTransition = (sLastGamestateRuntime != -1);
+        sLastGamestateRuntime = gGamestate;
+        sLastCourseIdRuntime = currentCourseId;
+        sSuppressNextPresentation = false;
+        if (isStateTransition) {
+            Mk64Graphics3DSTextureCacheClear();
+        }
+        if (sRenderer) {
+            sRenderer->SetScissor(0, 0, kLogicalWidth, 240);
+            sRenderer->SetViewport(0, 0, kLogicalWidth, 240);
+        }
+    } else if (linearSpaceFree() < 2 * 1024 * 1024 && (sFrameCounter - sLastLowMemoryClearFrame > 60)) {
+        sLastLowMemoryClearFrame = sFrameCounter;
+        Mk64Graphics3DSTextureCacheClear();
+    }
+
     const bool suppressPresentation = sSuppressNextPresentation;
     sSuppressNextPresentation = false;
     // When optional midpoints are active, recover a half-tick of lateness by
@@ -652,6 +689,49 @@ extern "C" void GameEngine_ProcessGfxCommands(Gfx* commands) {
 extern "C" void Mk64Graphics3DSEvictSourceTexture(const void* address) {
     if (address != nullptr && sInterpreter != nullptr) {
         sInterpreter->TextureCacheDelete(static_cast<const uint8_t*>(address));
+    }
+}
+
+extern "C" void Mk64OtrCommandCacheClear(void) __attribute__((weak));
+
+extern "C" void Mk64Graphics3DSTextureCacheClear(void) {
+    if (sRenderer != nullptr) {
+        sRenderer->ReleaseTextureAllocations();
+        sRenderer->ReleaseStaticVbos();
+        sRenderer->ClearShaderCache();
+        sRenderer->ResetTevState();
+    }
+    ::mk64_3ds::gNativeGeometry3DS.ResetVertices();
+    if (sInterpreter != nullptr) {
+        sInterpreter->TextureCacheClear();
+        sInterpreter->mColorCombinerPool.clear();
+        sInterpreter->mPrevCombiner = sInterpreter->mColorCombinerPool.end();
+        sInterpreter->mRenderingState.mShaderProgram = nullptr;
+        sInterpreter->mRenderingState.depth_test_and_mask = 0;
+        sInterpreter->mRenderingState.decal_mode = false;
+        sInterpreter->mRenderingState.alpha_blend = false;
+        sInterpreter->mRenderingState.viewport = {};
+        sInterpreter->mRenderingState.scissor = {};
+        if (sInterpreter->mRdp != nullptr) {
+            sInterpreter->mRdp->textures_changed[0] = true;
+            sInterpreter->mRdp->textures_changed[1] = true;
+            sInterpreter->mRdp->grayscale = false;
+            sInterpreter->mRdp->grayscale_color = { 255, 255, 255, 0 };
+            sInterpreter->mRdp->env_color = { 0, 0, 0, 0 };
+            sInterpreter->mRdp->prim_color = { 0, 0, 0, 0 };
+            sInterpreter->mRdp->fog_color = { 0, 0, 0, 0 };
+            sInterpreter->mRdp->blend_color = { 0, 0, 0, 0 };
+            sInterpreter->mRdp->viewport_or_scissor_changed = true;
+            memset((void*)sInterpreter->mRdp->palette_dram_addr_individual, 0, sizeof(sInterpreter->mRdp->palette_dram_addr_individual));
+            memset((void*)sInterpreter->mRdp->palette_crc, 0, sizeof(sInterpreter->mRdp->palette_crc));
+            memset((void*)sInterpreter->mRdp->palette_dram_addr, 0, sizeof(sInterpreter->mRdp->palette_dram_addr));
+            memset((void*)sInterpreter->mRdp->palettes, 0, sizeof(sInterpreter->mRdp->palettes));
+            memset((void*)&sInterpreter->mRdp->loaded_texture, 0, sizeof(sInterpreter->mRdp->loaded_texture));
+            memset((void*)&sInterpreter->mRdp->texture_to_load, 0, sizeof(sInterpreter->mRdp->texture_to_load));
+        }
+    }
+    if (Mk64OtrCommandCacheClear != nullptr) {
+        Mk64OtrCommandCacheClear();
     }
 }
 
