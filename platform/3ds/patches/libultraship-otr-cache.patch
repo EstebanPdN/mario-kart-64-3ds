@@ -1,0 +1,368 @@
+diff --git a/include/fast/interpreter.h b/include/fast/interpreter.h
+index 5d87f4ef..c5246cd0 100644
+--- a/include/fast/interpreter.h
++++ b/include/fast/interpreter.h
+@@ -190,7 +190,13 @@ struct TextureCacheKey {
+     struct Hasher {
+         size_t operator()(const TextureCacheKey& key) const noexcept {
+             uintptr_t addr = (uintptr_t)key.texture_addr;
+-            return (size_t)(addr ^ (addr >> 5));
++            uintptr_t pal0 = (uintptr_t)key.palette_addrs[0];
++            uintptr_t pal1 = (uintptr_t)key.palette_addrs[1];
++            size_t h = (size_t)(addr ^ (addr >> 5));
++            h ^= (size_t)(pal0 ^ (pal0 >> 4)) * 31;
++            h ^= (size_t)(pal1 ^ (pal1 >> 4)) * 17;
++            h ^= (size_t)((key.palette_index << 8) | (key.fmt << 4) | key.siz);
++            return h;
+         }
+     };
+ };
+@@ -263,6 +269,9 @@ struct RDP {
+     // Original DRAM source address of the most recent TLUT load per palette half.
+     // Used in texture cache keys instead of palettes[] (which always points to staging).
+     const uint8_t* palette_dram_addr[2];
++    // Track individual DRAM addresses for each of the 16 CI4 palettes (0-15)
++    const uint8_t* palette_dram_addr_individual[16];
++    uint32_t palette_crc[16];
+     // CI4 palette staging buffer: N64 TMEM holds up to 16 CI4 palettes (16 entries x 2 bytes each = 32 bytes per
+     // palette). palettes[0] covers indices 0-7 (256 bytes), palettes[1] covers 8-15 (256 bytes). GfxDpLoadTlut copies
+     // TLUT data here at the correct offset so multi-palette CI4 models work.
+@@ -333,6 +342,7 @@ typedef enum Attribute {
+ } Attribute;
+ 
+ extern GfxExecStack g_exec_stack;
++extern "C" void Mk64OtrCommandCacheClear();
+ 
+ struct GfxTextureCache {
+     TextureCacheMap map;
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index 04dff040..51f0962d 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -1268,17 +1268,24 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
+     TextureCacheKey key;
+     if (fmt == G_IM_FMT_CI) {
+         if (siz == G_IM_SIZ_4b) {
+-            uint8_t palSlot = paletteIndex / 8;
++            const uint8_t* palAddr = (paletteIndex < 16 && mRdp->palette_dram_addr_individual[paletteIndex] != nullptr)
++                                         ? mRdp->palette_dram_addr_individual[paletteIndex]
++                                         : ((paletteIndex / 8 == 0) ? mRdp->palette_dram_addr[0] : mRdp->palette_dram_addr[1]);
++            uint32_t crc = (paletteIndex < 16) ? mRdp->palette_crc[paletteIndex] : 0;
+             key = { origAddr,
+-                    { palSlot == 0 ? mRdp->palette_dram_addr[0] : nullptr,
+-                      palSlot == 1 ? mRdp->palette_dram_addr[1] : nullptr },
++                    { (const uint8_t*)((uintptr_t)palAddr ^ (uintptr_t)crc), nullptr },
+                     fmt,
+                     siz,
+                     paletteIndex,
+                     origSizeBytes };
+         } else {
+             // CI8 uses both palette halves
+-            key = { origAddr,     { mRdp->palette_dram_addr[0], mRdp->palette_dram_addr[1] }, fmt, siz, paletteIndex,
++            key = { origAddr,
++                    { (const uint8_t*)((uintptr_t)mRdp->palette_dram_addr[0] ^ (uintptr_t)mRdp->palette_crc[0]),
++                      (const uint8_t*)((uintptr_t)mRdp->palette_dram_addr[1] ^ (uintptr_t)mRdp->palette_crc[1]) },
++                    fmt,
++                    siz,
++                    paletteIndex,
+                     origSizeBytes };
+         }
+     } else {
+@@ -2495,6 +2502,17 @@ void Interpreter::GfxDpLoadTlut(uint8_t tile, uint32_t high_index) {
+     if (tmem >= 256) {
+         // N64 TMEM palette area starts at tmem word 256. Each CI4 palette = 16 entries = 16 tmem words.
+         uint32_t paletteByteOffset = (tmem - 256) * 2;
++        uint32_t palStart = paletteByteOffset / 32;
++        uint32_t palCount = (byteCount + 31) / 32;
++        for (uint32_t p = 0; p < palCount && (palStart + p) < 16; ++p) {
++            mRdp->palette_dram_addr_individual[palStart + p] = src + p * 32;
++            uint32_t h = 2166136261u;
++            const uint8_t* pdata = src + p * 32;
++            for (size_t b = 0; b < 32; ++b) {
++                h = (h ^ pdata[b]) * 16777619u;
++            }
++            mRdp->palette_crc[palStart + p] = h;
++        }
+ 
+         if (high_index == 255 && paletteByteOffset == 0) {
+             // CI8: full 256-entry palette spanning both halves
+@@ -2504,6 +2522,12 @@ void Interpreter::GfxDpLoadTlut(uint8_t tile, uint32_t high_index) {
+             mRdp->palettes[1] = mRdp->palette_staging[1];
+             mRdp->palette_dram_addr[0] = src;
+             mRdp->palette_dram_addr[1] = src + 256;
++            uint32_t h8 = 2166136261u;
++            for (size_t b = 0; b < 512; ++b) {
++                h8 = (h8 ^ src[b]) * 16777619u;
++            }
++            mRdp->palette_crc[0] = h8;
++            mRdp->palette_crc[1] = h8;
+         } else if (paletteByteOffset < 256) {
+             // Palettes 0-7 range
+             uint32_t copyLen = (paletteByteOffset + byteCount <= 256) ? byteCount : (256 - paletteByteOffset);
+@@ -3593,79 +3617,190 @@ bool gfx_vtx_handler_f3d(F3DGfx** cmd0) {
+     return false;
+ }
+ 
+-bool gfx_vtx_hash_handler_custom(F3DGfx** cmd0) {
+-    Interpreter* gfx = mInstance.lock().get();
+-    // Offset added to the start of the vertices
+-    const uintptr_t offset = (*cmd0)->words.w1;
+-    // This is a two-part display list command, so increment the instruction pointer so we can get the CRC64
+-    // hash from the second
+-    (*cmd0)++;
+-    const uint64_t hash = ((uint64_t)(*cmd0)->words.w0 << 32) + (*cmd0)->words.w1;
++struct FilePathCache {
++    static constexpr size_t kTableSize = 1024;
++    static constexpr size_t kMask = kTableSize - 1;
++    struct Entry {
++        const char* path;
++        void* ptr;
++    };
++    static Entry entries[kTableSize];
+ 
+-    // We need to know if the offset is a cached pointer or not. An offset greater than one million is not a
+-    // real offset, so it must be a real pointer
+-    if (offset > 0xFFFFF) {
+-        (*cmd0)--;
+-        F3DGfx* cmd = *cmd0;
+-        gfx->GfxSpVertex(C0(12, 8), C0(1, 7) - C0(12, 8), (F3DVtx*)offset);
+-        (*cmd0)++;
+-    } else {
+-        F3DVtx* vtx = (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++    static inline void* Get(const char* path) {
++        size_t idx = ((uintptr_t)path >> 3) & kMask;
++        if (entries[idx].path == path) {
++            return entries[idx].ptr;
++        }
++        return nullptr;
++    }
+ 
+-        if (vtx != NULL) {
+-            vtx = (F3DVtx*)((char*)vtx + offset);
++    static inline void Put(const char* path, void* ptr) {
++        size_t idx = ((uintptr_t)path >> 3) & kMask;
++        entries[idx].path = path;
++        entries[idx].ptr = ptr;
++    }
+ 
+-            (*cmd0)--;
+-            F3DGfx* cmd = *cmd0;
++    static void Clear() {
++        memset(entries, 0, sizeof(entries));
++    }
++};
+ 
+-            // TODO: WTF??
+-            cmd->words.w1 = (uintptr_t)vtx;
++struct HashCache {
++    static constexpr size_t kTableSize = 1024;
++    static constexpr size_t kMask = kTableSize - 1;
++    struct Entry {
++        uint64_t hash;
++        void* ptr;
++    };
++    static Entry entries[kTableSize];
+ 
+-            gfx->GfxSpVertex(C0(12, 8), C0(1, 7) - C0(12, 8), vtx);
+-            (*cmd0)++;
++    static inline void* Get(uint64_t hash) {
++        size_t idx = ((uint32_t)hash ^ (uint32_t)(hash >> 32)) & kMask;
++        if (entries[idx].hash == hash) {
++            return entries[idx].ptr;
++        }
++        return nullptr;
++    }
++
++    static inline void Put(uint64_t hash, void* ptr) {
++        size_t idx = ((uint32_t)hash ^ (uint32_t)(hash >> 32)) & kMask;
++        entries[idx].hash = hash;
++        entries[idx].ptr = ptr;
++    }
++
++    static void Clear() {
++        memset(entries, 0, sizeof(entries));
++    }
++};
++
++struct OtrCmdCache {
++    static constexpr size_t kTableSize = 2048;
++    static constexpr size_t kMask = kTableSize - 1;
++    struct Entry {
++        const F3DGfx* cmd;
++        void* ptr;
++    };
++    static Entry entries[kTableSize];
++
++    static inline void* Get(const F3DGfx* cmd) {
++        size_t idx = ((uintptr_t)cmd >> 3) & kMask;
++        if (entries[idx].cmd == cmd) {
++            return entries[idx].ptr;
++        }
++        return nullptr;
++    }
++
++    static inline void Put(const F3DGfx* cmd, void* ptr) {
++        size_t idx = ((uintptr_t)cmd >> 3) & kMask;
++        entries[idx].cmd = cmd;
++        entries[idx].ptr = ptr;
++    }
++
++    static void Clear() {
++        memset(entries, 0, sizeof(entries));
++    }
++};
++
++OtrCmdCache::Entry OtrCmdCache::entries[OtrCmdCache::kTableSize] = {};
++FilePathCache::Entry FilePathCache::entries[FilePathCache::kTableSize] = {};
++HashCache::Entry HashCache::entries[HashCache::kTableSize] = {};
++
++extern "C" void Mk64OtrCommandCacheClear() {
++    OtrCmdCache::Clear();
++    FilePathCache::Clear();
++    HashCache::Clear();
++}
++
++bool gfx_vtx_hash_handler_custom(F3DGfx** cmd0) {
++    Interpreter* gfx = mInstance.lock().get();
++    F3DGfx* cmd = *cmd0;
++    const uintptr_t offset = cmd->words.w1;
++    (*cmd0)++;
++
++    F3DVtx* vtx = (F3DVtx*)OtrCmdCache::Get(cmd);
++    if (vtx == nullptr) {
++        F3DGfx* cmd2 = *cmd0;
++        const uint64_t hash = ((uint64_t)cmd2->words.w0 << 32) + cmd2->words.w1;
++        vtx = (F3DVtx*)HashCache::Get(hash);
++        if (vtx == nullptr) {
++            vtx = (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++            if (vtx != nullptr) {
++                HashCache::Put(hash, vtx);
++            }
+         }
++        if (vtx != nullptr) {
++            OtrCmdCache::Put(cmd, vtx);
++        }
++    }
++
++    if (vtx != nullptr) {
++        vtx = (F3DVtx*)((char*)vtx + offset);
++        gfx->GfxSpVertex(C0(12, 8), C0(1, 7) - C0(12, 8), vtx);
+     }
+     return false;
+ }
+ 
+ bool gfx_vtx_otr_filepath_handler_custom(F3DGfx** cmd0) {
+     Interpreter* gfx = mInstance.lock().get();
+-    F3DGfx* cmd = *cmd0;
+-    char* fileName = (char*)cmd->words.w1;
++    F3DGfx* cmd1 = *cmd0;
+     (*cmd0)++;
+-    cmd = *cmd0;
+-    size_t vtxCnt = cmd->words.w0;
+-    size_t vtxIdxOff = cmd->words.w1 >> 16;
+-    size_t vtxDataOff = cmd->words.w1 & 0xFFFF;
+-    F3DVtx* vtx =
+-        (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer((const char*)fileName);
+-    vtx += vtxDataOff;
+-
+-    gfx->GfxSpVertex(vtxCnt, vtxIdxOff, vtx);
++    F3DGfx* cmd2 = *cmd0;
++    size_t vtxCnt = cmd2->words.w0;
++    size_t vtxIdxOff = cmd2->words.w1 >> 16;
++    size_t vtxDataOff = cmd2->words.w1 & 0xFFFF;
++
++    F3DVtx* baseVtx = (F3DVtx*)OtrCmdCache::Get(cmd1);
++    if (baseVtx == nullptr) {
++        const char* fileName = (const char*)cmd1->words.w1;
++        baseVtx = (F3DVtx*)FilePathCache::Get(fileName);
++        if (baseVtx == nullptr) {
++            baseVtx = (F3DVtx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(fileName);
++            if (baseVtx != nullptr) {
++                FilePathCache::Put(fileName, baseVtx);
++            }
++        }
++        if (baseVtx != nullptr) {
++            OtrCmdCache::Put(cmd1, baseVtx);
++        }
++    }
++
++    if (baseVtx != nullptr) {
++        gfx->GfxSpVertex(vtxCnt, vtxIdxOff, baseVtx + vtxDataOff);
++    }
+     return false;
+ }
+ 
+ bool gfx_dl_otr_filepath_handler_custom(F3DGfx** cmd0) {
+     F3DGfx* cmd = *cmd0;
+-    char* fileName = (char*)cmd->words.w1;
+-    F3DGfx* nDL =
+-        (F3DGfx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer((const char*)fileName);
++    F3DGfx* nDL = (F3DGfx*)OtrCmdCache::Get(cmd);
++    if (nDL == nullptr) {
++        const char* fileName = (const char*)cmd->words.w1;
++        nDL = (F3DGfx*)FilePathCache::Get(fileName);
++        if (nDL == nullptr) {
++            nDL = (F3DGfx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(fileName);
++            if (nDL != nullptr) {
++                FilePathCache::Put(fileName, nDL);
++            }
++        }
++        if (nDL != nullptr) {
++            OtrCmdCache::Put(cmd, nDL);
++        }
++    }
+ 
+-    if (C0(16, 1) == 0 && nDL != nullptr) {
+-        g_exec_stack.call(*cmd0, nDL);
++    if (C0(16, 1) == 0) {
++        if (nDL != nullptr) {
++            g_exec_stack.call(*cmd0, nDL);
++        }
++        return false;
+     } else {
+         if (nDL != nullptr) {
+             (*cmd0) = nDL;
+             g_exec_stack.branch(cmd);
+             return true; // shortcut cmd increment
+         } else {
+-            assert(0 && "???");
+-            // gfx_path.pop_back();
+-            // cmd = cmd_stack.top();
+-            // cmd_stack.pop();
++            return false;
+         }
+     }
+-    return false;
+ }
+ 
+ // The original F3D microcode doesn't seem to have this opcode. Glide handles it as part of moveword
+@@ -3700,13 +3835,25 @@ bool gfx_dl_otr_hash_handler_custom(F3DGfx** cmd0) {
+         // Push return address
+         (*cmd0)++;
+ 
+-        uint64_t hash = ((uint64_t)(*cmd0)->words.w0 << 32) + (*cmd0)->words.w1;
+-
+-        F3DGfx* gfx = (F3DGfx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++        F3DGfx* gfx = (F3DGfx*)OtrCmdCache::Get(cmd);
++        if (gfx == nullptr) {
++            uint64_t hash = ((uint64_t)(*cmd0)->words.w0 << 32) + (*cmd0)->words.w1;
++            gfx = (F3DGfx*)HashCache::Get(hash);
++            if (gfx == nullptr) {
++                gfx = (F3DGfx*)Ship::Context::GetRawInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++                if (gfx != nullptr) {
++                    HashCache::Put(hash, gfx);
++                }
++            }
++            if (gfx != nullptr) {
++                OtrCmdCache::Put(cmd, gfx);
++            }
++        }
+ 
+-        if (gfx != 0) {
++        if (gfx != nullptr) {
+             g_exec_stack.call(cmd, gfx);
+         }
++        return false;
+     } else {
+         Interpreter* gfx = mInstance.lock().get();
+         assert(0 && "????");

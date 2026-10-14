@@ -10,6 +10,10 @@ MAKEROM="${MAKEROM:-${TOOLS_ROOT}/makerom}"
 BANNERTOOL="${BANNERTOOL:-${TOOLS_ROOT}/bannertool}"
 TORCH_DIR="${ROOT}/third_party/SpaghettiKart/torch"
 TORCH_PATCH="${ROOT}/platform/3ds/patches/torch-3ds-devkitarm.patch"
+SPAGHETTIKART_DIR="${ROOT}/third_party/SpaghettiKart"
+SPAGHETTIKART_PATCH="${ROOT}/platform/3ds/patches/spaghettikart-perf.patch"
+LUS_DIR="${ROOT}/third_party/SpaghettiKart/libultraship"
+LUS_PATCH="${ROOT}/platform/3ds/patches/libultraship-otr-cache.patch"
 
 if [[ ! -x "${MAKEROM}" ]] && command -v makerom >/dev/null 2>&1; then
   MAKEROM="$(command -v makerom)"
@@ -31,6 +35,18 @@ elif git -C "${TORCH_DIR}" apply --ignore-space-change --ignore-whitespace --rev
 else
   printf 'Could not apply or verify the 3DS Torch compatibility patch.\n' >&2
   exit 1
+fi
+
+if [[ -f "${SPAGHETTIKART_PATCH}" ]]; then
+  if git -C "${SPAGHETTIKART_DIR}" apply --ignore-space-change --ignore-whitespace --check "${SPAGHETTIKART_PATCH}" >/dev/null 2>&1; then
+    git -C "${SPAGHETTIKART_DIR}" apply --ignore-space-change --ignore-whitespace "${SPAGHETTIKART_PATCH}"
+  fi
+fi
+
+if [[ -f "${LUS_PATCH}" ]]; then
+  if git -C "${LUS_DIR}" apply --ignore-space-change --ignore-whitespace --check "${LUS_PATCH}" >/dev/null 2>&1; then
+    git -C "${LUS_DIR}" apply --ignore-space-change --ignore-whitespace "${LUS_PATCH}"
+  fi
 fi
 
 UPDATE_DEPS="${MK64_3DS_UPDATE_DEPS:-${BUILD}/update-deps/prefix}"

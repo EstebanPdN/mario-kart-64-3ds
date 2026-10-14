@@ -6,6 +6,7 @@ project(mk64_3ds LANGUAGES C CXX)
 # Keep local checkout paths out of diagnostics embedded in distributable 3DSX
 # files and make builds reproducible across maintainer machines.
 add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_LIST_DIR}/=")
+add_compile_options(-O3 -flto -fno-math-errno -fno-signed-zeros)
 
 option(MK64_3DS_ENABLE_O2R_READER "Build the owner-supplied O2R archive reader" OFF)
 option(MK64_3DS_ENABLE_FAST3D_RENDERER "Build the native Citro3D Fast3D renderer" ON)
@@ -855,7 +856,7 @@ s16 add_actor_to_empty_slot(Vec3f pos, Vec3s rot, Vec3f velocity, s16 actorType)
     file(READ "${SPAGHETTIKART_ACTORS_EXTENDED_SOURCE}" SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT)
     string(REPLACE
         "#include \"actors/blue_and_red_shells/update.inc.c\""
-        "#include \"${SPAGHETTIKART_3DS_RED_BLUE_SHELL_SOURCE}\""
+        "#include \"update_red_blue_shell_3ds.inc.c\""
         SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT
         "${SPAGHETTIKART_3DS_ACTORS_EXTENDED_TEXT}"
     )
@@ -1422,6 +1423,8 @@ if(MK64_3DS_ENABLE_ON_DEVICE_EXTRACTOR)
         -mfloat-abi=hard
         -mtp=soft
         -mword-relocations
+        -O3
+        -flto
     )
     set(USE_STANDALONE OFF CACHE BOOL "" FORCE)
     set(BUILD_STORMLIB OFF CACHE BOOL "" FORCE)
