@@ -60,7 +60,8 @@ extern "C" void Mk64Startup3DSMarkEntry(void) { mainEntered = osGetTime(); }
 extern "C" void Mk64Startup3DSStart(void) {
     if (!Mk64Settings3DSGetLogging() || worker != nullptr) return;
     // Append preserves the evidence if the owner relaunches after a freeze.
-    output = std::fopen("sdmc:/3ds/MK64/dump/startup-e14.log", "ab");
+    // Keep the report path stable; every appended session records its build.
+    output = std::fopen("sdmc:/3ds/MK64/dump/startup.log", "ab");
     if (!output) return;
     std::setvbuf(output, nullptr, _IONBF, 0);
     started = mainEntered ? mainEntered : osGetTime();
