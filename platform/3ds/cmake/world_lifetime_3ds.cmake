@@ -198,4 +198,3 @@ World* World::Instance;]=]
         message(FATAL_ERROR "The upstream World actor tick loop changed")
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_WORLD_SOURCE}" "${SPAGHETTIKART_3DS_WORLD_TEXT}")
-

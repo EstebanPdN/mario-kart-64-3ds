@@ -251,4 +251,3 @@
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_MOLE_SOURCE}"
          "${SPAGHETTIKART_3DS_MOLE_TEXT}")
-

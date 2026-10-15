@@ -96,4 +96,3 @@ if(MK64_3DS_BUILD_GAME_CORE)
         -Wno-unused-parameter
     )
 endif()
-

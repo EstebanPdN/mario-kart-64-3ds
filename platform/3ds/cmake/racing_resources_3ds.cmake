@@ -625,4 +625,3 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         file(WRITE "${SPAGHETTIKART_3DS_RENDER_PLAYER_SOURCE}"
              "${SPAGHETTIKART_3DS_RENDER_PLAYER_TEXT}")
     endif()
-
