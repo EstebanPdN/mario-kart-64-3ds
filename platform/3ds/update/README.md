@@ -1,7 +1,7 @@
 # Built-in updater
 
-Options > Game places Update below Close Options. During a race, pause first:
-Continue Game, Update and Quit remain separate actions. The updater retains the
+Options > Game offers Update and Close. During a race, pause first:
+Continue Game, Quit and Update remain separate actions in that order. The updater retains the
 current course/menu backdrop below and the current rendered scene above, using
 the native menu font. The upper screen shows
 release notes on every presentation, including interpolated images, with side

@@ -21,6 +21,7 @@ def main():
     port=root/'platform/3ds'
     documents=[root/name for name in ('README.md','CHANGELOG.md','CONTRIBUTING.md')]
     documents+=sorted((port/'docs').glob('*.md'))
+    documents.append(port/'update/README.md')
     errors=[];links=0
     for document in documents:
         if not document.is_file():
