@@ -15,6 +15,12 @@ unavailable, the game retains its validated SD reader. Diagnostics distinguish
 that fallback from a corrupt archive/read error. Console launch and exit can
 also take longer while changing the application-memory mode.
 
+For a startup failure, include `sd:/3ds/MK64/dump/startup.log`, the current
+`runtime.log` from that directory and `sd:/3ds/MK64/mk64-install.log` when
+extraction was involved. Each appended startup session records its build;
+older `startup-e*.log` files belong to earlier builds. Updater errors use
+`sd:/3ds/MK64/update.log`.
+
 ## Capturing a visible problem
 
 Hold **L + R**, then press **SELECT** while the problem is visible. The expanded
