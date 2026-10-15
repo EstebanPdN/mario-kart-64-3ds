@@ -1,5 +1,7 @@
 #include "startup_trace_3ds.h"
 #include "gpu_command_budget_3ds.hpp"
+#include "texture_pressure_3ds.hpp"
+#include "combiner_cache_3ds.hpp"
 #include "game_runtime_3ds.h"
 
 #include "adaptive_presentation_3ds.hpp"
@@ -37,6 +39,7 @@ extern "C" void Mk64FrameInterpolation3DSSetEnabled(bool enabled);
 extern "C" bool Mk64FrameInterpolation3DSIsEnabled(void);
 extern "C" bool Mk64FrameInterpolation3DSPrepare(float step);
 extern "C" void Mk64FrameInterpolation3DSClearPrepared(void);
+extern "C" void Mk64FrameInterpolation3DSResetHistory(void);
 
 namespace {
 std::unique_ptr<Fast::GfxWindowBackend3DS> sWindow;
@@ -246,6 +249,17 @@ void LogPerformanceSample() {
 }
 }
 
+void RecordRendererFaultBeforeRecovery(const char* stage, const char* reason) {
+    const uint64_t count = sRendererFaultCounter + 1U;
+    // Persist only powers of two, rather than stalling on SD every bad frame.
+    if ((count & (count - 1U)) != 0) return;
+    size_t slots = 0, live = 0, bytes = 0, shaders = 0, scratch = 0;
+    sRenderer->GetDebugStats(&slots, &live, &bytes, &shaders, &scratch);
+    Mk64Diagnostics3DSMemory("renderer-before-recovery", Mk64Resource3DSLoadedCount(),
+                            slots, live, bytes, shaders, scratch);
+    Mk64Diagnostics3DSRendererFault(stage, reason, count, "before-recovery");
+}
+
 void SetRendererFault(const char* stage, const char* reason, bool frameStateRecovered,
                       bool reduceResourceBudget = true) {
     mk64_3ds::PerformanceCurrent().fault = 1;
@@ -274,10 +288,11 @@ void SetRendererFault(const char* stage, const char* reason, bool frameStateReco
         sRenderer->GetDebugStats(&textureSlots, &initializedTextures, &textureBytes,
                                  &shaderPrograms, &clipScratchBytes);
     }
-    // A recovered allocation failure costs one dropped presentation. Persist
-    // the first event and the terminal event without forcing an SD flush for
-    // every retry while the renderer is trying to recover its memory budget.
-    if (sRendererFaultCounter == 1 || sRendererFaulted) {
+    // Pre-recovery evidence is already persisted by the catch site. These
+    // buffered snapshots describe the outcome, not memory at the failure.
+    const bool recordFault = sRendererFaulted ||
+        (sRendererFaultCounter & (sRendererFaultCounter - 1U)) == 0;
+    if (recordFault) {
         Mk64Diagnostics3DSMemory(stage, Mk64Resource3DSLoadedCount(), textureSlots,
                                  initializedTextures, textureBytes, shaderPrograms,
                                  clipScratchBytes);
@@ -286,6 +301,10 @@ void SetRendererFault(const char* stage, const char* reason, bool frameStateReco
     if (sRendererFaulted) {
         Mk64Diagnostics3DSSetStage("renderer-fault-limit-reached");
     }
+}
+
+extern "C" bool Mk64Graphics3DSFenceTextureReuseBatch(void) {
+    return sRenderer != nullptr && sRenderer->FenceTextureReuseBatch();
 }
 
 extern "C" bool Mk64Graphics3DSInit() {
@@ -329,7 +348,7 @@ extern "C" bool Mk64Graphics3DSInit() {
     // Presentation eligibility follows measured headroom, not a model or
     // resolution cap. Keep distinct memory/CPU profiles and the 30 Hz logic.
     sUseIntermediatePresentation = true;
-    sTextureCacheCapacity = sResolvedNewModel && sOutputWidth == 400 ? 384U : 256U;
+    sTextureCacheCapacity = sResolvedNewModel && sOutputWidth == 400 ? 512U : 256U;
     Mk64FrameInterpolation3DSSetEnabled(sUseIntermediatePresentation);
     sUseIntermediatePresentation = sUseIntermediatePresentation &&
                                    Mk64FrameInterpolation3DSIsEnabled();
@@ -420,6 +439,34 @@ extern "C" void Mk64Graphics3DSPollEvents(void) {
     if (sInterpreter != nullptr) sInterpreter->HandleWindowEvents();
 }
 
+extern "C" void Mk64Graphics3DSResetForTrackLoad(void) {
+    if (sInterpreter == nullptr || sRenderer == nullptr) return;
+    // load_track runs between presentations. Fence the previous GPU frame
+    // before dropping the owners and pointers retained by Fast3D.
+    sRenderer->ReleaseTextureAllocations();
+    sInterpreter->mBufVboLen = 0;
+    sInterpreter->mBufVboNumTris = 0;
+    sInterpreter->TextureCacheClear();
+    for (auto& texture : sInterpreter->mRdp->loaded_texture) texture = {};
+    sInterpreter->mColorCombinerPool.clear();
+    sInterpreter->mPrevCombiner = sInterpreter->mColorCombinerPool.end();
+    mk64_3ds::PublishCombinerCacheSize3DS(0);
+    sInterpreter->mRdp->texture_to_load = {};
+    for (auto& palette : sInterpreter->mRdp->palette_dram_addr) palette = nullptr;
+    sInterpreter->mRdp->textures_changed[0] = true;
+    sInterpreter->mRdp->textures_changed[1] = true;
+    // Reuse bounded interpolation storage, but discard matrices from the old
+    // race so arena address reuse cannot match against an unrelated scene.
+    Mk64FrameInterpolation3DSResetHistory();
+    sHasPresentedTopFrame = false;
+    sAdaptivePresentation = {};
+    sPreviousPresentationDuration = 0;
+    sPreviousSynchronizationUs = 0;
+    sRendererFaulted = false;
+    sRendererFaultCounter = sRendererHealthyFrameCounter = 0;
+    sTextureCacheCapacity = sResolvedNewModel && sOutputWidth == 400 ? 512U : 256U;
+}
+
 extern "C" void Graphics_PushFrame(Gfx* commands) {
     if (commands == nullptr || sInterpreter == nullptr || sWindow == nullptr) {
         return;
@@ -439,7 +486,9 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     // When optional midpoints are active, recover a half-tick of lateness by
     // presenting only the mandatory keyframe. Skipping both images created a
     // 50 ms gap that the adaptive gate then mistook for a second overload.
-    const bool establishedMidpoint = sAdaptivePresentation.midpointEnabled;
+    const bool limiter = Mk64Settings3DSGetFrameLimiter();
+    if (limiter) sAdaptivePresentation = {};
+    const bool establishedMidpoint = !limiter && sAdaptivePresentation.midpointEnabled;
     const bool catchupKeyframe = suppressPresentation && sUseIntermediatePresentation &&
                                 establishedMidpoint;
     perf.catchup_key = catchupKeyframe;
@@ -455,7 +504,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         perf.fault = 1;
         // Keep gameplay/input alive if a frame decoding exception occurs.
         // Events must still be pumped so APT suspend/exit can complete and the
-        // user can capture a SELECT dump instead of trapping the title forever.
+        // user can capture an L + R + SELECT dump instead of trapping the title forever.
         return;
     }
     if (!sWindow->IsRunning() || !sInterpreter->IsFrameReady()) {
@@ -483,7 +532,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     } sample{sRenderer.get(), sRenderer->GetDrawCallCount(), sRenderer->GetTriangleCount(),
              sRenderer->GetTextureCacheUploadCount(), sRenderer->GetTextureCacheUploadBytes()};
     const uint64_t presentationStart = osGetTime();
-    const bool midpointRequested = sUseIntermediatePresentation &&
+    const bool midpointRequested = !limiter && sUseIntermediatePresentation &&
                                    ShouldRenderIntermediatePresentation(presentationStart);
     const bool renderIntermediate = midpointRequested && !catchupKeyframe;
     perf.requested_mid = renderIntermediate;
@@ -518,10 +567,9 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
                 perf.begin_wait_us += sRenderer->GetFrameBeginWaitMicroseconds();
                 // Every presented image must carry the same active top overlay.
                 // Otherwise Update alternates with the underlying game at 30 Hz.
-                Mk64BottomUI3DSRecordPresentation();
-                if (Mk64BottomUI3DSNeedsTopOverlay()) {
+                {
                     mk64_3ds::PerformanceTimer timer(perf.hud_us);
-                    Mk64BottomUI3DSDrawTopFps(sRenderer->PrepareForExternalDraw());
+                    Mk64BottomUI3DSDraw(sRenderer->PrepareForExternalDraw());
                 }
                 SetRendererStage("renderer-end-intermediate");
                 { mk64_3ds::PerformanceTimer timer(perf.submit_us); sInterpreter->EndFrame(); }
@@ -561,6 +609,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         // Vertex and command pressure are recoverable before the library's
         // fatal limit. The command guard reserves space for EndFrame; reset
         // the pending interpreter batch and retry on the next logic tick.
+        RecordRendererFaultBeforeRecovery("renderer-capacity-pressure", exception.what());
         Mk64FrameInterpolation3DSClearPrepared();
         sRenderer->EndFrame();
         sInterpreter->mBufVboLen = 0;
@@ -574,6 +623,11 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     } catch (const std::bad_alloc& exception) {
+        const bool cachePressure = dynamic_cast<const mk64_3ds::TextureCachePressure*>(&exception) != nullptr;
+        const bool linearPressure = dynamic_cast<const mk64_3ds::TextureAllocationFailure*>(&exception) != nullptr;
+        const char* stage = cachePressure ? "renderer-texture-cache-limit" :
+                            linearPressure ? "renderer-linear-texture-pressure" : "renderer-heap-pressure";
+        RecordRendererFaultBeforeRecovery(stage, exception.what());
         // A full animated-texture working set used to fragment the ordinary
         // heap while rotating map/list nodes. Close the Citro3D frame, release
         // cache ownership, and retry on the next 30 Hz keyframe. One allocation
@@ -598,13 +652,14 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         } catch (...) {
         }
         Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
-        SetRendererFault("renderer-memory-pressure", exception.what(), cacheReleased);
+        SetRendererFault(stage, exception.what(), cacheReleased, !cachePressure);
         sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     } catch (const std::exception& exception) {
         // Leave Citro3D in a closed state if Fast3D rejects a malformed
         // command. Unlike the explicitly repaired allocation path above, an
         // arbitrary exception fails closed rather than reusing unknown state.
+        RecordRendererFaultBeforeRecovery("renderer-exception", exception.what());
         Mk64FrameInterpolation3DSClearPrepared();
         sRenderer->EndFrame();
         Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
@@ -612,6 +667,7 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
         sPreviousPresentationDuration = osGetTime() - presentationStart;
         return;
     } catch (...) {
+        RecordRendererFaultBeforeRecovery("renderer-exception", "unknown C++ exception");
         Mk64FrameInterpolation3DSClearPrepared();
         sRenderer->EndFrame();
         Mk64Diagnostics3DSSetFrame(sFrameCounter, didPresentIntermediate ? 1U : 0U);
@@ -732,10 +788,20 @@ extern "C" uint32_t Mk64Graphics3DSBottomHudRefreshDivisor() {
     return 2U;
 }
 extern "C" size_t Mk64Graphics3DSTextureCacheCapacity() {
-    // Old 3DS keeps the proven E4 footprint. New 3DS at 400 px spends its
+    // Old 3DS keeps the proven E4 GPU profile. New 3DS at 400 px spends its
     // additional CPU budget on a larger animated-kart working set; 800 px mode
     // retains the smaller cache to leave linear memory for the wider target.
-    return sTextureCacheCapacity;
+    // Keep a 6 MiB linear reserve; never enlarge the Old/wide profile. Pending
+    // GPU references and completion fences remain protected on every profile.
+    return linearSpaceFree() >= 6U * 1024 * 1024 ? sTextureCacheCapacity
+        : std::min<size_t>(sTextureCacheCapacity, 256U);
+}
+extern "C" size_t Mk64Graphics3DSTextureCacheSpillCapacity() {
+    // Keep Old/wide and low-memory in-frame spill allocations at their
+    // previous 384-slot ceiling. Increasing the compile-time table alone
+    // must not silently increase those profiles' GPU working set.
+    return sResolvedNewModel && sOutputWidth == 400 &&
+           linearSpaceFree() >= 6U * 1024 * 1024 ? 512U : 384U;
 }
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth() {
     return sOutputWidth;

@@ -328,8 +328,10 @@ mk64_native_replace(
     static const Interpreter* materialOwner3DS = nullptr;
     static ::mk64_3ds::TriangleVertexCache<MAX_VERTICES> vertices3DS;
     const bool reusable3DS = sTriangleRun3DS.active && !is_rect;
-    const bool imported3DS = mRdp->textures_changed[0] || mRdp->textures_changed[1];
-    const bool materialHit3DS = reusable3DS && !imported3DS &&
+    // Only imports actually performed below can change mask/replacement
+    // metadata. An unused texture slot may remain dirty indefinitely.
+    bool imported3DS = false;
+    const bool materialHit3DS = reusable3DS &&
         materialGeneration3DS == sTriangleRun3DS.generation && materialOwner3DS == this;
     TriangleMaterial3DS material3DS;
     if (materialHit3DS) {
@@ -463,6 +465,7 @@ mk64_native_replace(
 
         if (comb->usedTextures[i]) {
             if (mRdp->textures_changed[i]) {
+                imported3DS = true;
                 Flush();
                 ImportTexture(i, tile, false);
                 if (mRdp->loaded_texture[i].masked) {

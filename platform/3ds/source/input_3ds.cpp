@@ -12,15 +12,14 @@ extern "C" uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t) __attribute__((weak)
 extern "C" bool Mk64BottomUI3DSConsumesCStick(void) __attribute__((weak));
 extern "C" bool Mk64BottomUI3DSIsModalOpen(void) __attribute__((weak));
 extern "C" bool Mk64GameState3DSRaceControlsActive(void) __attribute__((weak));
-extern "C" bool Mk64GameState3DSCycleHiddenTopHud(void) __attribute__((weak));
-extern "C" int Mk64GameState3DSGetTopHudRenderMode(void) __attribute__((weak));
+extern "C" bool Mk64Auto3DSRaceInputLocked(void) __attribute__((weak));
+extern "C" bool Mk64SoloBattle3DSSpectating(void) __attribute__((weak));
 
 namespace {
 
 constexpr int kCirclePadRange = 156;
 constexpr int kN64StickRange = 80;
 constexpr int kCircleDeadzone = 12;
-u32 sPreviousFilteredKeys = 0;
 
 int8_t ScaleStickAxis(int value) {
     value = std::clamp(value, -kCirclePadRange, kCirclePadRange);
@@ -33,7 +32,6 @@ int8_t ScaleStickAxis(int value) {
 } // namespace
 
 extern "C" void Mk64Input3DSInit(void) {
-    sPreviousFilteredKeys = 0;
     if (Mk64Diagnostics3DSOwnsHid == nullptr || !Mk64Diagnostics3DSOwnsHid()) {
         hidScanInput();
     }
@@ -53,26 +51,19 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     if (Mk64BottomUI3DSFilterGameKeys != nullptr) {
         keys = Mk64BottomUI3DSFilterGameKeys(keys);
     }
-    const u32 pressedKeys = keys & ~sPreviousFilteredKeys;
-    sPreviousFilteredKeys = keys;
     const bool raceControls = Mk64GameState3DSRaceControlsActive != nullptr &&
                               Mk64GameState3DSRaceControlsActive();
+    const bool spectator = raceControls &&
+        ((Mk64Auto3DSRaceInputLocked != nullptr && Mk64Auto3DSRaceInputLocked()) ||
+         (Mk64SoloBattle3DSSpectating != nullptr && Mk64SoloBattle3DSSpectating()));
+    if (spectator) keys &= KEY_START; // Includes same-frame held-A pause continuation.
 
-    const bool yHeld = (keys & KEY_Y) != 0;
-    const bool yPressed = (pressedKeys & KEY_Y) != 0;
-    if (mk64_3ds::ShouldCycleHiddenTopHud(raceControls, yHeld, yPressed) &&
-        Mk64GameState3DSCycleHiddenTopHud != nullptr) {
-        Mk64GameState3DSCycleHiddenTopHud();
-    }
-    const int topHudMode = raceControls && yHeld &&
-                                   Mk64GameState3DSGetTopHudRenderMode != nullptr
-                               ? Mk64GameState3DSGetTopHudRenderMode()
-                               : MK64_TOP_HUD_RENDER_FULL;
     mk64_3ds::PrimaryInputPolicy3DS primaryInput;
     primaryInput.a = (keys & KEY_A) != 0;
     primaryInput.b = (keys & KEY_B) != 0;
     primaryInput.x = (keys & KEY_X) != 0;
-    primaryInput.y = yHeld;
+    primaryInput.select = (keys & KEY_SELECT) != 0;
+    primaryInput.y = (keys & KEY_Y) != 0;
     primaryInput.start = (keys & KEY_START) != 0;
     primaryInput.l = (keys & KEY_L) != 0;
     primaryInput.r = (keys & KEY_R) != 0;
@@ -81,7 +72,6 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     primaryInput.dLeft = (keys & KEY_DLEFT) != 0;
     primaryInput.dRight = (keys & KEY_DRIGHT) != 0;
     primaryInput.raceControls = raceControls;
-    primaryInput.topHudRenderMode = topHudMode;
     pad->buttons |= mk64_3ds::MapPrimaryInput(primaryInput);
 
     circlePosition circle = {};
@@ -93,7 +83,7 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     }
     const bool modalInputCapture = Mk64BottomUI3DSIsModalOpen != nullptr &&
                                    Mk64BottomUI3DSIsModalOpen();
-    if (modalInputCapture) {
+    if (modalInputCapture || spectator) {
         circle = {};
     }
     pad->stickX = ScaleStickAxis(circle.dx);
@@ -106,7 +96,7 @@ extern "C" void Mk64Input3DSPoll(Mk64Pad3DS* pad) {
     } else {
         hidCstickRead(&cstick);
     }
-    const bool consumeCStick = modalInputCapture ||
+    const bool consumeCStick = modalInputCapture || spectator ||
         (Mk64BottomUI3DSConsumesCStick != nullptr && Mk64BottomUI3DSConsumesCStick());
     if (consumeCStick) {
         cstick = {};

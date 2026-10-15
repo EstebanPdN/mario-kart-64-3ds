@@ -1,4 +1,5 @@
 #include "resource_runtime_3ds.h"
+#include "heap_policy_3ds.hpp"
 
 #include "o2r_archive_reader.hpp"
 
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -27,14 +29,16 @@
 #endif
 extern "C" uint64_t Mk64Perf3DSResourceStart(void) MK64_OPTIONAL_SYMBOL;
 extern "C" void Mk64Perf3DSResourceRead(uint64_t, size_t) MK64_OPTIONAL_SYMBOL;
-extern "C" void* linearAlloc(size_t size);
-extern "C" void linearFree(void* mem);
 extern "C" void Mk64Diagnostics3DSSetResource(const char*, size_t) MK64_OPTIONAL_SYMBOL;
 extern "C" void Mk64Diagnostics3DSSetArchiveEntryCount(size_t) MK64_OPTIONAL_SYMBOL;
 extern "C" void Mk64Diagnostics3DSFailure(const char*, const char*) MK64_OPTIONAL_SYMBOL;
+extern "C" void Mk64Diagnostics3DSCheckpoint(const char*) MK64_OPTIONAL_SYMBOL;
 extern "C" void AudioDma_Register(const void* base, size_t size) MK64_OPTIONAL_SYMBOL;
 extern "C" void AudioDma_Clear(void) MK64_OPTIONAL_SYMBOL;
 extern "C" void Mk64Graphics3DSEvictSourceTexture(const void*) MK64_OPTIONAL_SYMBOL;
+extern "C" void* Mk64ResourceHeapAllocate(size_t) MK64_OPTIONAL_SYMBOL;
+extern "C" void Mk64ResourceHeapFree(void*) MK64_OPTIONAL_SYMBOL;
+extern "C" void Mk64GameAudio3DSServiceLoading(void) MK64_OPTIONAL_SYMBOL;
 
 namespace {
 
@@ -231,14 +235,30 @@ class Reader final {
 
 struct CrcEntry;
 
+void* AllocateResourceBytes(size_t byteCount) {
+    return Mk64ResourceHeapAllocate != nullptr ? Mk64ResourceHeapAllocate(byteCount)
+                                               : std::malloc(byteCount);
+}
+
+void FreeResourceBytes(void* bytes) {
+    if (bytes == nullptr) {
+        return;
+    }
+    if (Mk64ResourceHeapFree != nullptr) {
+        Mk64ResourceHeapFree(bytes);
+    } else {
+        std::free(bytes);
+    }
+}
+
 struct LoadedResource {
     ~LoadedResource() {
         for (size_t i = 0; i < inlineAllocationCount; ++i) {
-            linearFree(inlineAllocations[i]);
+            FreeResourceBytes(inlineAllocations[i]);
         }
         if (extraAllocations != nullptr) {
             for (void* allocation : *extraAllocations) {
-                linearFree(allocation);
+                FreeResourceBytes(allocation);
             }
         }
     }
@@ -248,7 +268,13 @@ struct LoadedResource {
             return nullptr;
         }
         const size_t byteCount = sizeof(T) * count;
-        void* bytes = linearAlloc(byteCount);
+        // Parsed O2R payloads are CPU-side immutable source data. Fast3D
+        // decodes/copies them into Citro3D-owned linear textures and packed
+        // vertex buffers before submission, while the audio HLE mixer reads
+        // samples on the CPU. Keeping these thousands of long-lived objects
+        // out of the small linear heap leaves that heap for resources which
+        // the GPU and NDSP actually require.
+        void* bytes = AllocateResourceBytes(byteCount);
         if (bytes == nullptr) {
             throw std::bad_alloc();
         }
@@ -265,9 +291,10 @@ struct LoadedResource {
                 extraAllocations->emplace_back(bytes);
             }
         } catch (...) {
-            linearFree(bytes);
+            FreeResourceBytes(bytes);
             throw;
         }
+        allocatedBytes += byteCount;
         return result;
     }
 
@@ -275,6 +302,7 @@ struct LoadedResource {
     uint32_t version = 0;
     void* pointer = nullptr;
     size_t pointerSize = 0;
+    size_t allocatedBytes = 0;
     uint16_t textureWidth = 0;
     uint16_t textureHeight = 0;
     uint32_t textureType = 0;
@@ -282,8 +310,8 @@ struct LoadedResource {
     CrcEntry* crcEntry = nullptr;
     uint32_t textureOwners = 0;
     bool evictWhenUnused = false;
-    bool streamWhenUnused = false;
-    // Nearly every graphics resource owns one linear block. Keep that pointer
+    bool rawBorrowed = false;
+    // Nearly every graphics resource owns one allocation. Keep that pointer
     // inline; only the small, permanently pinned sound graph needs overflow.
     std::array<void*, 1> inlineAllocations = {};
     uint8_t inlineAllocationCount = 0;
@@ -819,7 +847,7 @@ class SerializedReadLease {
     bool mUsesScratch = false;
 };
 
-LoadedResource* LoadResolvedPath(size_t archiveIndex, CrcEntry* crcEntry) {
+LoadedResource* LoadResolvedPathOnce(size_t archiveIndex, CrcEntry* crcEntry) {
     if (sArchive == nullptr || archiveIndex >= sArchive->Entries().size() ||
         archiveIndex >= sLoadedResources.size()) {
         return nullptr;
@@ -850,7 +878,6 @@ LoadedResource* LoadResolvedPath(size_t archiveIndex, CrcEntry* crcEntry) {
     auto resource = std::make_unique<LoadedResource>();
     resource->archiveIndex = archiveIndex;
     resource->crcEntry = crcEntry;
-    resource->streamWhenUnused = IsStreamingTexturePath(path);
     if (!ParseResource(*readLease.Bytes(), *resource)) {
         return nullptr;
     }
@@ -865,6 +892,28 @@ LoadedResource* LoadResolvedPath(size_t archiveIndex, CrcEntry* crcEntry) {
         Mk64Diagnostics3DSSetResource(path.c_str(), sLoadedResourceCount);
     }
     return result;
+}
+
+LoadedResource* LoadResolvedPath(size_t archiveIndex, CrcEntry* crcEntry) {
+    if (Mk64GameAudio3DSServiceLoading != nullptr) Mk64GameAudio3DSServiceLoading();
+    try {
+        return LoadResolvedPathOnce(archiveIndex, crcEntry);
+    } catch (const std::bad_alloc&) {
+        // The resident compressed archive is a performance cache, not required
+        // game state. Under real heap pressure release it transactionally,
+        // reopen the SD backing file, and retry the complete resource load.
+        // If already streaming, surrender the smaller optional hot cache.
+        // Neither recovery drops a racer or submits a partial frame.
+        const bool wasResident = sArchive != nullptr && sArchive->IsResident();
+        if (sArchive != nullptr && sArchive->ReclaimPerformanceCache()) {
+            if (Mk64Diagnostics3DSCheckpoint != nullptr) {
+                Mk64Diagnostics3DSCheckpoint(wasResident ? "archive-residency-released-for-memory"
+                                                        : "streaming-cache-released-for-memory");
+            }
+            return LoadResolvedPathOnce(archiveIndex, crcEntry);
+        }
+        throw;
+    }
 }
 
 LoadedResource* LoadByPath(std::string_view path) {
@@ -921,6 +970,47 @@ bool DirectoryContains(std::string_view directory, std::string_view path) {
     }
     return directory.back() == '/' || path.size() == directory.size() ||
            path[directory.size()] == '/';
+}
+
+bool TrackResourceDirectory(std::string_view path, std::string_view* directory) {
+    constexpr std::array<std::string_view, 3> prefixes = {
+        "models/tracks/", "textures/tracks/", "other/tracks/"
+    };
+    for (const std::string_view prefix : prefixes) {
+        if (path.rfind(prefix, 0) != 0) {
+            continue;
+        }
+        const std::string_view remainder = path.substr(prefix.size());
+        const size_t slash = remainder.find('/');
+        if (remainder.empty() || slash == 0 || slash == std::string_view::npos) {
+            return false;
+        }
+        *directory = remainder.substr(0, slash);
+        return true;
+    }
+    return false;
+}
+
+bool CeremonyResource(std::string_view path) {
+    constexpr std::array<std::string_view, 3> prefixes = {
+        "models/ceremony_data/", "textures/ceremony_data/", "other/ceremony_data/"
+    };
+    return std::any_of(prefixes.begin(), prefixes.end(), [path](std::string_view prefix) {
+        return path.rfind(prefix, 0) == 0;
+    });
+}
+
+bool RaceResource(std::string_view path) {
+    std::string_view directory;
+    if (TrackResourceDirectory(path, &directory) || CeremonyResource(path)) return true;
+    // Raw clouds/Lakitu palettes belong to the objects destroyed at load_track.
+    // Menu images, startup geometry and the pinned audio graph stay intact.
+    constexpr std::array<std::string_view, 3> prefixes = {
+        "textures/karts/", "textures/other_textures/", "textures/common_data/"
+    };
+    return std::any_of(prefixes.begin(), prefixes.end(), [path](std::string_view prefix) {
+        return path.rfind(prefix, 0) == 0;
+    });
 }
 
 void EvictDirectory(const char* name) {
@@ -982,13 +1072,26 @@ extern "C" bool Mk64Resource3DSPrefetchKart(const char* name, size_t* cachedByte
     bool ok = false;
     // Two MiB is bounded independently of kart texture/GPU ownership. Other
     // angles still use normal validated ZIP reads when first encountered.
-    if (entry != nullptr) ok = sArchive->CacheEntryByIndex(CrcEntryArchiveIndex(entry), 2u * 1024u * 1024u);
+    if (entry != nullptr) {
+        ok = sArchive->CacheEntryByIndex(CrcEntryArchiveIndex(entry), mk64_3ds::kStreamingCacheBytes);
+    }
     if (cachedBytes != nullptr) *cachedBytes = sArchive->CachedBytes();
     return ok;
 }
 
 extern "C" bool Mk64Resource3DSMakeResident(size_t budget, void (*progress)(unsigned)) {
-    return sArchive != nullptr && sArchive->MakeResident(budget, progress);
+    if (sArchive == nullptr) return false;
+    const bool ready = sArchive->MakeResident(budget, progress);
+    // Also applies after a later pressure-triggered DropResident. Reuse the
+    // existing 2 MiB kart-prefetch budget; do not reserve a second cache.
+    sArchive->SetStreamingCacheBudget(mk64_3ds::kStreamingCacheBytes);
+    return ready;
+}
+extern "C" bool Mk64Resource3DSDropResidency(void) {
+    return sArchive != nullptr && sArchive->DropResident();
+}
+extern "C" bool Mk64Resource3DSReclaimPerformanceCache(void) {
+    return sArchive != nullptr && sArchive->ReclaimPerformanceCache();
 }
 extern "C" bool Mk64Resource3DSResidencyMemoryLimited(void) {
     return sArchive && (sArchive->ResidentResult() == mk64_3ds::O2rResidentResult::BudgetExceeded ||
@@ -998,6 +1101,7 @@ extern "C" const char* Mk64Resource3DSResidencyStatus(void) {
     if (!sArchive) return "archive-not-open";
     switch (sArchive->ResidentResult()) {
         case mk64_3ds::O2rResidentResult::Ready: return "ready";
+        case mk64_3ds::O2rResidentResult::Released: return "released-for-memory";
         case mk64_3ds::O2rResidentResult::BudgetExceeded: return "budget-exceeded";
         case mk64_3ds::O2rResidentResult::AllocationFailed: return "allocation-failed";
         case mk64_3ds::O2rResidentResult::ReadFailed: return "archive-read-failed";
@@ -1018,6 +1122,9 @@ extern "C" uint64_t Mk64Resource3DSPhysicalReadCalls(void) {
 }
 extern "C" uint64_t Mk64Resource3DSPhysicalReadBytes(void) {
     return sArchive == nullptr ? 0 : sArchive->PhysicalReadBytes();
+}
+extern "C" size_t Mk64Resource3DSStreamingCachedBytes(void) {
+    return sArchive == nullptr ? 0 : sArchive->CachedBytes();
 }
 
 extern "C" bool Mk64Resource3DSInit(const char* archivePath) {
@@ -1182,6 +1289,67 @@ extern "C" size_t Mk64Resource3DSLoadedCount(void) {
     return sLoadedResourceCount;
 }
 
+extern "C" void Mk64Resource3DSGetRaceStats(Mk64RaceResourceStats3DS* stats) {
+    if (stats == nullptr) return;
+    *stats = {};
+    if (sArchive == nullptr) return;
+    for (size_t index = 0; index < sLoadedResources.size(); ++index) {
+        const auto* resource = sLoadedResources[index].get();
+        if (resource == nullptr || !RaceResource(sArchive->Entries()[index])) continue;
+        ++stats->entries;
+        stats->bytes += resource->allocatedBytes;
+        stats->kartEntries += IsStreamingTexturePath(sArchive->Entries()[index]);
+        stats->rawEntries += resource->rawBorrowed;
+        stats->ownedEntries += resource->textureOwners != 0;
+    }
+}
+
+extern "C" size_t Mk64Resource3DSReleaseRaceResources(void) {
+    if (sArchive == nullptr) return 0;
+    size_t requested = 0;
+    for (size_t index = 0; index < sLoadedResources.size(); ++index) {
+        if (sLoadedResources[index] == nullptr || !RaceResource(sArchive->Entries()[index])) continue;
+        RequestEviction(index);
+        ++requested;
+    }
+    return requested;
+}
+
+extern "C" size_t Mk64Resource3DSSetActiveTrack(const char* assetDirectory) {
+    if (sArchive == nullptr || assetDirectory == nullptr || assetDirectory[0] == '\0') {
+        return 0;
+    }
+    const std::string_view active(assetDirectory);
+    if (active.find('/') != std::string_view::npos || active.find('\\') != std::string_view::npos) {
+        return 0;
+    }
+    const bool podium = active == "podium_ceremony";
+    size_t requested = 0;
+    for (size_t archiveIndex = 0; archiveIndex < sLoadedResources.size(); ++archiveIndex) {
+        LoadedResource* resource = sLoadedResources[archiveIndex].get();
+        if (resource == nullptr) {
+            continue;
+        }
+        const std::string_view path = sArchive->Entries()[archiveIndex];
+        std::string_view directory;
+        const bool trackResource = TrackResourceDirectory(path, &directory);
+        const bool ceremonyResource = CeremonyResource(path);
+        const bool keepTrack = trackResource &&
+            (directory == active || (podium && directory == "royal_raceway"));
+        const bool keepCeremony = ceremonyResource && podium;
+        if ((!trackResource && !ceremonyResource) || keepTrack || keepCeremony) {
+            continue;
+        }
+        if (resource->type == kTypeTexture && resource->pointer != nullptr &&
+            Mk64Graphics3DSEvictSourceTexture != nullptr) {
+            Mk64Graphics3DSEvictSourceTexture(resource->pointer);
+        }
+        RequestEviction(archiveIndex);
+        ++requested;
+    }
+    return requested;
+}
+
 extern "C" bool Mk64Resource3DSValidateCrcIndex(void) {
     if (sArchive == nullptr || sCrcSlots.empty() ||
         (sCrcSlots.size() & (sCrcSlots.size() - 1U)) != 0 ||
@@ -1254,7 +1422,12 @@ extern "C" Mk64ResourceLoadResult3DS Mk64Resource3DSAcquireTexture(
         return MK64_RESOURCE_LOAD_NOT_FOUND_3DS;
     }
     ++resource->textureOwners;
-    if (resource->streamWhenUnused) {
+    // Every texture used exclusively through ResourceManager has an explicit
+    // shared owner in Fast3D. Reclaim its decoded source as soon as the bounded
+    // GPU cache drops the last owner. Legacy LOAD_ASSET_RAW callers receive a
+    // bare pointer, so those resources are pinned until their normal directory
+    // transition instead of risking a dangling pointer and an invisible kart.
+    if (!resource->rawBorrowed) {
         resource->evictWhenUnused = true;
     }
     outTexture->lifetimeToken = token;
@@ -1271,6 +1444,10 @@ extern "C" Mk64ResourceLoadResult3DS Mk64Resource3DSResolveDataByName(
     const Mk64ResourceLoadResult3DS result = ResolveResource(
         [name] { return LoadByPath(NormalizePath(name)); }, &resource);
     if (result == MK64_RESOURCE_LOAD_OK_3DS) {
+        if (resource->type == kTypeTexture) {
+            resource->rawBorrowed = true;
+            resource->evictWhenUnused = false;
+        }
         *outData = resource->pointer;
     }
     return result;
@@ -1286,6 +1463,10 @@ extern "C" Mk64ResourceLoadResult3DS Mk64Resource3DSResolveDataByCrc(
     const Mk64ResourceLoadResult3DS result = ResolveResource(
         [crc] { return LoadByCrc(crc); }, &resource);
     if (result == MK64_RESOURCE_LOAD_OK_3DS) {
+        if (resource->type == kTypeTexture) {
+            resource->rawBorrowed = true;
+            resource->evictWhenUnused = false;
+        }
         *outData = resource->pointer;
     }
     return result;

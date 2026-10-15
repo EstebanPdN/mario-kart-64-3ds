@@ -1,4 +1,5 @@
 #include "install_log_3ds.h"
+#include "settings_3ds.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -38,7 +39,7 @@ void Mk64InstallLogBegin() {
     if (gInstallLog != nullptr) {
         std::fclose(gInstallLog);
     }
-    gInstallLog = std::fopen(kInstallLogPath, "wb");
+    gInstallLog = Mk64Settings3DSGetLogging() ? std::fopen(kInstallLogPath, "wb") : nullptr;
     gInstallLogLine = 0;
     Mk64InstallLogWrite("Mario Kart 64 3DS installer log");
     Mk64InstallLogWrite("Only local installation diagnostics are written to this file.");

@@ -1,7 +1,8 @@
 #pragma once
 
 // Called on the main thread before entering the game loop. Subsequent log
-// writes stay in bounded RAM until an explicit dump or orderly shutdown.
+// writes, when Logging is enabled, stay in bounded RAM until an explicit dump,
+// race boundary or orderly shutdown. OFF does not open a runtime log.
 #ifdef __cplusplus
 extern "C" void Mk64Diagnostics3DSBufferRuntimeLog(void);
 #else
@@ -30,6 +31,9 @@ typedef struct Mk64DiagnosticsInput3DS {
 } Mk64DiagnosticsInput3DS;
 
 bool Mk64Diagnostics3DSStart(void);
+// Main-thread application of the saved Logging setting. HID/manual dumps stay
+// alive independently; disabling joins the startup writer and closes the log.
+void Mk64Diagnostics3DSSetLoggingEnabled(bool enabled);
 void Mk64Diagnostics3DSStop(void);
 void Mk64Diagnostics3DSAbortForProcessExit(void);
 void Mk64Diagnostics3DSEmergency(const char* reason);
@@ -41,11 +45,18 @@ bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input);
 bool Mk64Diagnostics3DSConsumeInput(Mk64DiagnosticsInput3DS* input);
 bool Mk64Diagnostics3DSRequestCleanDumps(void);
 bool Mk64Diagnostics3DSRequestDump(void);
+// L+R+SELECT retains the existing expanded application-memory capture.
+bool Mk64Diagnostics3DSRequestFullDump(void);
 bool Mk64Diagnostics3DSIsNewModel(void);
 bool Mk64Diagnostics3DSSupportsWideMode(void);
 const char* Mk64Diagnostics3DSGetSystemModelName(void);
 
 void Mk64Diagnostics3DSCheckpoint(const char* stage);
+// Main-thread, bounded AI recovery events; same RAM buffer as runtime records.
+void Mk64Diagnostics3DSCpuDrive(const char* detail);
+void Mk64Diagnostics3DSRaceResourceBoundary(const char* phase, const char* track);
+void Mk64Diagnostics3DSRendererFault(const char* stage, const char* reason,
+                                     uint64_t count, const char* snapshotPhase);
 void Mk64Diagnostics3DSSetStage(const char* stage);
 void Mk64Diagnostics3DSFailure(const char* stage, const char* reason);
 void Mk64Diagnostics3DSSetResource(const char* path, size_t loadedCount);

@@ -32,6 +32,48 @@ typedef enum Mk64HudLayout3DS {
     MK64_HUD_LAYOUT_3DS_CLASSIC = 4,
 } Mk64HudLayout3DS;
 
+typedef enum Mk64HudMeters3DS {
+    MK64_HUD_METERS_3DS_OFF = 0,
+    MK64_HUD_METERS_3DS_DISTANCE = 1,
+    MK64_HUD_METERS_3DS_SPEED = 2,
+    MK64_HUD_METERS_3DS_POSITION_LAP = 3,
+} Mk64HudMeters3DS;
+
+typedef enum Mk64DisplayProfile3DS {
+    MK64_DISPLAY_PROFILE_3DS_PERFORMANCE = 0,
+    MK64_DISPLAY_PROFILE_3DS_QUALITY = 1,
+    MK64_DISPLAY_PROFILE_3DS_CUSTOM = 2,
+} Mk64DisplayProfile3DS;
+
+typedef enum Mk64SelectAction3DS {
+    MK64_SELECT_ACTION_3DS_CAMERA = 0,
+    MK64_SELECT_ACTION_3DS_DUMP = 1,
+    MK64_SELECT_ACTION_3DS_OVERLAY = 2,
+} Mk64SelectAction3DS;
+
+typedef enum Mk64UiTextures3DS {
+    MK64_UI_TEXTURES_3DS_ORIGINAL = 0,
+    MK64_UI_TEXTURES_3DS_SCALED = 1,
+    MK64_UI_TEXTURES_3DS_MODIFIED = 2,
+} Mk64UiTextures3DS;
+
+Mk64UiTextures3DS Mk64Settings3DSGetUiTextures(void);
+void Mk64Settings3DSSetUiTextures(Mk64UiTextures3DS textures);
+
+Mk64DisplayProfile3DS Mk64Settings3DSGetDisplayProfile(void);
+void Mk64Settings3DSApplyDisplayProfile(Mk64DisplayProfile3DS profile);
+Mk64SelectAction3DS Mk64Settings3DSGetSelectAction(void);
+void Mk64Settings3DSSetSelectAction(Mk64SelectAction3DS action);
+uint8_t Mk64Settings3DSGetMenuBlur(void);
+void Mk64Settings3DSSetMenuBlur(uint8_t strength);
+bool Mk64Settings3DSGetMenuMaps(void);
+void Mk64Settings3DSSetMenuMaps(bool enabled);
+bool Mk64Settings3DSGetThreatWarnings(void);
+void Mk64Settings3DSSetThreatWarnings(bool enabled);
+
+Mk64HudMeters3DS Mk64Settings3DSGetHudMeters(void);
+void Mk64Settings3DSSetHudMeters(Mk64HudMeters3DS meters);
+
 Mk64HudLayout3DS Mk64Settings3DSGetHudLayout(void);
 void Mk64Settings3DSSetHudLayout(Mk64HudLayout3DS layout);
 
@@ -68,8 +110,17 @@ uint16_t Mk64Settings3DSGetMasterVolumePercent(void);
 void Mk64Settings3DSSetMasterVolumePercent(uint16_t percent);
 
 bool Mk64Settings3DSGetShowFpsEnabled(void);
+bool Mk64Settings3DSGetFrameLimiter(void);
+void Mk64Settings3DSSetFrameLimiter(bool enabled);
+bool Mk64Settings3DSGetZrDebug(void);
+void Mk64Settings3DSSetZrDebug(bool enabled);
+bool Mk64Settings3DSGetLogging(void);
+// Maintainer diagnostics remain available; there is no user logging switch.
+void Mk64Settings3DSSetLogging(bool enabled);
 bool Mk64Settings3DSGetShowLoadingScreens(void);
 void Mk64Settings3DSSetShowLoadingScreens(bool enabled);
+bool Mk64Settings3DSGetNewItems(void);
+void Mk64Settings3DSSetNewItems(bool enabled);
 void Mk64Settings3DSSetShowFpsEnabled(bool enabled);
 
 bool Mk64Settings3DSGetOverlayEnabled(void);

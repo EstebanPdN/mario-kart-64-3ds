@@ -16,6 +16,11 @@ void Mk64GameAudio3DSBeginFrame(void);
 void Mk64GameAudio3DSSuspend(void);
 void Mk64GameAudio3DSResume(void);
 void Mk64GameAudio3DSPump(void);
+// Main-thread-only credits load scope. Service at resource boundaries, never
+// concurrently with logic or another synthesis job; recursive loads are guarded.
+void Mk64GameAudio3DSBeginLoading(void);
+void Mk64GameAudio3DSServiceLoading(void);
+void Mk64GameAudio3DSEndLoading(void);
 void Mk64GameAudio3DSShutdown(void);
 void Mk64GameAudio3DSAbortForProcessExit(void);
 

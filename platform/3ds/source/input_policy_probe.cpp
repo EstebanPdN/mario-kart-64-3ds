@@ -1,161 +1,44 @@
 #include "input_policy_3ds.hpp"
-
+#include "select_policy_3ds.hpp"
+#include "turbo_policy_3ds.hpp"
+#include <array>
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
-
-namespace {
-
-using mk64_3ds::LegacyCInputPolicy3DS;
-using mk64_3ds::MapLegacyCInput;
-using mk64_3ds::MapPrimaryInput;
-using mk64_3ds::ModalDismissAction3DS;
-using mk64_3ds::NextHiddenTopHudMode;
-using mk64_3ds::PrimaryInputPolicy3DS;
-using mk64_3ds::ResolveModalDismissAction;
-using mk64_3ds::ShouldCycleHiddenTopHud;
-
-void CheckMenuAndFilteredInput() {
-    PrimaryInputPolicy3DS menu = {};
-    menu.a = true;
-    menu.b = true;
-    menu.x = true;
-    menu.y = true;
-    menu.start = true;
-    menu.l = true;
-    menu.r = true;
-    menu.dUp = true;
-    menu.dDown = true;
-    menu.dLeft = true;
-    menu.dRight = true;
-
-    constexpr std::uint16_t kExpected =
-        MK64_N64_A | MK64_N64_B | MK64_N64_CUP | MK64_N64_CLEFT |
-        MK64_N64_START | MK64_N64_L | MK64_N64_R | MK64_N64_DUP |
-        MK64_N64_DDOWN | MK64_N64_DLEFT | MK64_N64_DRIGHT;
-    assert(MapPrimaryInput(menu) == kExpected);
-    assert(!ShouldCycleHiddenTopHud(false, true, true));
-
-    // A modal bottom-screen panel filters every game key before this policy.
-    const PrimaryInputPolicy3DS filtered = {};
-    const LegacyCInputPolicy3DS filteredC = {};
-    assert(MapPrimaryInput(filtered) == 0);
-    assert(MapLegacyCInput(filteredC) == 0);
-    assert(!ShouldCycleHiddenTopHud(true, false, false));
-}
-
-void CheckRaceControls() {
-    PrimaryInputPolicy3DS race = {};
-    race.a = true;
-    race.b = true;
-    race.x = true;
-    race.l = true;
-    race.r = true;
-    race.raceControls = true;
-    race.topHudRenderMode = MK64_TOP_HUD_RENDER_NONE;
-
-    assert(MapPrimaryInput(race) ==
-           (MK64_N64_A | MK64_N64_B | MK64_N64_CUP |
-            MK64_N64_CDOWN | MK64_N64_R));
-
-    LegacyCInputPolicy3DS suppressed = {};
-    suppressed.zl = true;
-    suppressed.zr = true;
-    suppressed.cstickX = 127;
-    suppressed.cstickY = -127;
-    suppressed.raceControls = true;
-    assert(MapLegacyCInput(suppressed) == 0);
-
-    // ZL, ZR, and all four C-Stick directions stay non-digital in a race.
-    suppressed.zr = false;
-    suppressed.cstickX = 0;
-    suppressed.cstickY = 0;
-    assert(MapLegacyCInput(suppressed) == 0);
-    suppressed.zl = false;
-    suppressed.zr = true;
-    assert(MapLegacyCInput(suppressed) == 0);
-    suppressed.zr = false;
-    suppressed.cstickX = -127;
-    assert(MapLegacyCInput(suppressed) == 0);
-    suppressed.cstickX = 0;
-    suppressed.cstickY = 127;
-    assert(MapLegacyCInput(suppressed) == 0);
-}
-
-void CheckHudPolicy() {
-    PrimaryInputPolicy3DS fullHud = {};
-    fullHud.y = true;
-    fullHud.raceControls = true;
-    fullHud.topHudRenderMode = MK64_TOP_HUD_RENDER_FULL;
-    assert(MapPrimaryInput(fullHud) == MK64_N64_CRIGHT);
-    assert(ShouldCycleHiddenTopHud(true, true, true));
-    assert(!ShouldCycleHiddenTopHud(true, true, false));
-
-    PrimaryInputPolicy3DS hiddenHud = fullHud;
-    hiddenHud.topHudRenderMode = MK64_TOP_HUD_RENDER_NONE;
-    assert(MapPrimaryInput(hiddenHud) == 0);
-
-    auto mode = MK64_TOP_HUD_RENDER_NONE;
-    mode = NextHiddenTopHudMode(mode);
-    assert(mode == MK64_TOP_HUD_RENDER_LAP_PROGRESS);
-    mode = NextHiddenTopHudMode(mode);
-    assert(mode == MK64_TOP_HUD_RENDER_SPEEDOMETER);
-    mode = NextHiddenTopHudMode(mode);
-    assert(mode == MK64_TOP_HUD_RENDER_POSITION_LAP);
-    mode = NextHiddenTopHudMode(mode);
-    assert(mode == MK64_TOP_HUD_RENDER_NONE);
-}
-
-void CheckLegacyCButtons() {
-    LegacyCInputPolicy3DS legacy = {};
-    legacy.zl = true;
-    assert(MapLegacyCInput(legacy) == MK64_N64_CDOWN);
-    legacy = {};
-    legacy.zr = true;
-    assert(MapLegacyCInput(legacy) == MK64_N64_CRIGHT);
-    legacy = {};
-    legacy.cstickY = -71;
-    assert(MapLegacyCInput(legacy) == MK64_N64_CDOWN);
-    legacy.cstickY = 71;
-    assert(MapLegacyCInput(legacy) == MK64_N64_CUP);
-    legacy = {};
-    legacy.cstickX = -71;
-    assert(MapLegacyCInput(legacy) == MK64_N64_CLEFT);
-    legacy.cstickX = 71;
-    assert(MapLegacyCInput(legacy) == MK64_N64_CRIGHT);
-
-    legacy.cstickX = 70;
-    assert(MapLegacyCInput(legacy) == 0);
-    legacy.cstickX = -70;
-    assert(MapLegacyCInput(legacy) == 0);
-}
-
-void CheckModalDismissPolicy() {
-    assert(ResolveModalDismissAction(false, false) == ModalDismissAction3DS::None);
-    assert(ResolveModalDismissAction(false, true) == ModalDismissAction3DS::None);
-    assert(ResolveModalDismissAction(true, false) == ModalDismissAction3DS::Close);
-    assert(ResolveModalDismissAction(true, true) == ModalDismissAction3DS::Continue);
-
-    // The action intentionally has no tab or row input. B/START and the
-    // footer can therefore never activate MEMORY DUMP (or any other row)
-    // merely because Developer happened to be selected.
-    for (int tab = 0; tab < 4; ++tab) {
-        for (int row = 0; row < 3; ++row) {
-            (void) tab;
-            (void) row;
-            assert(ResolveModalDismissAction(true, true) ==
-                   ModalDismissAction3DS::Continue);
-        }
-    }
-}
-
-} // namespace
-
+using namespace mk64_3ds;
 int main() {
-    CheckMenuAndFilteredInput();
-    CheckRaceControls();
-    CheckHudPolicy();
-    CheckLegacyCButtons();
-    CheckModalDismissPolicy();
-    std::puts("3DS input policy: ok");
-    return 0;
+    PrimaryInputPolicy3DS keys{};
+    keys.a=keys.b=keys.x=keys.y=keys.select=keys.l=keys.r=keys.start=true;
+    keys.raceControls=true;
+    assert(MapPrimaryInput(keys)==(MK64_N64_A|MK64_N64_B|MK64_N64_CLEFT|MK64_N64_CUP|MK64_N64_CDOWN|MK64_N64_R|MK64_N64_START));
+    keys.raceControls=false;
+    assert(MapPrimaryInput(keys)==(MK64_N64_A|MK64_N64_B|MK64_N64_CLEFT|MK64_N64_L|MK64_N64_R|MK64_N64_START));
+    keys={}; keys.raceControls=true; keys.y=true;
+    assert(MapPrimaryInput(keys)==0); // Y belongs to the complete preset cycle.
+    LegacyCInputPolicy3DS legacy{}; legacy.zl=legacy.zr=true;
+    for(bool race:{false,true}) { legacy.raceControls=race; assert(MapLegacyCInput(legacy)==0); }
+    legacy={}; legacy.cstickX=71; assert(MapLegacyCInput(legacy)==MK64_N64_CRIGHT);
+    legacy.raceControls=true; assert(MapLegacyCInput(legacy)==0);
+    assert(ResolveModalDismissAction(true,true)==ModalDismissAction3DS::Continue);
+    assert(ResolveModalDismissAction(true,false)==ModalDismissAction3DS::Close);
+    for(bool manual:{false,true}) for(auto binding:{MK64_SELECT_ACTION_3DS_CAMERA,MK64_SELECT_ACTION_3DS_DUMP,MK64_SELECT_ACTION_3DS_OVERLAY}) {
+        SelectPolicy3DS policy;
+        assert(policy.Update(SelectPolicy3DS::kChord,SelectPolicy3DS::kChord,manual,binding)==SelectEvent3DS::DumpChord);
+        for(int frame=0;frame<120;++frame) assert(policy.Update(SelectPolicy3DS::kChord,0,manual,binding)==SelectEvent3DS::None);
+        policy.Update(0,0,manual,binding);
+        assert(policy.Update(SelectPolicy3DS::kChord,SelectPolicy3DS::kSelect,manual,binding)==SelectEvent3DS::DumpChord);
+        policy.Update(0,0,manual,binding);
+        const auto expected=!manual ? SelectEvent3DS::None : binding==MK64_SELECT_ACTION_3DS_CAMERA ? SelectEvent3DS::Camera : binding==MK64_SELECT_ACTION_3DS_DUMP ? SelectEvent3DS::Dump : SelectEvent3DS::Overlay;
+        assert(policy.Update(SelectPolicy3DS::kSelect,SelectPolicy3DS::kSelect,manual,binding)==expected);
+        assert(policy.Update(SelectPolicy3DS::kSelect,0,manual,binding)==SelectEvent3DS::None);
+    }
+    TurboPolicy3DS turbo;
+    for(int speed=2;speed<=5;++speed) {
+        assert(turbo.Update(speed,false,false,false,true)==speed);
+        assert(turbo.Update(speed,false,false,true,false)==1); // Shoulder input cannot latch Turbo.
+        assert(turbo.Update(speed,false,false,false,false)==1);
+        assert(turbo.Update(speed,true,false,false,true)==1);
+        assert(turbo.Update(speed,false,true,false,true)==1);
+    }
+    std::puts("owner controls: contexts, rear view, Y, unassigned shoulders, SELECT priority/exclusivity/hold and hold-only Turbo: passed");
 }

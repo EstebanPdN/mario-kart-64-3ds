@@ -29,6 +29,8 @@ void Mk64Graphics3DSResumeAfterDiagnosticPause(void);
 void Mk64Graphics3DSSetExternalLinearBufferRange(const void* address, size_t size);
 void Mk64Graphics3DSMarkExternalLinearBuffersDirty(void);
 void Mk64Graphics3DSPollEvents(void);
+void Mk64Graphics3DSResetForTrackLoad(void);
+bool Mk64Graphics3DSFenceTextureReuseBatch(void);
 
 #ifdef __cplusplus
 }

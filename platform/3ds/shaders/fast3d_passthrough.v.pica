@@ -23,6 +23,7 @@
 .in intex0 v1
 .in intex1 v2
 .in incolor v3
+.in indepth v4
 
 .proc main
     mov r4, inpos
@@ -33,19 +34,19 @@
         mov r5.w, shaderConstants.x
         dp4 r4.x, nativeMatrix[0], r5
         dp4 r4.y, nativeMatrix[1], r5
-        dp4 r4.z, nativeMatrix[2], r5
-        dp4 r4.w, nativeMatrix[3], r5
+        ; Keep exact CPU W paired with CPU-converted depth. Only X/Y are
+        ; deferred; recomputing Z/W on float24 loses far-surface separation.
         mul r4.x, nativeAspect.x, r4.x
     .end
     dp4 r0.x, projection[0], r4
     dp4 r0.y, projection[1], r4
-    dp4 r0.z, projection[2], r4
+    mov r0.z, indepth.x
     dp4 r0.w, projection[3], r4
 
-    ; PICA clips z to [-w, 0]. Clamp there after applying the OpenGL-to-PICA
-    ; depth conversion; triangles crossing w=0 are clipped on the CPU.
-    min r0.z, shaderConstants.y, r0.z
-    max r0.z, r0.z, -r0.w
+    ; Let hardware CLIP at the near/far planes. Clamping each vertex instead
+    ; folds out-of-frustum geometry onto the front/back depth planes without
+    ; trimming its screen footprint (large bridge/water/tree polygons).
+    ; Conversion ran on ARM11; triangles crossing w=0 are clipped on the CPU.
     mov outpos, r0
     ; Texture dimensions and tile clamps are draw state, not CPU vertex work.
     min r6.xy, textureClamp, intex0

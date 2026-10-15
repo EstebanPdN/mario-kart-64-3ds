@@ -2,7 +2,9 @@
 #include "system_3ds.h"
 #include "game_state_3ds.h"
 #include "settings_3ds.h"
+#include "startup_trace_3ds.h"
 #include "performance_trace_3ds.hpp"
+#include "race_clock_3ds.hpp"
 #include "interpolation_diagnostics_3ds.hpp"
 #include "dump_sequence_3ds.hpp"
 #include "dump_cleanup_3ds.hpp"
@@ -13,8 +15,9 @@
 #include "native_lighting_3ds.h"
 #include "fast3d_reuse_3ds.hpp"
 #include "triangle_reuse_3ds.hpp"
-#include <citro3d.h>
+#include "combiner_cache_3ds.hpp"
 extern "C" void Mk64Perf3DSLogFlush(uint64_t);
+extern "C" bool Mk64SoloBattle3DSWriteDiagnostics(const char*) __attribute__((weak));
 
 extern "C" { extern float gMk64DistanceFar3DS; extern uint32_t gMk64DistanceCulled3DS;
 extern uint32_t gMk64DistanceFogDraws3DS; extern uint32_t gMk64DistanceFogSkipped3DS;
@@ -47,6 +50,7 @@ constexpr size_t kRuntimeLogBufferSize = 64u * 1024u;
 constexpr uint64_t kRuntimeFlushIntervalMilliseconds = 15000;
 
 std::atomic<bool> sRunning{ false };
+std::atomic<bool> sLoggingEnabled{ false };
 std::atomic<bool> sInputReady{ false };
 std::atomic<bool> sDumpPaused{ false };
 std::atomic<bool> sAptSuspended{ false };
@@ -99,6 +103,7 @@ FILE* sLog = nullptr;
 char sLogBuffer[kRuntimeLogBufferSize] = {};
 mk64_3ds::RamLog<kRuntimeLogBufferSize> sPendingLog;
 bool sBufferRuntimeLog = false; // protected by sLogLock
+bool sLogOpenedThisSession = false; // protected by sLogLock
 bool sIsNew3DS = false;
 bool sSystemModelKnown = false;
 u8 sSystemModel = 0xff;
@@ -118,7 +123,7 @@ const char* DumpTriggerName(unsigned request) {
     switch (request) {
         case kDumpRequestSelect: return "SELECT";
         case kDumpRequestClean: return "CLEAN DUMPS";
-        case kDumpRequestFullMemory: return "L+SELECT (process RAM)";
+        case kDumpRequestFullMemory: return "L+R+SELECT (process RAM)";
         case kDumpRequestBottomUi: return "BOTTOM UI";
         default: return "unknown";
     }
@@ -153,6 +158,7 @@ void FlushLogLocked() {
 }
 
 void LogLine(const char* prefix, const char* value, bool flush = false) {
+    if (!sLoggingEnabled.load(std::memory_order_acquire)) return;
     sLogLineCount.fetch_add(1, std::memory_order_relaxed);
     LightLock_Lock(&sLogLock);
     if (sLog != nullptr) {
@@ -189,18 +195,21 @@ void WriteAll(int fd, const char* text) {
 }
 
 void LogRuntimeHeartbeat() {
+    if (!sLoggingEnabled.load(std::memory_order_acquire)) return;
     char stage[sizeof(sStage)] = {};
     char resource[sizeof(sLastResource)] = {};
     ReadTextSnapshot(stage, sizeof(stage), resource, sizeof(resource));
     const struct mallinfo heap = mallinfo();
     char value[512] = {};
     std::snprintf(value, sizeof(value),
-                  "frame=%lu resources=%lu heapFree=%d heapUsed=%d linearFree=%lu "
+                  "frame=%lu resources=%lu heapFree=%d heapUsed=%d linearFree=%lu combiners=%lu combinerResets=%lu "
                   "stage=%s resource=%s",
                   static_cast<unsigned long>(sFrame.load(std::memory_order_relaxed)),
                   static_cast<unsigned long>(sLoadedResources.load(std::memory_order_relaxed)),
                   heap.fordblks, heap.uordblks,
-                  static_cast<unsigned long>(linearSpaceFree()), stage, resource);
+                  static_cast<unsigned long>(linearSpaceFree()),
+                  static_cast<unsigned long>(mk64_3ds::CombinerCacheEntries3DS()),
+                  static_cast<unsigned long>(mk64_3ds::CombinerCacheResets3DS()), stage, resource);
     LogLine("heartbeat: ", value, true);
 }
 
@@ -390,6 +399,15 @@ void WriteScreenCapture(FILE* manifest, const char* directory, gfxScreen_t scree
     char path[256] = {};
     std::snprintf(path, sizeof(path), "%s/%s-screen.rgb", directory, name);
     const size_t rawBytes = static_cast<size_t>(width) * height * 3u;
+    // GPU transfer writes are not coherent with ARM11's data cache. Read back
+    // only after the diagnostic frame barrier, and invalidate (never flush)
+    // the CPU view so stale cache lines cannot replace newly rendered pixels.
+    const Result invalidateResult = GSPGPU_InvalidateDataCache(framebuffer, rawBytes);
+    if (R_FAILED(invalidateResult)) {
+        if (manifest) std::fprintf(manifest, "%s: cache invalidate failed 0x%08lX\n",
+                                   name, static_cast<unsigned long>(invalidateResult));
+        return;
+    }
     const bool rawOk = WriteBlob(path, framebuffer, rawBytes);
 
     std::snprintf(path, sizeof(path), "%s/%s-screen.bmp", directory, name);
@@ -460,6 +478,8 @@ void WriteMemoryMap(FILE* file) {
 
 void CopyRuntimeLog(const char* directory) {
     LightLock_Lock(&sLogLock);
+    // Never attach a previous session's log to a manual dump with Logging OFF.
+    if (sLog == nullptr) { LightLock_Unlock(&sLogLock); return; }
     FlushLogLocked();
     LightLock_Unlock(&sLogLock);
 
@@ -563,11 +583,15 @@ void WriteQuickDump(const char* trigger, bool fullMemory) {
         svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
         std::fprintf(info, "Mario Kart 64 3DS diagnostic dump\n");
         std::fprintf(info, "Build: %s\n", MK64_3DS_VERSION);
+        std::fprintf(info, "Automatic logging: %s\n", sLoggingEnabled.load(std::memory_order_acquire) ? "on" : "off (no runtime log attached)");
         std::fprintf(info, "Archive resident / bytes / physical reads / physical bytes: %s / %llu / %llu / %llu\n",
                      Mk64Resource3DSIsResident() ? "yes (SD handle closed)" : "no",
                      static_cast<unsigned long long>(Mk64Resource3DSArchiveBytes()),
                      static_cast<unsigned long long>(Mk64Resource3DSPhysicalReadCalls()),
                      static_cast<unsigned long long>(Mk64Resource3DSPhysicalReadBytes()));
+        std::fprintf(info, "Streaming compressed cache bytes / linear heap bytes: %lu / %lu\n",
+                     static_cast<unsigned long>(Mk64Resource3DSStreamingCachedBytes()),
+                     static_cast<unsigned long>(envGetLinearHeapSize()));
         Mk64BottomUIGameState3DS game = {};
         Mk64GameState3DSGetBottomUISnapshot(&game);
         std::fprintf(info, "Game state / mode / track index / name / lap / timer: %ld / %ld / %lu / %s / %d / %.3f\n",
@@ -680,6 +704,8 @@ void WriteQuickDump(const char* trigger, bool fullMemory) {
     }
 
     if (!mk64_3ds::PerformanceWrite(directory)) LogLine("dump warning: ", "performance trace write failed");
+    if (Mk64SoloBattle3DSWriteDiagnostics && !Mk64SoloBattle3DSWriteDiagnostics(directory))
+        LogLine("dump warning: ", "Battle AI trace write failed");
     if (!mk64_3ds::InterpolationWriteDiagnostic(directory))
         LogLine("dump warning: ", "interpolation diagnostic write failed");
     ShowDumpProgress("METADATA", 1, 1);
@@ -710,11 +736,9 @@ void WriteQuickDump(const char* trigger, bool fullMemory) {
 }
 
 void DiagnosticThread(void*) {
-    bool selectWasHeld = false;
     uint64_t lastRuntimeFlush = osGetTime();
     while (sRunning.load(std::memory_order_acquire)) {
         if (sAptSuspended.load(std::memory_order_acquire)) {
-            selectWasHeld = false;
             svcSleepThread(16000000LL);
             continue;
         }
@@ -722,9 +746,10 @@ void DiagnosticThread(void*) {
         const uint32_t keys = hidKeysHeld();
         const uint32_t pressedKeys = hidKeysDown();
         const uint32_t releasedKeys = hidKeysUp();
-        const uint32_t gameKeys = keys & ~static_cast<uint32_t>(KEY_SELECT);
-        const uint32_t gameKeysDown = pressedKeys & ~static_cast<uint32_t>(KEY_SELECT);
-        const uint32_t gameKeysUp = releasedKeys & ~static_cast<uint32_t>(KEY_SELECT);
+        // Select belongs to the camera now. Manual dumps remain in Developer.
+        const uint32_t gameKeys = keys;
+        const uint32_t gameKeysDown = pressedKeys;
+        const uint32_t gameKeysUp = releasedKeys;
         circlePosition circle = {};
         circlePosition cstick = {};
         hidCircleRead(&circle);
@@ -749,16 +774,6 @@ void DiagnosticThread(void*) {
         sKeysHeld.store(gameKeys, std::memory_order_release);
         sInputReady.store(true, std::memory_order_release);
 
-        const bool select = (keys & KEY_SELECT) != 0;
-        const bool selectPressed = select && !selectWasHeld;
-        if (selectPressed) {
-            unsigned expected = kDumpRequestNone;
-            const unsigned request = (keys & KEY_L) != 0 ? kDumpRequestFullMemory : kDumpRequestSelect;
-            if (sDumpRequest.compare_exchange_strong(expected, request, std::memory_order_acq_rel)) {
-                LogLine("dump requested: ", DumpTriggerName(request));
-            }
-        }
-        selectWasHeld = select;
         const uint64_t now = osGetTime();
         if (now - lastRuntimeFlush >= kRuntimeFlushIntervalMilliseconds) {
             LogRuntimeHeartbeat();
@@ -795,6 +810,7 @@ extern "C" bool Mk64Diagnostics3DSStart() {
     LightLock_Init(&sLogLock);
     sPendingLog.Clear();
     sBufferRuntimeLog = false;
+    sLogOpenedThisSession = false;
     sInputReady.store(false, std::memory_order_relaxed);
     sKeysHeld.store(0, std::memory_order_relaxed);
     sKeysDownLatched.store(0, std::memory_order_relaxed);
@@ -818,9 +834,6 @@ extern "C" bool Mk64Diagnostics3DSStart() {
     sPrefetchUpdateSerial.store(0, std::memory_order_relaxed);
     sPrefetchLoggedSerial.store(0, std::memory_order_relaxed);
     sEmergencyWriteStarted.clear(std::memory_order_relaxed);
-    EnsureDirectory(kGameDirectory);
-    EnsureDirectory(kDumpDirectory);
-    std::remove(kFatalLog);
     sStartTime = osGetTime();
     sSystemModelKnown = false;
     sSystemModel = 0xff;
@@ -839,10 +852,11 @@ extern "C" bool Mk64Diagnostics3DSStart() {
                      sSystemModel == CFG_MODEL_N3DSXL ||
                      sSystemModel == CFG_MODEL_N2DSXL);
     }
-    sLog = std::fopen(kRuntimeLog, "wb");
-    if (sLog != nullptr) {
-        setvbuf(sLog, sLogBuffer, _IOFBF, sizeof(sLogBuffer));
-    }
+    // Detect the model before loading settings: old/new first-run limiter
+    // defaults must not change when the log gate moves ahead of the loader.
+    Mk64Settings3DSSetHardwareModel(sIsNew3DS);
+    Mk64Settings3DSLoad();
+    Mk64Diagnostics3DSSetLoggingEnabled(Mk64Settings3DSGetLogging());
     sRunning.store(true, std::memory_order_release);
     s32 priority = 0x30;
     svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
@@ -862,11 +876,50 @@ extern "C" bool Mk64Diagnostics3DSStart() {
     return true;
 }
 
+extern "C" void Mk64Diagnostics3DSSetLoggingEnabled(bool enabled) {
+    // This runs on the main thread, never the HID/logging worker. Stop the
+    // separate startup writer before returning from OFF; do not stop input.
+    if (!enabled) Mk64Startup3DSStop();
+    LightLock_Lock(&sLogLock);
+    sLoggingEnabled.store(false, std::memory_order_release);
+    if (!enabled) {
+        if (sLog != nullptr) {
+            FlushLogLocked(); // One final drain at the explicit toggle only.
+            std::fclose(sLog);
+            sLog = nullptr;
+        }
+        sPendingLog.Clear();
+    } else {
+        if (sLog == nullptr && EnsureDirectory(kGameDirectory) && EnsureDirectory(kDumpDirectory)) {
+            if (!sLogOpenedThisSession) std::remove(kFatalLog);
+            sLog = std::fopen(kRuntimeLog, sLogOpenedThisSession ? "ab" : "wb");
+            if (sLog != nullptr) {
+                setvbuf(sLog, sLogBuffer, _IOFBF, sizeof(sLogBuffer));
+                sLogOpenedThisSession = true;
+            }
+        }
+        sLoggingEnabled.store(true, std::memory_order_release);
+    }
+    LightLock_Unlock(&sLogLock);
+    if (enabled) {
+        LogLine("logging: ", "enabled", true);
+        // Bootstrap still starts the trace through main, at its original point.
+        if (sRunning.load(std::memory_order_acquire)) {
+            Mk64Startup3DSStart();
+            Mk64Startup3DSAsync();
+        }
+    }
+}
+
 extern "C" void Mk64Diagnostics3DSBufferRuntimeLog() {
     LightLock_Lock(&sLogLock);
     FlushLogLocked();
     sBufferRuntimeLog = true;
     LightLock_Unlock(&sLogLock);
+}
+
+extern "C" void Mk64Diagnostics3DSCpuDrive(const char* detail) {
+    LogLine("cpu-drive recovery: ", detail);
 }
 
 extern "C" void Mk64Diagnostics3DSStop() {
@@ -900,6 +953,7 @@ extern "C" void Mk64Diagnostics3DSAbortForProcessExit() {
 }
 
 extern "C" void Mk64Diagnostics3DSEmergency(const char* reason) {
+    if (!sLoggingEnabled.load(std::memory_order_acquire)) return;
     if (sEmergencyWriteStarted.test_and_set(std::memory_order_acq_rel)) {
         return;
     }
@@ -920,6 +974,14 @@ extern "C" void Mk64Diagnostics3DSEmergency(const char* reason) {
     } else {
         WriteAll(fd, "stage: unavailable (diagnostic lock held)\n");
     }
+    const struct mallinfo heap = mallinfo();
+    char memory[192] = {};
+    std::snprintf(memory, sizeof(memory),
+                  "heap-used: %d\nheap-free: %d\nlinear-free: %lu\narchive-resident: %s\n",
+                  heap.uordblks, heap.fordblks,
+                  static_cast<unsigned long>(linearSpaceFree()),
+                  Mk64Resource3DSIsResident() ? "yes" : "no");
+    WriteAll(fd, memory);
     fsync(fd);
     close(fd);
 }
@@ -940,28 +1002,35 @@ extern "C" bool Mk64Diagnostics3DSServiceDumpIfRequested() {
     const unsigned request = sDumpRequest.exchange(kDumpRequestNone, std::memory_order_acq_rel);
     if (request == kDumpRequestNone) return false;
 
+    // Disk writes and the diagnostic pause are not racing time.
+    Mk64RaceClock3DSFreeze();
     const char* trigger = DumpTriggerName(request);
     sDumpPaused.store(true, std::memory_order_release);
     Mk64Diagnostics3DSSetStage("diagnostic-dump-paused");
     LogLine("dump trigger: ", trigger);
     if (Mk64GameAudio3DSSetPaused != nullptr) Mk64GameAudio3DSSetPaused(true);
     if (request == kDumpRequestClean) {
+        Mk64Startup3DSStop(); // Do not unlink a trace still owned by its worker.
         Mk64BottomUI3DSShowProgress("CLEAN DUMPS", "DELETING FILES", 0);
         std::uint32_t next;
-        bool ok = mk64_3ds::NextDumpNumber(kDumpDirectory, "sdmc:/3ds/MK64/dump-sequence.txt", &next) &&
+        bool ok = EnsureDirectory(kGameDirectory) && EnsureDirectory(kDumpDirectory) &&
+            mk64_3ds::NextDumpNumber(kDumpDirectory, "sdmc:/3ds/MK64/dump-sequence.txt", &next) &&
             mk64_3ds::SaveDumpNumber("sdmc:/3ds/MK64/dump-sequence.txt", next);
         if (ok) {
             LightLock_Lock(&sLogLock);
             sPendingLog.Clear();
             if (sLog != nullptr) { std::fclose(sLog); sLog = nullptr; }
             ok = mk64_3ds::RemoveDumpContents(kDumpDirectory);
-            sLog = std::fopen(kRuntimeLog, "wb");
-            if (sLog != nullptr) setvbuf(sLog, sLogBuffer, _IOFBF, sizeof(sLogBuffer));
-            else ok = false;
+            if (sLoggingEnabled.load(std::memory_order_acquire)) {
+                sLog = std::fopen(kRuntimeLog, "wb");
+                if (sLog != nullptr) { setvbuf(sLog, sLogBuffer, _IOFBF, sizeof(sLogBuffer)); sLogOpenedThisSession = true; }
+                else ok = false;
+            }
             LightLock_Unlock(&sLogLock);
         }
         Mk64BottomUI3DSShowProgress("CLEAN DUMPS", ok ? "DUMPS DELETED" : "CLEAN FAILED", ok ? 100 : 0);
         for (unsigned i = 0; i < 45; ++i) gspWaitForVBlank();
+        if (sLoggingEnabled.load(std::memory_order_acquire)) { Mk64Startup3DSStart(); Mk64Startup3DSAsync(); }
     } else {
         WriteQuickDump(trigger, request == kDumpRequestFullMemory);
     }
@@ -992,7 +1061,13 @@ extern "C" bool Mk64Diagnostics3DSRequestDump() {
     LogLine("dump requested: ", DumpTriggerName(kDumpRequestBottomUi));
     return true;
 }
-
+extern "C" bool Mk64Diagnostics3DSRequestFullDump() {
+    unsigned expected = kDumpRequestNone;
+    if (!sDumpRequest.compare_exchange_strong(expected, kDumpRequestFullMemory,
+                                             std::memory_order_acq_rel)) return false;
+    LogLine("dump requested: ", DumpTriggerName(kDumpRequestFullMemory));
+    return true;
+}
 extern "C" bool Mk64Diagnostics3DSIsNewModel() {
     return sIsNew3DS;
 }
@@ -1020,6 +1095,62 @@ extern "C" void Mk64Diagnostics3DSCheckpoint(const char* stage) {
     Mk64Diagnostics3DSSetStage(stage);
     LogPrefetchSnapshotIfChanged();
     LogLine("stage: ", stage, true);
+}
+
+extern "C" void Mk64Diagnostics3DSRaceResourceBoundary(const char* phase, const char* track) {
+    if (!sLoggingEnabled.load(std::memory_order_acquire)) return;
+    Mk64RaceResourceStats3DS stats = {};
+    Mk64Resource3DSGetRaceStats(&stats);
+    const struct mallinfo heap = mallinfo();
+    char value[384] = {};
+    std::snprintf(value, sizeof(value),
+        "%s track=%s total=%lu race=%lu raceBytes=%lu kart=%lu raw=%lu owned=%lu "
+        "heapUsed=%d heapFree=%d linearFree=%lu archiveResident=%u",
+        phase, track, static_cast<unsigned long>(Mk64Resource3DSLoadedCount()),
+        static_cast<unsigned long>(stats.entries), static_cast<unsigned long>(stats.bytes),
+        static_cast<unsigned long>(stats.kartEntries), static_cast<unsigned long>(stats.rawEntries),
+        static_cast<unsigned long>(stats.ownedEntries), heap.uordblks, heap.fordblks,
+        static_cast<unsigned long>(linearSpaceFree()), Mk64Resource3DSIsResident());
+    LogLine("race-resources: ", value);
+    // Transition-only persistence keeps the evidence after a hard crash,
+    // without adding SD flushes to the racing frame path.
+    LightLock_Lock(&sLogLock);
+    FlushLogLocked();
+    LightLock_Unlock(&sLogLock);
+}
+
+extern "C" void Mk64Diagnostics3DSRendererFault(const char* stage, const char* reason,
+                                                uint64_t count, const char* snapshotPhase) {
+    if (!sLoggingEnabled.load(std::memory_order_acquire)) return;
+    const int fd = open("sdmc:/3ds/MK64/dump/last-renderer-fault.log",
+                        O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return;
+    WriteAll(fd, "stage: "); WriteAll(fd, stage);
+    WriteAll(fd, "\nreason: "); WriteAll(fd, reason);
+    Mk64RaceResourceStats3DS stats = {};
+    Mk64Resource3DSGetRaceStats(&stats);
+    const struct mallinfo heap = mallinfo();
+    char memory[512] = {};
+    std::snprintf(memory, sizeof(memory),
+        "\ncount: %llu\nframe: %lu\nelapsed-ms: %llu\nsnapshot-phase: %s\nheap-used: %d\nheap-free: %d\nlinear-free: %lu\n"
+        "race-resources: %lu\nrace-bytes: %lu\nkart-resources: %lu\nraw-resources: %lu\n"
+        "owned-resources: %lu\narchive-resident: %s\ncombiners: %lu\ncombiner-limit-resets: %lu\n",
+        static_cast<unsigned long long>(count),
+        static_cast<unsigned long>(sFrame.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(osGetTime() - sStartTime), snapshotPhase,
+        heap.uordblks, heap.fordblks, static_cast<unsigned long>(linearSpaceFree()),
+        static_cast<unsigned long>(stats.entries), static_cast<unsigned long>(stats.bytes),
+        static_cast<unsigned long>(stats.kartEntries), static_cast<unsigned long>(stats.rawEntries),
+        static_cast<unsigned long>(stats.ownedEntries), Mk64Resource3DSIsResident() ? "yes" : "no",
+        static_cast<unsigned long>(mk64_3ds::CombinerCacheEntries3DS()),
+        static_cast<unsigned long>(mk64_3ds::CombinerCacheResets3DS()));
+    WriteAll(fd, memory);
+    if (LightLock_TryLock(&sTextLock) == 0) {
+        WriteAll(fd, "last-resource: "); WriteAll(fd, sLastResource); WriteAll(fd, "\n");
+        LightLock_Unlock(&sTextLock);
+    }
+    fsync(fd);
+    close(fd);
 }
 
 extern "C" void Mk64Diagnostics3DSSetStage(const char* stage) {
@@ -1171,10 +1302,10 @@ extern "C" void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResourc
                                          size_t initializedTextures, size_t textureBytes,
                                          size_t shaderPrograms, size_t clipScratchBytes) {
     const struct mallinfo heap = mallinfo();
-    char value[320] = {};
+    char value[384] = {};
     std::snprintf(value, sizeof(value),
                   "%s resources=%lu texSlots=%lu texLive=%lu texBytes=%lu shaders=%lu clipScratch=%lu "
-                  "appFree=%lu heapFree=%d heapUsed=%d linearFree=%lu vramFree=%lu",
+                  "appFree=%lu heapFree=%d heapUsed=%d linearFree=%lu vramFree=%lu combiners=%lu combinerResets=%lu",
                   label == nullptr ? "snapshot" : label,
                   static_cast<unsigned long>(loadedResources),
                   static_cast<unsigned long>(textureSlots),
@@ -1185,7 +1316,9 @@ extern "C" void Mk64Diagnostics3DSMemory(const char* label, size_t loadedResourc
                   static_cast<unsigned long>(osGetMemRegionFree(MEMREGION_APPLICATION)),
                   heap.fordblks, heap.uordblks,
                   static_cast<unsigned long>(linearSpaceFree()),
-                  static_cast<unsigned long>(vramSpaceFree()));
+                  static_cast<unsigned long>(vramSpaceFree()),
+                  static_cast<unsigned long>(mk64_3ds::CombinerCacheEntries3DS()),
+                  static_cast<unsigned long>(mk64_3ds::CombinerCacheResets3DS()));
     LogLine("memory: ", value);
 }
 

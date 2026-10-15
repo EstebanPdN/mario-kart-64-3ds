@@ -10,6 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  host:
+    name: Portable contracts and documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake
+      - name: Check documentation and generated source
+        run: python3 platform/3ds/tests/check-project.py
+      - name: Run asset-free host regressions with sanitizers
+        run: python3 platform/3ds/tests/run-host-tests.py --output "$RUNNER_TEMP/mk64-host-tests"
+
   build:
     name: Nintendo 3DS packages
     runs-on: ubuntu-latest

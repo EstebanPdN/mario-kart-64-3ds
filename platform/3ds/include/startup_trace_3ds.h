@@ -4,6 +4,7 @@
 extern "C" {
 #endif
 // Stage strings must have static lifetime. Only the main thread sets stages.
+void Mk64Startup3DSMarkEntry(void);
 void Mk64Startup3DSStart(void);
 void Mk64Startup3DSStage(const char* stage) __attribute__((weak));
 void Mk64Startup3DSFailure(const char* stage) __attribute__((weak));
@@ -13,6 +14,7 @@ bool Mk64Startup3DSActive(void) __attribute__((weak));
 void Mk64Startup3DSFrameSubmitted(void) __attribute__((weak));
 bool Mk64Startup3DSHasSubmittedFrames(void);
 void Mk64Startup3DSAsync(void);
+void Mk64Startup3DSSetSuspended(bool suspended);
 void Mk64Startup3DSGameState(int gameState, int menu);
 void Mk64Startup3DSStop(void);
 #ifdef __cplusplus

@@ -18,8 +18,13 @@ void Mk64BottomUI3DSShutdown(void);
 void Mk64BottomUI3DSShowProgress(const char* title, const char* detail, unsigned percent);
 void Mk64BottomUI3DSShowLoadingProgress(const char* title, const char* detail, unsigned percent);
 void Mk64BottomUI3DSPrepareFrame(void);
+void Mk64BottomUI3DSSetRaceOpening(float reveal);
+void Mk64BottomUI3DSSetRaceExitSlide(int pixels);
+void Mk64BottomUI3DSSetRaceExitFade(int type, unsigned time, unsigned duration);
 void Mk64BottomUI3DSRecordPresentation(void);
 void Mk64BottomUI3DSResetFps(void);
+/* Native race initialization, including retry and same-course reload. */
+void Mk64BottomUI3DSResetTurbo(void);
 /* Every presented top image, including interpolation, must include active overlays. */
 bool Mk64BottomUI3DSNeedsTopOverlay(void);
 void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget);
@@ -29,7 +34,6 @@ void Mk64BottomUI3DSDraw(void* existingTopTarget);
 uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t heldKeys);
 bool Mk64BottomUI3DSConsumesCStick(void);
 
-/* Hide stock menu/HUD lettering while retaining the scene behind Update. */
 bool Mk64BottomUI3DSIsUpdateOpen(void);
 
 /* Diagnostic/read-only state for integration and tests. */

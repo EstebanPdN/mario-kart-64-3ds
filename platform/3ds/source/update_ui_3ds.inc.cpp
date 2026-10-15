@@ -38,7 +38,7 @@ void OpenUpdate() {
 void CloseUpdate() {
     sUpdate.open = false;
     sUpdate.confirm = false;
-    sUi.selectedRow = 1;
+    sUi.selectedRow = sUi.modalOpenedFromPause ? 2 : 0;
     sUi.bottomDirty = true;
 }
 

@@ -29,6 +29,18 @@ inline bool BeginFrame3DS(unsigned flags, const char* stage) {
         }
         svcSleepThread(1000000LL);
     }
+    // Queue completion schedules a framebuffer swap, but GSP consumes that
+    // swap only at the next VBlank. A display counter that advanced while the
+    // GPU was busy is not acknowledgement of this newer swap. Do not reuse
+    // either double-buffered screen until the actual pending presents clear.
+    const uint64_t presentStarted = osGetTime();
+    while (gspIsPresentPending(GFX_TOP) || gspIsPresentPending(GFX_BOTTOM)) {
+        if (osGetTime() - presentStarted >= 5000) {
+            Mk64StartupFailure("startup-display-present-timeout-kernel-exit");
+            svcExitProcess();
+        }
+        svcSleepThread(1000000LL);
+    }
     Mk64StartupStage("startup-gpu-queue-wait-returned");
     return true;
 }
