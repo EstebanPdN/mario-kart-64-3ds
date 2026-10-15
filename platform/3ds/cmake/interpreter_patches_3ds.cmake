@@ -1500,4 +1500,3 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
         endif()
         include(platform/3ds/cmake/texture_owner_scan_3ds.cmake)
         file(WRITE "${SPAGHETTIKART_3DS_INTERPRETER_SOURCE}" "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
-
