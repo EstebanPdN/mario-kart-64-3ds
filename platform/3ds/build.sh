@@ -55,14 +55,18 @@ if [[ ! -x "${MAKEROM}" || ! -x "${BANNERTOOL}" ]]; then
   exit 0
 fi
 
-banner_image=(-i "${ROOT}/platform/3ds/assets/banner.png")
-if [[ -n "${MK64_3DS_BANNER_CGFX:-}" ]]; then
-  banner_image=(-ci "${MK64_3DS_BANNER_CGFX}")
+if [[ -n "${MK64_3DS_BANNER_BNR:-}" ]]; then
+  cp "${MK64_3DS_BANNER_BNR}" "${BUILD}/mk64-3ds.bnr"
+else
+  banner_image=(-i "${ROOT}/platform/3ds/assets/banner.png")
+  if [[ -n "${MK64_3DS_BANNER_CGFX:-}" ]]; then
+    banner_image=(-ci "${MK64_3DS_BANNER_CGFX}")
+  fi
+  "${BANNERTOOL}" makebanner \
+    "${banner_image[@]}" \
+    -a "${MK64_3DS_BANNER_AUDIO:-${ROOT}/platform/3ds/assets/banner.wav}" \
+    -o "${BUILD}/mk64-3ds.bnr"
 fi
-"${BANNERTOOL}" makebanner \
-  "${banner_image[@]}" \
-  -a "${MK64_3DS_BANNER_AUDIO:-${ROOT}/platform/3ds/assets/banner.wav}" \
-  -o "${BUILD}/mk64-3ds.bnr"
 
 (
   cd "${ROOT}"

@@ -1,4 +1,5 @@
 #include "startup_trace_3ds.h"
+#include "settings_3ds.h"
 #include <3ds.h>
 #include <atomic>
 #include <cstdio>
@@ -6,7 +7,7 @@
 
 namespace {
 std::atomic<bool> active{false}, running{false};
-std::atomic<bool> asynchronous{false}, urgent{false};
+std::atomic<bool> asynchronous{true}, urgent{false}, suspended{false};
 std::atomic<int> gameState{-1}, menu{-1};
 std::atomic<unsigned> submittedFrames{0};
 std::atomic<unsigned> displayTimeouts{0};
@@ -15,6 +16,7 @@ std::atomic<unsigned> sequence{1}, acknowledged{0};
 Thread worker = nullptr;
 FILE* output = nullptr;
 uint64_t started = 0;
+uint64_t mainEntered = 0;
 
 bool Write(const char* kind, const char* current, uint64_t duration) {
     // This file and its stdio lock belong exclusively to this worker. No
@@ -29,6 +31,10 @@ void Watch(void*) {
     unsigned last = 0;
     uint64_t changed = osGetTime(), reported = changed;
     while (running.load(std::memory_order_acquire)) {
+        if (suspended.load(std::memory_order_acquire)) {
+            svcSleepThread(10000000LL);
+            continue;
+        }
         const auto now = osGetTime();
         const bool forced = urgent.exchange(false, std::memory_order_acq_rel);
         const auto serial = sequence.load(std::memory_order_acquire);
@@ -50,17 +56,21 @@ void Watch(void*) {
     running.store(false, std::memory_order_release);
 }
 }
+extern "C" void Mk64Startup3DSMarkEntry(void) { mainEntered = osGetTime(); }
 extern "C" void Mk64Startup3DSStart(void) {
+    if (!Mk64Settings3DSGetLogging() || worker != nullptr) return;
     // Append preserves the evidence if the owner relaunches after a freeze.
-    output = std::fopen("sdmc:/3ds/MK64/dump/startup-e13.log", "ab");
+    output = std::fopen("sdmc:/3ds/MK64/dump/startup-e14.log", "ab");
     if (!output) return;
     std::setvbuf(output, nullptr, _IONBF, 0);
-    std::fprintf(output, "\nSTART build=%s watchdog_ms=5000 stage_ack_ms=250\n", MK64_3DS_VERSION);
+    started = mainEntered ? mainEntered : osGetTime();
+    std::fprintf(output, "\nSTART build=%s watchdog_ms=5000 stage_ack_ms=250 main_entry_to_trace_ms=%llu\n",
+                 MK64_3DS_VERSION, static_cast<unsigned long long>(osGetTime() - started));
     std::fflush(output);
-    started = osGetTime();
     submittedFrames.store(0, std::memory_order_relaxed);
     displayTimeouts.store(0);
-    asynchronous.store(false);
+    asynchronous.store(true);
+    suspended.store(false);
     urgent.store(false);
     gameState.store(-1);
     menu.store(-1);
@@ -89,6 +99,9 @@ extern "C" void Mk64Startup3DSStage(const char* value) {
 extern "C" void Mk64Startup3DSFailure(const char* value) { PublishStage(value, true); }
 extern "C" void Mk64Startup3DSDisplayTimeout(void) { displayTimeouts.fetch_add(1); }
 extern "C" void Mk64Startup3DSAsync(void) { asynchronous.store(true, std::memory_order_release); }
+extern "C" void Mk64Startup3DSSetSuspended(bool value) {
+    suspended.store(value, std::memory_order_release);
+}
 extern "C" void Mk64Startup3DSGameState(int value, int selection) {
     gameState.store(value);
     menu.store(selection);

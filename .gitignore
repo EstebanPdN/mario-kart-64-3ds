@@ -13,3 +13,7 @@
 *.fla
 *.eep
 .DS_Store
+
+# Disposable Python bytecode; generated source artwork is checked in.
+__pycache__/
+*.py[cod]

@@ -9,10 +9,21 @@ extern "C" {
 #endif
 
 bool Mk64GameState3DSInit(void);
+void Mk64GameState3DSPrepareRaceResources(void);
+bool Mk64RandomCup3DSStart(bool randomDriverAndSpeed, uint64_t seed);
+void Mk64RandomCup3DSPrepareRace(void);
+void Mk64RandomCup3DSReset(void);
+bool Mk64RandomCup3DSActive(void);
+int Mk64RandomCup3DSMenuKind(void); // 0 unavailable, 1 Game Select, 2 Map Select.
+bool Mk64GameState3DSSkipCeremony(void);
+void Mk64MenuBackTitle3DSBegin(void);
+int Mk64MenuBackTitle3DSFadeIn(int defaultDuration);
+// Read the same live vertex colors as the native RETRY/QUIT menu.
+bool Mk64GameState3DSGetPauseTextColors(bool selected, uint32_t* top, uint32_t* bottom);
 
 enum {
     MK64_BOTTOM_UI_RACER_COUNT = 8,
-    MK64_BOTTOM_UI_STANDING_COUNT = 4,
+    MK64_BOTTOM_UI_STANDING_COUNT = 8,
 };
 
 typedef enum Mk64TopHudRenderMode3DS {
@@ -35,6 +46,7 @@ typedef struct Mk64BottomUIRacer3DS {
     float worldX;
     float worldZ;
     int16_t rotationY;
+    uint16_t portraitHitAngle;
 } Mk64BottomUIRacer3DS;
 
 typedef struct Mk64BottomUIGameState3DS {
@@ -47,13 +59,24 @@ typedef struct Mk64BottomUIGameState3DS {
     int32_t gameMode;
     int32_t menuSelection;
     int32_t mainMenuSelection;
+    int8_t selectedDriver, selectedLevel;
     bool gameSelectVisible;
+    float gameSelectOptionReveal, gameSelectDataReveal;
     bool racing;
+    uint32_t hudAnimationTick;
+    uint32_t menuFlashTick;
+    bool demo;
+    bool autoMode, autoCinematic, autoMenuAvailable;
+    int8_t observedPlayer;
     bool multiplayer;
     bool paused;
     bool mirrorMode;
     int8_t topHudRenderMode;
     bool raceFinished;
+    bool topFinishPlaceVisible;
+    bool finishPortraitTransfer, finishPortraitLineup;
+    uint16_t finishPortraitPhase;
+    uint32_t lapDurationCentiseconds[3];
 
     float courseTimerSeconds;
     uint32_t courseTimerCentiseconds;
@@ -61,6 +84,7 @@ typedef struct Mk64BottomUIGameState3DS {
     int8_t totalLaps;
     int16_t currentItem;
     bool itemWindowVisible;
+    float itemWindowSlideY;
     uint8_t itemTextureIndex;
     uint8_t activeRacerCount;
     uint8_t standingCount;
@@ -101,15 +125,18 @@ typedef struct Mk64BottomUIGameState3DS {
 } Mk64BottomUIGameState3DS;
 
 const char* Mk64GameState3DSDataPreview(int index);
+const char* TrackBrowser_GetMinimapTextureByIdx(size_t index);
 const char* Mk64GameState3DSDataName(int index);
 void Mk64GameState3DSDataMove(int delta);
 void Mk64GameState3DSDataAction(int action);
 void Mk64GameState3DSDataConfirm(int direction, bool activate, bool back);
 void Mk64GameState3DSGetBottomUISnapshot(Mk64BottomUIGameState3DS* snapshot);
+// Post-simulation presentation refresh; no resource loading or animation ticks.
+void Mk64GameState3DSRefreshStandings(Mk64BottomUIGameState3DS* snapshot);
+void Mk64GameState3DSUpdateHudAnimations(void);
 void Mk64GameState3DSSetTopHudEnabled(bool enabled);
 void Mk64GameState3DSApplyTurbo(bool active, uint8_t multiplier);
 bool Mk64GameState3DSRaceControlsActive(void);
-bool Mk64GameState3DSCycleHiddenTopHud(void);
 int Mk64GameState3DSGetTopHudRenderMode(void);
 bool Mk64GameState3DSPerformPauseAction(Mk64PauseAction3DS action);
 

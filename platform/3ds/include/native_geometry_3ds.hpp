@@ -44,7 +44,8 @@ struct NativeGeometryCounters {
 
 // Bounded RSP sidecar. Only X/Y transforms are deferred: exact CPU Z/W retain
 // N64 fog alpha, distance/LOD, BranchZ, far-plane rejection and eye clipping.
-// PICA performs the complete object-to-clip transform for eligible triangles.
+// PICA performs object-to-clip X/Y for eligible triangles. CPU Z/W also supply
+// the separately packed PICA depth, avoiding float24 subtraction artifacts.
 // The 64 RSP slots may each retain a distinct load-time matrix. A spare pool
 // entry lets a replacement load acquire its matrix before capturing vertices.
 class NativeGeometryState {

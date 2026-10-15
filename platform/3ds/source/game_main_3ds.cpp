@@ -1,7 +1,6 @@
 #include "game_data_3ds.h"
 #include "audio_runtime_3ds.h"
 #include "bottom_ui_3ds.h"
-#include "updater.h"
 #include "diagnostics_3ds.h"
 #include "game_runtime_3ds.h"
 #include "game_state_3ds.h"
@@ -10,13 +9,17 @@
 #include "audio_ndsp_3ds.h"
 #include "resource_runtime_3ds.h"
 #include "settings_3ds.h"
+#include "race_clock_3ds.hpp"
 #include "loading_screen_3ds.h"
 #include "startup_trace_3ds.h"
+#include "heap_policy_3ds.hpp"
+#include "updater.h"
 
 #include <3ds.h>
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -34,6 +37,7 @@ void osInitialize(void);
 void sound_init(void);
 void thread5_game_loop(void);
 void thread5_iteration(void);
+void CVarSetInteger(const char*, int32_t);
 }
 
 extern "C" {
@@ -41,11 +45,9 @@ extern "C" {
 // and reduced the heap available to the first-run installer on Old 3DS.
 uint32_t __stacksize__ = 1 * 1024 * 1024;
 
-// E4 hardware evidence captured std::bad_alloc with roughly 14.5 MiB still
-// free in the linear heap but only 1.8 MiB, badly fragmented, in the ordinary
-// C/C++ heap. The 24 MiB reservation still leaves several MiB above the E4
-// linear working set, including the larger New 3DS texture-cache profile,
-// while returning another 4 MiB to strings, maps and other ordinary objects.
+// Conservative fallback if the early resource-limit query fails. The wrapped
+// libctru heap entrypoint selects 20 MiB for <=80 MiB launches before either
+// heap is allocated; expanded New 3DS launches keep this 24 MiB reservation.
 uint32_t __ctru_linear_heap_size = 24 * 1024 * 1024;
 }
 
@@ -54,12 +56,36 @@ constexpr int32_t kLogoIntroMenu = 8;
 constexpr uint64_t kSimulationRate = 30;
 aptHookCookie sAptHook;
 bool sResumePending = false;
+std::atomic_flag sMemoryRecoveryActive = ATOMIC_FLAG_INIT;
+
+void MemoryPressureHandler() {
+    // Resource decoding already retries its own malloc failures, but wrapper
+    // objects (shared_ptr control blocks, strings and cache nodes) allocate
+    // after decoding has returned. Give every C++ allocation one process-wide
+    // chance to surrender the optional compressed O2R mirror (or streaming
+    // hot cache after the mirror was already released), then retry.
+    if (!sMemoryRecoveryActive.test_and_set(std::memory_order_acq_rel)) {
+        const bool wasResident = Mk64Resource3DSIsResident();
+        const bool released = Mk64Resource3DSReclaimPerformanceCache();
+        sMemoryRecoveryActive.clear(std::memory_order_release);
+        if (released) {
+            Mk64Diagnostics3DSCheckpoint(wasResident ? "archive-residency-released-by-new-handler"
+                                                    : "streaming-cache-released-by-new-handler");
+            return;
+        }
+    }
+    throw std::bad_alloc();
+}
+
 void AppletTransition(APT_HookType event, void*) {
     if (event == APTHOOK_ONSUSPEND || event == APTHOOK_ONSLEEP) {
+        Mk64Startup3DSSetSuspended(true);
+        Mk64RaceClock3DSFreeze();
+        Mk64Diagnostics3DSSetAptSuspended(true);
+        // Release the system-core allocation before any diagnostic logging.
+        Mk64GameAudio3DSSuspend();
         Mk64StartupStage("apt-suspend-enter");
         Mk64Diagnostics3DSCheckpoint("apt-suspend-enter");
-        Mk64Diagnostics3DSSetAptSuspended(true);
-        Mk64GameAudio3DSSuspend();
         Mk64StartupStage("apt-suspend-ready");
         Mk64Diagnostics3DSCheckpoint("apt-suspend-ready");
         sResumePending = true;
@@ -68,7 +94,6 @@ void AppletTransition(APT_HookType event, void*) {
 
 void CloseServices(void*) {
     Mk64StartupStage("close-updater");
-    Mk64Diagnostics3DSCheckpoint("close-updater");
     Updater_Shutdown();
     Mk64StartupStage("close-audio");
     Mk64Diagnostics3DSCheckpoint("close-audio");
@@ -113,7 +138,12 @@ void ArchiveLoadProgress(unsigned percent) {
     }
     Mk64Loading3DSStop();
     Mk64Diagnostics3DSEmergency(reason);
-    std::_Exit(1);
+    // _Exit runs libctru's heap teardown hooks. If another library-owned
+    // worker is still scheduled, it can execute once more with an unmapped
+    // heap-backed stack and replace the useful fatal record with a misleading
+    // Arm11 data-abort dump. Terminate all process threads atomically instead.
+    svcExitProcess();
+    __builtin_unreachable();
 }
 
 [[noreturn]] void ExitWithError(const char* message) {
@@ -132,9 +162,17 @@ void ArchiveLoadProgress(unsigned percent) {
 }
 
 int main(int argc, char** argv) {
+    Mk64Startup3DSMarkEntry(); // Include diagnostics-before-loader work in the trace.
     std::set_terminate(TerminateHandler);
+    std::set_new_handler(MemoryPressureHandler);
     Mk64Diagnostics3DSStart();
     Mk64Startup3DSStart();
+    char heapProfile[128];
+    std::snprintf(heapProfile, sizeof(heapProfile), "heap-partition ordinary=%lu linear=%lu archive-reserve=%lu",
+                  static_cast<unsigned long>(envGetHeapSize()),
+                  static_cast<unsigned long>(envGetLinearHeapSize()),
+                  static_cast<unsigned long>(mk64_3ds::kArchiveReserveBytes));
+    Mk64Diagnostics3DSCheckpoint(heapProfile);
     Mk64StartupStage("loading-screen-init");
     Mk64Diagnostics3DSCheckpoint("loading-screen-init");
     Mk64Loading3DSStart(nullptr);
@@ -213,6 +251,8 @@ int main(int argc, char** argv) {
     }
     Mk64StartupStage("game-state-ready");
     Mk64Diagnostics3DSCheckpoint("game-state-ready");
+    // Use the existing hold-to-look-behind enhancement for the dedicated X.
+    CVarSetInteger("gLookBehind", 1);
 
     Mk64StartupStage("audio-init");
     Mk64Diagnostics3DSCheckpoint("audio-init");
@@ -251,9 +291,8 @@ int main(int argc, char** argv) {
     // headroom for later course objects and transient decompression buffers.
     const auto used = static_cast<size_t>(mallinfo().uordblks);
     const size_t heapSize = envGetHeapSize();
-    constexpr size_t reserve = 8u * 1024u * 1024u;
-    const size_t budget = heapSize > used && heapSize - used > reserve
-        ? heapSize - used - reserve : 0;
+    constexpr size_t reserve = mk64_3ds::kArchiveReserveBytes;
+    const size_t budget = mk64_3ds::ArchiveResidencyBudget(heapSize, used);
     Mk64Diagnostics3DSMemory("before-archive-residency", Mk64Resource3DSLoadedCount(), 0, 0, 0, 0, 0);
     Mk64StartupStage("archive-ram-loading");
     Mk64Diagnostics3DSCheckpoint("archive-ram-loading");
@@ -313,6 +352,7 @@ int main(int argc, char** argv) {
         Mk64StartupStage("apt-poll-returned");
         if (!WindowIsRunning()) break;
         if (sResumePending) {
+            Mk64Startup3DSSetSuspended(false);
             // aptMainLoop has now finished restoring DSP and GPU ownership.
             sResumePending = false;
             Mk64GameAudio3DSResume();
@@ -327,6 +367,7 @@ int main(int argc, char** argv) {
             Mk64Diagnostics3DSCheckpoint("apt-resume-ready");
         }
         if (Mk64Diagnostics3DSServiceDumpIfRequested()) {
+            Mk64RaceClock3DSFreeze();
             Mk64Graphics3DSResumeAfterDiagnosticPause();
             Mk64BottomUI3DSResetFps();
             mk64_3ds::PerformanceResume();
@@ -336,6 +377,7 @@ int main(int argc, char** argv) {
             continue;
         }
         if (Mk64Diagnostics3DSIsPaused()) {
+            Mk64RaceClock3DSFreeze();
             Mk64Diagnostics3DSSetStage("diagnostic-dump-paused");
             svcSleepThread(16000000LL);
             nextSimulationDeadline = svcGetSystemTick();
@@ -344,6 +386,7 @@ int main(int argc, char** argv) {
             continue;
         }
         Mk64StartupStage("first-iteration-enter");
+        Mk64RaceClock3DSObserve();
         mk64_3ds::PerformanceBegin();
         Mk64Diagnostics3DSSetStage("game-loop-iteration");
         auto& perf = mk64_3ds::PerformanceCurrent();

@@ -18,7 +18,7 @@ enum class O2rReadResult : std::uint8_t {
 };
 
 enum class O2rResidentResult : std::uint8_t {
-    Ready, NotOpen, BudgetExceeded, AllocationFailed, ReadFailed
+    Ready, Released, NotOpen, BudgetExceeded, AllocationFailed, ReadFailed
 };
 
 // Read-only ZIP access for an owner-supplied SpaghettiKart .o2r archive.
@@ -35,6 +35,7 @@ class O2rArchiveReader final {
     void Close();
     bool IsOpen() const;
     bool MakeResident(std::size_t budget, void (*progress)(unsigned) = nullptr);
+    bool DropResident();
     bool IsResident() const;
     O2rResidentResult ResidentResult() const;
     std::size_t ResidentRequiredBytes() const;
@@ -43,6 +44,8 @@ class O2rArchiveReader final {
     std::uint64_t PhysicalReadBytes() const;
     bool CacheEntryByIndex(std::size_t entryIndex, std::size_t budget);
     std::size_t CachedBytes() const;
+    void SetStreamingCacheBudget(std::size_t budget);
+    bool ReclaimPerformanceCache();
     const std::vector<std::string>& Entries() const;
     O2rReadResult ReadEntry(std::string_view entryPath, std::vector<std::uint8_t>* bytes);
     O2rReadResult ReadEntryByIndex(std::size_t entryIndex, std::vector<std::uint8_t>* bytes);

@@ -49,8 +49,11 @@ int main(int argc, char** argv) {
     }
     for (float far : { 1500.0f, 2700.0f, 4500.0f, 4800.0f, 5000.0f, 7000.0f }) {
         assert(RenderDistanceEnd(far, 2) == 0);
-        assert(RenderDistanceEnd(far, 0) < RenderDistanceEnd(far, 1));
-        const float end = RenderDistanceEnd(far, 1);
+        // Normal/High preserve the native projection/PVS. Only Low adds a
+        // reduced-distance cutoff; a second Normal cutoff hid track geometry.
+        assert(RenderDistanceEnd(far, 1) == 0);
+        const float end = RenderDistanceEnd(far, 0);
+        assert(end > 0 && end < far);
         assert(CullDistantTriangle(end+1,end+1,end+1,end,false,true));
         assert(!CullDistantTriangle(end-1,end+1,end+1,end,false,true));
         assert(!CullDistantTriangle(end+1,end+1,end+1,end,true,true));
@@ -61,8 +64,8 @@ int main(int argc, char** argv) {
     assert(RenderDistanceEnd(INFINITY, 0) == 0);
     assert(!CullDistantTriangle(NAN,3000,3000,2000,false,true));
     Mk64Settings3DSResetDefaults();
-    assert(Mk64Settings3DSGetRenderScalePercent() == (newModel ? 100 : 75));
+    assert(Mk64Settings3DSGetRenderScalePercent() == 100);
     assert(Mk64Settings3DSGetRenderDistance() == (newModel ? MK64_RENDER_DISTANCE_3DS_NORMAL : MK64_RENDER_DISTANCE_3DS_LOW));
-    assert(Mk64Settings3DSGetHudLayout() == MK64_HUD_LAYOUT_3DS_CLEAN);
+    assert(Mk64Settings3DSGetHudLayout() == MK64_HUD_LAYOUT_3DS_MKDS_2);
     std::puts("render settings, migration, persistence and conservative distance culling: OK");
 }

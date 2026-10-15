@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.0-E1
+
+Experimental 2.0 candidate.
+
+- Organize platform responsibilities, generated artwork, documentation and asset-free host checks.
+- Retain UI image/palette source bytes through decoding with scoped resource leases.
+- Preserve recoverable settings when FAT replacement or restoration fails.
+- Add Original, bilinearly Scaled and hand-authored Modified UI texture modes.
+- Redraw all twenty course/battle maps at three native sizes with continuous smooth curves.
+- Recompose the port credit from native lettering with a complete y descender and shadow.
+- Author native-size HUD labels, lap counters and timer cells; retain original art where replacements are unfinished.
+- Add original square per-option pixel icons with balanced padding and native bevel/blinking selection; preserve native hint lettering.
+- Rebuild compact Display/Advanced, Gameplay and Pause menus with shared touch geometry and clear selection.
+- Generate native-size menu hints in Python with integrated animated backings; remove the redundant All Random caption.
+- Keep the original-resolution background for Light blur and retain bounded cached stronger treatments.
+- Allow diagnostic SELECT and its expanded chord during AUTO without unlocking driving inputs.
+- Document runtime ownership, configuration, development and validation routes.
+- Add Solo VS/Battle with CPUs, AUTO spectator play and four-course random cups.
+- Add Modern Logic item/CPU rules and held-B reverse, while retaining original reverse when disabled.
+- Add held-X rear view, SELECT camera distance, full Y HUD cycling and held C-Stick Turbo with a 2x–5x slider. ZL/ZR are unassigned.
+- Add exclusive SELECT dump/overlay bindings and an always-available L+R+SELECT expanded dump. The live lower-screen overlay preserves racing inputs.
+- Add Performance/Quality/Custom profiles, a dedicated Advanced display menu and explicit 30/60 FPS presentation targets.
+- Add scrolling course maps with cached light blur, a centered cursor and consistent pause/menu typography without row separators.
+- Preserve EstebanPdN's five HUD layouts, title/HOME branding and Stable/Experimental updater. Add the title credit "Ported by EstebanPdN".
+- Integrate resource ownership, memory/cache recovery, GPU fence/combiner/depth/alpha, Lakitu/jumbotron, race/result/fade and positional audio fixes.
+- Correct AUTO/CPU inventory, targeting, collisions, Battle navigation/standings, spectator feedback and race time accounting across pauses and Turbo.
+- Preserve E14-local used-texture material reuse, verified audio CPU-reservation restoration and startup trace suspension behavior.
+
+Adapted features and corrections credit Epic0522's MarioKart64-3DSPort-Complete.
+The original 30 Hz simulation is retained. Native builds and host regressions
+are verified separately from physical-console stability, visual alignment and
+matched performance measurements, which remain pending.
+
 ## v1.6-E7
 
 Changes since v1.5.

@@ -36,6 +36,7 @@ struct ShaderProgram {
     bool alphaThreshold = false;
     bool invisible = false;
     bool twoCycle = false;
+    bool primitiveDepth = false;
     int combiner[2][2][4] = {};
     // Immutable combiner plans, compiled once when the shader is created.
     CompiledTevOperation3DS tevOperations[2][2][2] = {};
@@ -112,6 +113,7 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     uint64_t GetVertexUploadBytes() const;
     uint64_t GetLinearHeapFlushFrameCount() const;
     void ReleaseTextureAllocations();
+    bool FenceTextureReuseBatch();
     void* PrepareForExternalDraw();
     void SetExternalLinearBufferRange(const void* address, size_t size);
     void MarkExternalLinearBuffersDirty();
@@ -119,9 +121,11 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
   private:
     void FlushPackedVertices();
     bool EnsurePresentationResources();
-    void UploadProjectionForActiveTarget();
+    void UploadProjectionForActiveTarget(bool viewportSlide = true);
+    void ApplyViewportScissor();
     void PresentSceneToTopTarget();
     void RestoreFast3DState();
+    void ApplyDepthMapping();
     void ApplyNativeVertexState();
     float GetPresentedFps(uint64_t windowMilliseconds) const;
 

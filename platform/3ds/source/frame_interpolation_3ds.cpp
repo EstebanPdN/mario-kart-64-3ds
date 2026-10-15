@@ -444,6 +444,19 @@ extern "C" bool Mk64FrameInterpolation3DSIsEnabled(void) {
     return sEnabled;
 }
 
+extern "C" void Mk64FrameInterpolation3DSResetHistory(void) {
+    if (sStorage != nullptr) {
+        for (auto& frame : sStorage->frames) {
+            frame.count = 0;
+            frame.overflowed = frame.cameraCut = false;
+            frame.overflowReasons = 0;
+        }
+    }
+    sPreparedActive = sRecording = false;
+    sScopeDepth = 0;
+    sLastDiagnostic = {};
+}
+
 std::unordered_map<Mtx*, MtxF> FrameInterpolation_Interpolate(float step) {
     // Desktop callers retain this ABI. The 3DS renderer uses the fixed-table
     // prepare/lookup path below so its 60 Hz midpoint does not allocate an

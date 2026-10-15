@@ -1,10 +1,18 @@
 ## Changelog
 
-- Reduce repeated CPU rendering work on Old 3DS.
-- Fix startup audio synchronization and bound display waits.
-- Add GPU geometry, lighting and texture optimizations.
-- Improve loading, memory handling and HOME/sleep recovery.
-- Add an in-game updater with Stable and Experimental channels.
-- Improve menu/HUD rendering, FPS display and volume controls.
+- Organize platform code, generated art and documentation.
+- Protect UI texture lifetimes and recover interrupted settings replacement.
+- Add Original, Scaled and Modified UI textures.
+- Redraw all course/battle maps and improve native HUD/credit lettering.
+- Add per-option pixel icons and native-style selection.
+- Preserve native lettering in animated menu hints.
+- Rebuild Display/Advanced, Gameplay and Pause menus.
+- Add native-size hints with integrated animated backings.
+- Improve background clarity and selection readability.
+- Add Solo VS/Battle, AUTO and random cups.
+- Add Modern Logic, reverse, rear view and 2x-5x C-Stick Turbo.
+- Add Performance/Quality/Custom profiles and 30/60 FPS targets.
+- Preserve the original five HUDs and Stable/Experimental updater.
+- Fix resource/render/audio lifetimes, CPU behavior, results and timing.
 
-Changes are cumulative since v1.5. Updater adapted from Legend of Doom 3DS. The original 30 Hz simulation is preserved, with adaptive presentation up to 60 Hz. Sustained performance and compatibility remain unverified for this build.
+Experimental 2.0. Features and fixes adapted from Epic0522; updater adapted from Legend of Doom 3DS. L+R+SELECT takes an expanded dump; SELECT alone defaults to camera distance and is configurable in Developer, including during AUTO. The original 30 Hz simulation is preserved, with adaptive presentation up to 60 Hz. Physical-console stability and sustained performance remain unverified.

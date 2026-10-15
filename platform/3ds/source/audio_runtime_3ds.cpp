@@ -72,6 +72,9 @@ uint32_t sQueueFailureCount = 0;
 uint32_t sObservedEmptyTransitionCount = 0;
 bool sLoggedFirstSignal = false;
 bool sAudioPrimed = false;
+bool sLoadingAudio = false;
+bool sLoadingAudioBusy = false;
+uint64_t sLastLoadingAudioMs = 0;
 bool sEmptyObservedActive = false;
 Thread sWorkerThread = nullptr;
 LightEvent sWorkerStart;
@@ -254,8 +257,19 @@ void AudioWorkerMain(void*) {
 
 void RestoreCpuLimit() {
     if (sCpuLimitChanged) {
-        APT_SetAppCpuTimeLimit(sPreviousCpuLimit);
-        sCpuLimitChanged = false;
+        // APT cannot restore the initial zero after enabling core 1. E13
+        // silently discarded that error, leaving 80% reserved during HOME.
+        const __3ds_u32 target = std::max<__3ds_u32>(5, sPreviousCpuLimit);
+        const Result result = APT_SetAppCpuTimeLimit(target);
+        __3ds_u32 actual = UINT32_MAX;
+        const Result verified = APT_GetAppCpuTimeLimit(&actual);
+        if (R_SUCCEEDED(result) && R_SUCCEEDED(verified) && actual == target)
+            sCpuLimitChanged = false;
+        char checkpoint[112];
+        snprintf(checkpoint, sizeof(checkpoint), "audio-core1-release-target-%lu-actual-%lu-result-%08lx",
+                 static_cast<unsigned long>(target), static_cast<unsigned long>(actual),
+                 static_cast<unsigned long>(result));
+        Mk64Diagnostics3DSCheckpoint(checkpoint);
     }
 }
 
@@ -285,14 +299,16 @@ bool StartAudioWorker() {
     if (!isNewModel) {
         __3ds_u32 currentLimit = 0;
         const bool hadLimit = R_SUCCEEDED(APT_GetAppCpuTimeLimit(&currentLimit));
-        static constexpr std::array<__3ds_u32, 4> kCore1Limits = { 80, 70, 50, 30 };
+        // A large reservation also delays FS/GSP/DSP sysmodules even while
+        // the audio thread sleeps. Leave most of the system core available.
+        static constexpr std::array<__3ds_u32, 3> kCore1Limits = { 30, 20, 10 };
         for (const __3ds_u32 candidate : kCore1Limits) {
             if (R_FAILED(APT_SetAppCpuTimeLimit(candidate))) continue;
             // A successful Set has already changed process state even if the
             // verification IPC happens to fail. Record it immediately so
             // every fallback/shutdown path can restore the previous limit.
-            sPreviousCpuLimit = hadLimit ? currentLimit : 0;
-            sCpuLimitChanged = !hadLimit || candidate != currentLimit;
+            if (!sCpuLimitChanged) sPreviousCpuLimit = hadLimit ? currentLimit : 0;
+            sCpuLimitChanged = sCpuLimitChanged || !hadLimit || candidate != currentLimit;
             __3ds_u32 actual = candidate;
             if (R_SUCCEEDED(APT_GetAppCpuTimeLimit(&actual)) && actual == 0) {
                 RestoreCpuLimit();
@@ -407,6 +423,37 @@ extern "C" void Mk64GameAudio3DSBeginLogic() {
     Mk64StartupStage("audio-logic-barrier-returned");
 }
 
+extern "C" void Mk64GameAudio3DSServiceLoading() {
+    if (!sLoadingAudio || sLoadingAudioBusy || !sReady || !sGameStateReady ||
+        sSuspended || sPaused.load(std::memory_order_acquire) ||
+        sJobOutstanding.load(std::memory_order_acquire)) return;
+    const uint64_t now = osGetTime();
+    if (now - sLastLoadingAudioMs < 8) return;
+    sLastLoadingAudioMs = now;
+    sLoadingAudioBusy = true;
+    // A credits cut has no player input to delay. Borrow existing wave-pool
+    // capacity for ~134 ms, then refill at safe synchronous resource boundaries.
+    // No worker runs alongside track constructors or audio-command producers.
+    for (unsigned blocks = 0; blocks < 4 &&
+         Mk64Audio3DSBufferedFrames() < kStereoFramesPerGameFrame * 4; ++blocks) {
+        if (!SynthesizeAndQueue(Mk64Settings3DSGetMasterVolumePercent())) break;
+    }
+    sLoadingAudioBusy = false;
+}
+
+extern "C" void Mk64GameAudio3DSBeginLoading() {
+    if (!sReady || !sGameStateReady || sSuspended) return;
+    WaitForWorkerJob();
+    sLoadingAudio = true;
+    sLastLoadingAudioMs = osGetTime() - 8;
+    Mk64GameAudio3DSServiceLoading();
+}
+
+extern "C" void Mk64GameAudio3DSEndLoading() {
+    Mk64GameAudio3DSServiceLoading();
+    sLoadingAudio = false;
+}
+
 extern "C" void Mk64GameAudio3DSSetPaused(bool paused) {
     if (sReady) {
         sPaused.store(paused, std::memory_order_release);
@@ -500,6 +547,7 @@ extern "C" void Mk64GameAudio3DSPump() {
 }
 
 extern "C" void Mk64GameAudio3DSShutdown() {
+    sLoadingAudio = sLoadingAudioBusy = false;
     sGameStateReady = false;
     StopAudioWorker();
     Mk64Audio3DSShutdown();
