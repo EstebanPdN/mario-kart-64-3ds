@@ -1,6 +1,34 @@
-# Mario Kart 64 for Nintendo 3DS
+<h1 align="center">Mario Kart 64 3DS</h1>
 
-<img width="1672" height="941" alt="Mario Kart 64 running on Nintendo 3DS" src="https://github.com/user-attachments/assets/6b367030-2f4d-4c5d-b295-7d6d7f7d2ceb" />
+<p align="center">
+  <strong>Pick your kart. Bring the race with you.</strong><br>
+  Mario Kart 64, adapted for Nintendo 3DS.
+</p>
+
+<p align="center">
+  <a href="#download-and-installation">Download</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a> ·
+  <a href="#community-and-bug-reports">Community</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/EstebanPdN/mario-kart-64-3ds/releases/tag/v1.5"><img src="docs/badges/version.svg" alt="Stable release: v1.5" height="22"></a>
+  <a href="#download-and-installation"><img src="docs/badges/platform.svg" alt="Nintendo 3DS" height="22"></a>
+  <a href="platform/3ds/update/README.md"><img src="docs/badges/updater.svg" alt="Updates: built in" height="22"></a>
+  <a href="#license-and-legal-notice"><img src="docs/badges/license.svg" alt="Component-specific licenses" height="22"></a>
+</p>
+
+<p align="center">
+  <img width="1200" alt="Mario Kart 64 running on Nintendo 3DS" src="https://github.com/user-attachments/assets/6b367030-2f4d-4c5d-b295-7d6d7f7d2ceb" />
+</p>
+
+<p align="center">
+  <a href="https://estebanpdn.github.io/"><img src="docs/images/website.svg" alt="Visit Esteban’s Forge" width="142" height="46"></a>
+  <a href="https://discord.gg/BjbzfRYpV"><img src="docs/images/discord-official.svg" alt="Join our Discord community" width="166" height="46"></a>
+</p>
 
 Native Nintendo 3DS port of Mario Kart 64, based on
 [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart). It is designed
@@ -16,14 +44,20 @@ frame-rate targets remain under validation. [Choose a release](https://github.co
 
 Made with help from Codex.
 
-## Community
-
-Join the Discord for project updates, support, bug reports, suggestions, and
-other Nintendo 3DS homebrew projects:
-
-https://discord.gg/zy8BqH5ss
-
 ## Features
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>Race your way</strong><br>Grand Prix, Time Trial, solo VS and Battle, CPU opponents and AUTO spectator mode.</td>
+    <td width="50%" valign="top"><strong>Made for two screens</strong><br>Native top-screen racing with five HUD layouts, course maps and touch menus below.</td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>Tune the presentation</strong><br>Adjust render scale, distance, filters and Performance / Quality profiles.</td>
+    <td width="50%" valign="top"><strong>Keep it current</strong><br>Built-in Stable / Experimental updates, preserved settings and local diagnostics.</td>
+  </tr>
+</table>
+
+### Feature details
 
 * Native 400×240 resolution
 * Adjustable 0.50×–1.00× render scale
@@ -148,7 +182,16 @@ memory and animation worker are released before gameplay. First-time ROM
 extraction keeps its progress display. Course loading artwork remains optional
 under Display > Advanced > Show loading screens. Errors remain visible.
 
-## Installation
+<a id="installation"></a>
+
+## Download and installation
+
+<p>
+  <a href="https://github.com/EstebanPdN/mario-kart-64-3ds/releases/download/v1.5/mk64-3ds-v1.5.cia"><img src="docs/images/download-cia.svg" alt="Download Mario Kart 64 3DS CIA" width="210" height="46"></a>
+  <a href="https://github.com/EstebanPdN/mario-kart-64-3ds/releases/download/v1.5/mk64-3ds-v1.5.3dsx"><img src="docs/images/download-3dsx.svg" alt="Download Homebrew Launcher 3DSX" width="210" height="46"></a>
+</p>
+
+**Stable: [v1.5](https://github.com/EstebanPdN/mario-kart-64-3ds/releases/tag/v1.5).**
 
 Download either the CIA for installation with FBI or the full 3DSX application
 for the Homebrew Launcher from the
@@ -288,6 +331,15 @@ each release tag.
 
 [Download the latest release](https://github.com/EstebanPdN/mario-kart-64-3ds/releases/latest)
 
+## Documentation
+
+| Guide | Purpose |
+| --- | --- |
+| [Documentation index](platform/3ds/docs/README.md) | Runtime, configuration, development and validation guides. |
+| [Compatibility](platform/3ds/docs/COMPATIBILITY.md) | Supported inputs and current validation limits. |
+| [Built-in updater](platform/3ds/update/README.md) | Channels, installation and recovery. |
+| [Contributing](CONTRIBUTING.md) | Bounded changes and reproducible checks. |
+
 ## Building
 
 Requirements:
@@ -366,3 +418,20 @@ The upper screen shows the changelog; L/R changes pages. Use A or touch to
 select and B to return. Installation requires confirmation and closes the game.
 Updates verify their download and preserve your ROM/O2R, saves and settings.
 See the [updater documentation](platform/3ds/update/README.md) for details.
+
+## Community and bug reports
+
+[Join the project Discord](https://discord.gg/BjbzfRYpV) for updates, testing,
+suggestions and support. Use [GitHub issues](https://github.com/EstebanPdN/mario-kart-64-3ds/issues)
+for reproducible reports, including your version, console model and steps to
+reproduce the problem. Review diagnostic captures before sharing them.
+
+---
+
+<p align="center">
+  <a href="https://estebanpdn.github.io/">Esteban’s Forge</a> ·
+  <a href="https://discord.gg/BjbzfRYpV">Discord</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#license-and-legal-notice">License and notices</a><br>
+  <sub>An independent fan project. Game names and content belong to their respective owners.</sub>
+</p>
