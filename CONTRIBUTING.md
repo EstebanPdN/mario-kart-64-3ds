@@ -45,3 +45,19 @@ Do not contribute ROMs, extracted Nintendo art/data, saves, dumps, caches,
 credentials or diagnostic logs. Game data remains owner-provided runtime input.
 Preserve upstream attribution and component licenses; see the root README's
 [license notice](README.md#license-and-legal-notice).
+
+## Repository organization
+
+Read the [repository map](docs/REPOSITORY.md) before moving files. Keep new public text in English.
+Group source, platform adapters, resources, documentation and generated output
+by responsibility. Update build manifests, scripts and documentation links
+together. Preserve existing version tags and released package bytes.
+
+Run `python3 scripts/check-repository.py` from the repository root before
+submitting a change. The check validates the declared root layout, current
+documentation links and source/private-file boundaries; it does not replace
+the game-specific build, host regressions or physical-console validation.
+
+Use the issue templates for reproducible reports and feature requests. Review
+diagnostic captures before sharing and never attach ROMs, extracted game data,
+credentials or personal saves to a public report.

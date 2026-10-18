@@ -1,0 +1,29 @@
+{
+  "root_entries": [
+    ".gitattributes",
+    ".github",
+    ".gitignore",
+    ".gitmodules",
+    "CHANGELOG.md",
+    "CMakeLists.txt",
+    "CONTRIBUTING.md",
+    "README.md",
+    "docs",
+    "platform",
+    "scripts",
+    "third_party"
+  ],
+  "current_documents": [
+    "README.md",
+    "docs/REPOSITORY.md",
+    "CONTRIBUTING.md"
+  ],
+  "required_paths": [
+    "README.md",
+    "docs/REPOSITORY.md",
+    "scripts/check-repository.py",
+    "CMakeLists.txt",
+    "platform/3ds/build.sh",
+    "platform/3ds/tests/run-host-tests.py"
+  ]
+}

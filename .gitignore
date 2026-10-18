@@ -17,3 +17,6 @@
 # Disposable Python bytecode; generated source artwork is checked in.
 __pycache__/
 *.py[cod]
+
+# Maintained repository organization check.
+!scripts/check-repository.py

@@ -333,6 +333,9 @@ each release tag.
 
 ## Documentation
 
+- [Repository map and maintenance conventions](docs/REPOSITORY.md)
+
+
 | Guide | Purpose |
 | --- | --- |
 | [Documentation index](platform/3ds/docs/README.md) | Runtime, configuration, development and validation guides. |
