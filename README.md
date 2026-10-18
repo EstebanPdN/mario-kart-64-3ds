@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img width="1200" alt="Mario Kart 64 running on Nintendo 3DS" src="https://github.com/user-attachments/assets/6b367030-2f4d-4c5d-b295-7d6d7f7d2ceb" />
+  <img width="1200" alt="Mario Kart 64 running on Nintendo 3DS" src="docs/images/showcase-rounded.svg" />
 </p>
 
 <p align="center">
