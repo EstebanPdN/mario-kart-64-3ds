@@ -33,7 +33,7 @@ Native Nintendo 3DS port of **Mario Kart 64**, based on
 [SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart), with a
 dual-screen interface, touch menus and customizable controls and display options.
 
-This project was developed with the help of [OpenAI Codex](https://openai.com/codex/). Learn more about the development process [here](AI_DEVELOPMENT.md).
+This project was developed with the help of [OpenAI Codex](https://openai.com/codex/) and [Claude Code](https://claude.com/product/claude-code). Learn more about the development process [here](AI_DEVELOPMENT.md).
 
 A legally obtained **USA Mario Kart 64 ROM** is required. No ROM or extracted
 game data is included.
