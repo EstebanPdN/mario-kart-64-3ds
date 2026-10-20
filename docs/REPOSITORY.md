@@ -9,6 +9,7 @@ notices. Implementation, resources and supporting documents are grouped below.
 
 | Location | Responsibility |
 | --- | --- |
+| `AI_DEVELOPMENT.md` | The owner’s explanation of Codex use, development decisions, tests and community discussions. |
 | `platform/` | Native 3DS adapters, build configuration, tests and update integration. |
 | `third_party/` | Pinned game-engine and library dependencies; preserve their licenses. |
 | `scripts/` | Repository checks. |
