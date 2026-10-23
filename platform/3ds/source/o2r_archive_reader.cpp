@@ -30,6 +30,7 @@ struct O2rArchiveReader::Impl {
     size_t residentRequired = 0;
     size_t streamingBudget = 0;
     bool open = false;
+    bool residencyMutation = false, closePending = false;
 };
 
 namespace {
@@ -135,6 +136,7 @@ O2rReadResult O2rArchiveReader::Open() {
 }
 
 void O2rArchiveReader::Close() {
+    if (mImpl->residencyMutation) { mImpl->closePending = true; return; }
     if (mImpl->open) {
         mz_zip_reader_end(&mImpl->archive);
     }
@@ -152,11 +154,17 @@ void O2rArchiveReader::Close() {
 }
 
 std::size_t O2rArchiveReader::CachedBytes() const { return mImpl->file.CachedBytes(); }
+O2rArchiveReader::CacheStats O2rArchiveReader::StreamingCacheStats() const {
+    const auto& file = mImpl->file;
+    return {file.CachedRanges(), file.CachedBytes(), file.CacheAllocationBytes(),
+            file.CacheHits(), file.CacheMisses(), file.CacheByteEvictions()};
+}
 void O2rArchiveReader::SetStreamingCacheBudget(std::size_t budget) {
     mImpl->streamingBudget = budget;
     mImpl->file.TrimCache(budget);
 }
 bool O2rArchiveReader::ReclaimPerformanceCache() {
+    if (mImpl->residencyMutation) return false;
     if (mImpl->resident) return DropResident();
     if (!mImpl->file.TryReclaimCache()) return false;
     // A genuinely constrained launch must not immediately allocate the same
@@ -165,8 +173,17 @@ bool O2rArchiveReader::ReclaimPerformanceCache() {
     return true;
 }
 bool O2rArchiveReader::MakeResident(std::size_t budget, void (*progress)(unsigned)) {
-    if (!mImpl->open) return false;
+    if (!mImpl->open || mImpl->residencyMutation) return false;
     if (mImpl->resident) return true;
+    struct MutationScope {
+        O2rArchiveReader& reader;
+        Impl& impl;
+        MutationScope(O2rArchiveReader& owner, Impl& value) : reader(owner), impl(value) { impl.residencyMutation = true; }
+        ~MutationScope() {
+            impl.residencyMutation = false;
+            if (impl.closePending) { impl.closePending = false; reader.Close(); }
+        }
+    } mutation(*this, *mImpl);
     mImpl->residentResult = O2rResidentResult::AllocationFailed;
     try {
         // Keep each compressed entry contiguous, but never require one giant
@@ -208,6 +225,9 @@ bool O2rArchiveReader::MakeResident(std::size_t budget, void (*progress)(unsigne
             mImpl->residentResult = O2rResidentResult::BudgetExceeded;
             return false;
         }
+        // A streaming-to-resident transition replaces the optional compressed
+        // cache. Do not retain both copies while constructing the mirror.
+        mImpl->file.ClearCache();
         std::vector<const uint8_t*> entries(count);
         std::vector<std::unique_ptr<uint8_t[]>> blocks;
         blocks.reserve(blockCount);
@@ -255,7 +275,7 @@ bool O2rArchiveReader::MakeResident(std::size_t budget, void (*progress)(unsigne
 }
 bool O2rArchiveReader::IsResident() const { return mImpl->resident; }
 bool O2rArchiveReader::DropResident() {
-    if (!mImpl->open) return false;
+    if (!mImpl->open || mImpl->residencyMutation) return false;
     if (!mImpl->resident) return true;
 
     // Successful residency deliberately closes the SD handle. Reopen it before
@@ -296,10 +316,28 @@ bool O2rArchiveReader::CacheEntryByIndex(std::size_t entryIndex, std::size_t bud
     unsigned char header[30];
     if (mImpl->file.Read(stat.m_local_header_ofs, header, sizeof(header)) != sizeof(header) ||
         header[0] != 'P' || header[1] != 'K' || header[2] != 3 || header[3] != 4) return false;
-    const std::uint64_t length = 30ULL + header[26] + (header[27] << 8U) +
-        header[28] + (header[29] << 8U) + stat.m_comp_size;
+    const std::uint64_t headerLength = 30ULL + header[26] + (header[27] << 8U) +
+        header[28] + (header[29] << 8U);
+    if (stat.m_comp_size > UINT64_MAX - headerLength) return false;
+    const std::uint64_t length = headerLength + stat.m_comp_size;
     if (length > SIZE_MAX) return false;
     return mImpl->file.CacheRange(stat.m_local_header_ofs, static_cast<std::size_t>(length), budget);
+}
+
+std::size_t O2rArchiveReader::CacheEntries(const char* const* names, std::size_t count, std::size_t budget) {
+    if (!mImpl->open || !names || mImpl->residencyMutation) return 0;
+    std::size_t prepared = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!names[i]) continue;
+        const char* name = names[i];
+        if (!std::strncmp(name, "__OTR__", 7)) name += 7;
+        const int archiveIndex = mz_zip_reader_locate_file(&mImpl->archive, name, nullptr, 0);
+        if (archiveIndex < 0) continue;
+        const auto at = std::lower_bound(mImpl->archiveIndices.begin(), mImpl->archiveIndices.end(), mz_uint(archiveIndex));
+        if (at != mImpl->archiveIndices.end() && *at == mz_uint(archiveIndex) &&
+            CacheEntryByIndex(std::size_t(at - mImpl->archiveIndices.begin()), budget)) ++prepared;
+    }
+    return prepared;
 }
 
 bool O2rArchiveReader::IsOpen() const {
@@ -409,3 +447,15 @@ O2rReadResult O2rArchiveReader::ReadEntry(std::string_view archivePath, std::str
 }
 
 } // namespace mk64_3ds
+
+// Share the existing bounded miniz decoder with the optional artwork bundle;
+// no second compression library or 3DS zlib dependency is introduced.
+namespace mk64_3ds::improved {
+uint32_t PixelCrc(const uint8_t* input,size_t bytes) {
+    return mz_crc32(MZ_CRC32_INIT,input,bytes);
+}
+bool DecodePayload(const uint8_t* input,size_t packed,uint8_t* output,size_t bytes,uint32_t crc) {
+    return tinfl_decompress_mem_to_mem(output,bytes,input,packed,TINFL_FLAG_PARSE_ZLIB_HEADER)==bytes &&
+        mz_crc32(MZ_CRC32_INIT,output,bytes)==crc;
+}
+}

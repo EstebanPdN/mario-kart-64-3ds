@@ -85,6 +85,9 @@ void LoadEeprom() {
 }
 
 bool StoreEeprom() {
+#if defined(MK64_3DS_NATIVE_LUIGI_LAB) || defined(MK64_3DS_AUTODUMP_LAB)
+    sEepromDirty=false;return true;
+#endif
     mkdir("sdmc:/3ds", 0777);
     mkdir(kSaveDirectory, 0777);
     FILE* file = std::fopen(kEepromTempPath, "wb");
@@ -128,6 +131,9 @@ void LoadVirtualPak() {
 }
 
 bool StoreVirtualPak() {
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+    return true;
+#endif
     mkdir("sdmc:/3ds", 0777);
     mkdir(kSaveDirectory, 0777);
     FILE* file = std::fopen(kVirtualPakTempPath, "wb");

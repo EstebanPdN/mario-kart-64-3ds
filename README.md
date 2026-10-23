@@ -66,9 +66,9 @@ The ROM must use `.z64` byte order. Use the
 [Hack64 ROM Swapper](https://hack64.net/tools/swapper.php) if conversion is needed.
 First-time extraction can take a while; keep the console charged.
 
-For faster setup, create `mk64.o2r` with
-[SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart) on a computer,
-then copy it alongside your ROM:
+For faster setup, download the **MK64 Extractor** for Windows x64, macOS Apple
+Silicon or Linux x64 from the same release. Create `mk64.o2r` on your computer
+from your USA ROM, then copy it alongside your ROM:
 
 ```text
 sd:/3ds/MK64/mk64.z64

@@ -3,10 +3,17 @@
 #include <3ds.h>
 #include <citro3d.h>
 
+extern "C" void Mk64Gpu3DSFenceFailure(const char*) __attribute__((weak));
+
 namespace mk64_3ds {
+struct FrameBeginWait3DS {
+    uint32_t pendingPresentUs = 0;
+};
 // Preserve display pacing without entering Citro3D's unbounded SYNCDRAW wait.
 // Queue ownership must remain fenced even when diagnostic tracing is disabled.
-inline bool BeginFrame3DS(unsigned flags, const char* stage) {
+inline bool BeginFrame3DS(unsigned flags, const char* stage,
+                          FrameBeginWait3DS* measuredWait = nullptr) {
+    if (measuredWait) *measuredWait = {};
     Mk64StartupStage(stage);
     if (flags & C3D_FRAME_SYNCDRAW) {
         const auto top = C3D_FrameCounter(0), bottom = C3D_FrameCounter(1);
@@ -25,6 +32,7 @@ inline bool BeginFrame3DS(unsigned flags, const char* stage) {
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
         if (osGetTime() - started >= 5000) {
             Mk64StartupFailure("startup-gpu-queue-timeout-kernel-exit");
+            if (Mk64Gpu3DSFenceFailure) Mk64Gpu3DSFenceFailure("gpu-queue-timeout");
             svcExitProcess();
         }
         svcSleepThread(1000000LL);
@@ -34,13 +42,17 @@ inline bool BeginFrame3DS(unsigned flags, const char* stage) {
     // GPU was busy is not acknowledgement of this newer swap. Do not reuse
     // either double-buffered screen until the actual pending presents clear.
     const uint64_t presentStarted = osGetTime();
+    const uint64_t presentTick = svcGetSystemTick();
     while (gspIsPresentPending(GFX_TOP) || gspIsPresentPending(GFX_BOTTOM)) {
         if (osGetTime() - presentStarted >= 5000) {
             Mk64StartupFailure("startup-display-present-timeout-kernel-exit");
+            if (Mk64Gpu3DSFenceFailure) Mk64Gpu3DSFenceFailure("display-present-timeout");
             svcExitProcess();
         }
         svcSleepThread(1000000LL);
     }
+    if (measuredWait) measuredWait->pendingPresentUs = static_cast<uint32_t>(
+        (svcGetSystemTick() - presentTick) * 1000000ULL / SYSCLOCK_ARM11);
     Mk64StartupStage("startup-gpu-queue-wait-returned");
     return true;
 }

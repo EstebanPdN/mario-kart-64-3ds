@@ -1,18 +1,28 @@
 ## Changelog
 
-- Organize platform code, generated art and documentation.
-- Protect UI texture lifetimes and recover interrupted settings replacement.
-- Add Original, Scaled and Modified UI textures.
-- Redraw all course/battle maps and improve native HUD/credit lettering.
-- Add per-option pixel icons and native-style selection.
-- Preserve native lettering in animated menu hints.
-- Rebuild Display/Advanced, Gameplay and Pause menus.
-- Add native-size hints with integrated animated backings.
-- Improve background clarity and selection readability.
-- Add Solo VS/Battle, AUTO and random cups.
-- Add Modern Logic, reverse, rear view and 2x-5x C-Stick Turbo.
-- Add Performance/Quality/Custom profiles and 30/60 FPS targets.
-- Preserve the original five HUDs and Stable/Experimental updater.
-- Fix resource/render/audio lifetimes, CPU behavior, results and timing.
+2.0 — based on 2.0-E6; changes since 1.5
 
-Experimental 2.0. Features and fixes adapted from Epic0522; updater adapted from Legend of Doom 3DS. L+R+SELECT takes an expanded dump; SELECT alone defaults to camera distance and is configurable in Developer, including during AUTO. The original 30 Hz simulation is preserved, with adaptive presentation up to 60 Hz. Physical-console stability and sustained performance remain unverified.
+- Include Menu/Improved artwork and the Improved kart texture companion.
+- Redraw all course/battle maps, HUD labels, menu hints and option icons.
+- Rebuild Display/Advanced, Gameplay and Pause menus with touch controls.
+- Add Solo VS/Battle, AUTO spectator play and four-course random cups.
+- Add optional Modern Logic, reverse, rear view and 2x-5x C-Stick Turbo.
+- Add profiles, HUD meters, scrolling maps and threat warnings.
+- Preserve all five HUDs and the original HOME banner/icon/sound.
+- Fix Old 3DS Low/Normal-distance fog hiding track textures.
+- Restore Nintendo title copyright and correct native-grid credit lettering.
+- Reuse hot textures, resource lookups, eligible static geometry and visual preparation.
+- Bound artwork caches and improve archive residency/streaming recovery.
+- Fix GPU resource lifetimes, fog/material state, audio wake/DMA handling and HOME resume.
+- Correct CPU/items, Battle navigation/standings, results and pause/Turbo timing.
+- Reduce settings/timer overhead and unnecessary EEPROM writes.
+- Add Stable/Experimental updates, confirmation and corrected version checks.
+- Add portable desktop extractors for Windows, macOS and Linux.
+- Expand manual diagnostics and separate export pauses from timing.
+- Normal play: automatic laboratory captures are disabled.
+
+Features and corrections adapted from Epic0522's MarioKart64-3DSPort-Complete; 3DS implementation references from Epic0522's Super Mario 64 3DS Port Ultimate. Foundation: Harbour Masters' SpaghettiKart and the N64 decompilation community. Updater adapted from Legend of Doom 3DS.
+
+L+R+SELECT takes an expanded dump. SELECT alone defaults to camera distance and is configurable in Developer, including during AUTO.
+
+Simulation remains at 30 Hz; adaptive presentation depends on workload. Physical Old/New frame rates and long-run stability require console validation.

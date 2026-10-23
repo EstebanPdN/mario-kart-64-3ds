@@ -10,6 +10,25 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
     add_library(mk64-3ds-fast3d-renderer STATIC
         platform/3ds/source/gfx_citro3d.cpp
     )
+    # SDK 1.7.1 dereferences null secondary bindings. Link its narrowly patched
+    # texture implementation as an object before any consumer's SDK archives.
+    add_library(mk64-3ds-citro3d-texture-compat OBJECT
+        platform/3ds/compat/citro3d-1.7.1/texture.c
+    )
+    target_compile_options(mk64-3ds-citro3d-texture-compat PRIVATE
+        -O3 -ffunction-sections -fdata-sections -Wall -Wextra
+    )
+    target_sources(mk64-3ds-fast3d-renderer INTERFACE
+        $<TARGET_OBJECTS:mk64-3ds-citro3d-texture-compat>
+    )
+    if(MK64_3DS_NATIVE_LUIGI_LAB)
+        ctr_add_shader_library(mk64-3ds-native-course-shader platform/3ds/shaders/native_course.v.pica OUTPUT native_course.shbin)
+        dkp_add_embedded_binary_library(mk64-3ds-native-course-shader-bin mk64-3ds-native-course-shader)
+        target_sources(mk64-3ds-fast3d-renderer PRIVATE platform/3ds/source/native_gpu_scene_3ds.cpp
+            platform/3ds/source/native_mesh_draw_3ds.cpp platform/3ds/source/native_material_3ds.cpp
+            platform/3ds/source/native_gpu_sprites_3ds.cpp)
+        target_link_libraries(mk64-3ds-fast3d-renderer PUBLIC mk64-3ds-native-course-shader-bin)
+    endif()
     target_include_directories(mk64-3ds-fast3d-renderer PUBLIC
         "${MK64_3DS_SOURCE_ROOT}/platform/3ds/include"
         "${MK64_3DS_SOURCE_ROOT}/third_party/SpaghettiKart/libultraship/include"
@@ -85,6 +104,9 @@ if(MK64_3DS_ENABLE_FAST3D_RENDERER)
         # cannot silently fall back to Fast3DEX2.
         target_compile_definitions(mk64-3ds-fast3d-interpreter PRIVATE F3DEX_GBI=1)
         if(MK64_3DS_ENABLE_O2R_READER)
+            if(MK64_3DS_BUILD_GAME_ENGINE)
+                target_compile_definitions(mk64-3ds-fast3d-interpreter PRIVATE MK64_3DS_GAME_TEXTURE_PACK=1)
+            endif()
             target_sources(mk64-3ds-fast3d-interpreter PRIVATE
                 platform/3ds/source/resource_manager_3ds.cpp
                 third_party/SpaghettiKart/libultraship/src/fast/resource/type/Texture.cpp

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <map>
 #include <new>
 #include <vector>
 
@@ -16,9 +17,22 @@ namespace mk64_3ds {
 // bounded read-ahead pages; large sequential reads bypass them. miniz still
 // performs all decompression, bounds validation and CRC checks.
 class ReadAheadFile {
+    struct MutationScope {
+        ReadAheadFile& owner;
+        bool& flag;
+        MutationScope(ReadAheadFile& value, bool& active) : owner(value), flag(active) { flag = true; }
+        ~MutationScope() {
+            flag = false;
+            if (owner.closePending && !owner.cacheMutation && !owner.residentMutation) {
+                owner.closePending = false;
+                owner.Close();
+            }
+        }
+    };
   public:
     ~ReadAheadFile() { Close(); }
     bool Open(const char* path) {
+        if (cacheMutation || residentMutation) return false;
         Close();
         file = std::fopen(path, "rb");
         if (!file) return false;
@@ -31,18 +45,24 @@ class ReadAheadFile {
         return true;
     }
     void Close() {
+        if (cacheMutation || residentMutation) { closePending = true; return; }
         if (file) std::fclose(file);
         ClearCache();
         resident.reset();
         EndBulkRead();
         file = nullptr; size = position = readCalls = readBytes = 0; next = 0;
         for (auto& page : pages) page.valid = 0;
+        cacheHits = cacheMisses = cacheByteEvictions = 0;
     }
     std::uint64_t Size() const { return size; }
     std::uint64_t ReadCalls() const { return readCalls; }
     std::uint64_t ReadBytes() const { return readBytes; }
-    void CloseBackingFile() { if (file) std::fclose(file); file = nullptr; ClearCache(); }
+    void CloseBackingFile() {
+        if (cacheMutation || residentMutation) return;
+        if (file) std::fclose(file); file = nullptr; ClearCache();
+    }
     bool ReopenBackingFile(const char* path) {
+        if (cacheMutation || residentMutation) return false;
         if (file) return true;
         if (!path || !path[0]) return false;
         FILE* reopened = std::fopen(path, "rb");
@@ -73,8 +93,10 @@ class ReadAheadFile {
     // Commit only after a complete sequential read. Closing the SD handle is
     // deliberate: successful residency cannot silently fall back to disk.
     bool MakeResident(std::size_t budget, void (*progress)(unsigned) = nullptr) {
+        if (cacheMutation || residentMutation) return false;
         if (resident) return true;
         if (!file || size == 0 || size > budget || size > SIZE_MAX) return false;
+        MutationScope mutation(*this, residentMutation);
         std::unique_ptr<unsigned char[]> bytes(new (std::nothrow) unsigned char[static_cast<std::size_t>(size)]);
         if (!bytes) return false;
         if (progress) progress(0);
@@ -86,7 +108,7 @@ class ReadAheadFile {
         }
         resident = std::move(bytes);
         std::fclose(file); file = nullptr;
-        cached.clear(); cachedBytes = 0;
+        ClearCache();
         return true;
     }
     std::size_t Read(std::uint64_t offset, void* destination, std::size_t length) {
@@ -114,17 +136,18 @@ class ReadAheadFile {
             }
             return done;
         }
-        auto range = std::upper_bound(cached.begin(), cached.end(), offset,
-            [](std::uint64_t at, const CachedRange& item) { return at < item.offset; });
+        auto range = cached.upper_bound(offset);
         if (range != cached.begin()) {
             --range;
-            if (offset >= range->offset && offset - range->offset <= range->length &&
-                length <= range->length - (offset - range->offset)) {
-                std::memcpy(destination, range->bytes.get() + (offset - range->offset), length);
-                Touch(*range);
+            if (offset >= range->second.offset && offset - range->second.offset <= range->second.length &&
+                length <= range->second.length - (offset - range->second.offset)) {
+                std::memcpy(destination, range->second.bytes.get() + (offset - range->second.offset), length);
+                Touch(range->second);
+                ++cacheHits;
                 return length;
             }
         }
+        ++cacheMisses;
         if (length >= kPageSize) return ReadDirect(offset, destination, length);
         auto* out = static_cast<unsigned char*>(destination);
         std::size_t done = 0;
@@ -149,82 +172,100 @@ class ReadAheadFile {
         }
         return done;
     }
-    // Retain recently used compressed ZIP entries in a strict byte budget.
-    // This cache is independent of decoded resources and GPU ownership.
+    // Stable indexed nodes hold immutable, non-overlapping ZIP ranges. Count
+    // does not cap small palettes/lists before their byte allowance is used.
+    // Charge tree bookkeeping as well as payload bytes to that same allowance.
     bool CacheRange(std::uint64_t offset, std::size_t length, std::size_t budget) {
-        // An allocator new_handler may try to reclaim optional caches. Never
-        // let it destroy this vector from inside its own allocation/insert.
-        struct MutationScope {
-            bool& active;
-            bool previous;
-            explicit MutationScope(bool& flag) : active(flag), previous(flag) { active = true; }
-            ~MutationScope() { active = previous; }
-        } mutation(cacheMutation);
-        TrimCache(budget);
-        if (offset > size || length == 0 || length > size - offset || length > budget) return false;
+        if (cacheMutation || residentMutation) return false;
+        MutationScope mutation(*this, cacheMutation);
+        TrimCacheUnsafe(budget);
+        if (offset > size || !length || length > size - offset ||
+            length > budget || kRangeOverhead > budget - length) return false;
         if (resident) return true;
         if (!file) return false;
-        auto at = std::lower_bound(cached.begin(), cached.end(), offset,
-            [](const CachedRange& item, std::uint64_t pos) { return item.offset < pos; });
-        if (at != cached.end() && at->offset == offset) {
-            if (at->length < length) return false;
-            Touch(*at);
+        auto at = cached.lower_bound(offset);
+        if (at != cached.end() && at->first == offset) {
+            if (at->second.length < length) return false;
+            Touch(at->second);
             return true;
         }
-        TrimCache(budget - length);
-        if (cached.size() >= 2048) EvictOldest();
-        CachedRange item;
-        item.offset = offset; item.length = length;
-        item.bytes.reset(new (std::nothrow) unsigned char[length]);
-        if (!item.bytes || Read(offset, item.bytes.get(), length) != length) return false;
-        Touch(item);
-        at = std::lower_bound(cached.begin(), cached.end(), offset,
-            [](const CachedRange& value, std::uint64_t pos) { return value.offset < pos; });
-        try { cached.insert(at, std::move(item)); } catch (const std::bad_alloc&) { return false; }
-        cachedBytes += length;
+        // Overlap would make a predecessor lookup ambiguous. ZIP's immutable
+        // local-header/payload ranges are disjoint; reject other callers safely.
+        if (at != cached.end() && length > at->first - offset) return false;
+        if (at != cached.begin()) {
+            const auto& previous = std::prev(at)->second;
+            if (offset - previous.offset < previous.length) return false;
+        }
+        const auto charge = length + kRangeOverhead;
+        TrimCacheUnsafe(budget - charge);
+        std::unique_ptr<unsigned char[]> bytes(new (std::nothrow) unsigned char[length]);
+        if (!bytes || Read(offset, bytes.get(), length) != length) return false;
+        try {
+            auto result = cached.try_emplace(offset);
+            if (!result.second) return false;
+            auto& item = result.first->second;
+            item.offset = offset; item.length = length; item.bytes = std::move(bytes);
+            cachedBytes += length;
+            Touch(item);
+        } catch (const std::bad_alloc&) { return false; }
         return true;
     }
     std::size_t CachedBytes() const { return cachedBytes; }
+    std::size_t CachedRanges() const { return cached.size(); }
+    std::size_t CacheAllocationBytes() const { return cachedBytes + cached.size()*kRangeOverhead; }
+    std::uint64_t CacheHits() const { return cacheHits; }
+    std::uint64_t CacheMisses() const { return cacheMisses; }
+    std::uint64_t CacheByteEvictions() const { return cacheByteEvictions; }
     bool TryReclaimCache() {
-        if (cacheMutation || cachedBytes == 0) return false;
-        ClearCache();
+        if (cacheMutation || residentMutation || cached.empty()) return false;
+        ClearCacheUnsafe();
         return true;
     }
-    void ClearCache() {
-        decltype(cached){}.swap(cached);
-        cachedBytes = 0;
-        cacheClock = 0;
-    }
-    void TrimCache(std::size_t budget) {
-        if (budget == 0) { ClearCache(); return; }
-        while (cachedBytes > budget && !cached.empty()) {
-            EvictOldest();
-        }
-    }
+    void ClearCache() { if (!cacheMutation) ClearCacheUnsafe(); }
+    void TrimCache(std::size_t budget) { if (!cacheMutation) TrimCacheUnsafe(budget); }
   private:
-    void EvictOldest() {
-        const auto victim = std::min_element(cached.begin(), cached.end(),
-            [](const CachedRange& a, const CachedRange& b) { return a.lastUse < b.lastUse; });
-        if (victim == cached.end()) return;
-        cachedBytes -= victim->length;
-        cached.erase(victim);
-    }
     struct CachedRange {
         std::uint64_t offset = 0;
         std::size_t length = 0;
-        std::uint64_t lastUse = 0;
         std::unique_ptr<unsigned char[]> bytes;
+        CachedRange* previous = nullptr;
+        CachedRange* next = nullptr;
     };
-    void Touch(CachedRange& range) {
-        if (++cacheClock == 0) {
-            for (auto& item : cached) item.lastUse = 0;
-            cacheClock = 1;
-        }
-        range.lastUse = cacheClock;
+    // Red/black tree node: three links and aligned color, plus its key.
+    // Include slack for both allocations' heap bookkeeping and rounding.
+    static constexpr std::size_t kRangeOverhead = sizeof(CachedRange) + sizeof(std::uint64_t) + 4*sizeof(void*) + 32;
+    void Unlink(CachedRange& range) {
+        if (range.previous) range.previous->next = range.next; else oldest = range.next;
+        if (range.next) range.next->previous = range.previous; else newest = range.previous;
+        range.previous = range.next = nullptr;
     }
-    std::vector<CachedRange> cached;
-    bool cacheMutation = false;
-    std::uint64_t cacheClock = 0;
+    void Touch(CachedRange& range) {
+        if (newest == &range) return;
+        if (range.previous || range.next || oldest == &range) Unlink(range);
+        range.previous = newest;
+        if (newest) newest->next = &range; else oldest = &range;
+        newest = &range;
+    }
+    void EvictOldest() {
+        if (!oldest) return;
+        const auto offset = oldest->offset;
+        cachedBytes -= oldest->length;
+        Unlink(*oldest);
+        cached.erase(offset);
+        ++cacheByteEvictions;
+    }
+    void ClearCacheUnsafe() {
+        oldest = newest = nullptr;
+        cached.clear(); cachedBytes = 0;
+    }
+    void TrimCacheUnsafe(std::size_t budget) {
+        while (!cached.empty() && CacheAllocationBytes() > budget) EvictOldest();
+    }
+    std::map<std::uint64_t, CachedRange> cached;
+    CachedRange* oldest = nullptr;
+    CachedRange* newest = nullptr;
+    bool cacheMutation = false, residentMutation = false, closePending = false;
+    std::uint64_t cacheHits = 0, cacheMisses = 0, cacheByteEvictions = 0;
     std::unique_ptr<unsigned char[]> resident;
     std::size_t cachedBytes = 0;
     static constexpr std::size_t kBulkSize = 256u * 1024u;
@@ -238,7 +279,7 @@ class ReadAheadFile {
     ReadAheadFile() = default;
   private:
     std::size_t ReadDirect(std::uint64_t offset, void* destination, std::size_t length) {
-        if (offset > LONG_MAX) return 0;
+        if (!file || offset > LONG_MAX) return 0;
         if (position != offset && std::fseek(file, static_cast<long>(offset), SEEK_SET) != 0) return 0;
         ++readCalls;
         const std::size_t count = std::fread(destination, 1, length, file);

@@ -1,7 +1,18 @@
+#include "native_texture_storage_3ds.hpp"
+#ifdef MK64_3DS_NATIVE_KART_LAB
+#include "native_gpu_sprites_3ds.hpp"
+extern "C" void Mk64NativeKartGpuFrameReady() __attribute__((weak));
+#endif
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+extern "C" void Mk64NativeLuigiGpuFrameReady() __attribute__((weak));
+#endif
 #include "gfx_citro3d.h"
+#include "original_fog_3ds.hpp"
+#include "packed_vertex_cache_3ds.hpp"
 #include "texture_pressure_3ds.hpp"
 #include "startup_trace_3ds.h"
 #include "frame_begin_3ds.hpp"
+#include "recording_time_3ds.hpp"
 #include "system_3ds.h"
 extern "C" bool Mk64System3DSCleanCapturedLinearAllocations(void) __attribute__((weak));
 extern "C" size_t Mk64System3DSCapturedLinearAllocationSize(void) __attribute__((weak));
@@ -11,6 +22,9 @@ extern "C" size_t Mk64System3DSCapturedLinearAllocationSize(void) __attribute__(
 #include "depth_precision_3ds.hpp"
 #include "alpha_policy_3ds.hpp"
 #include "viewport_slide_3ds.hpp"
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+#include "native_gpu_scene_3ds.hpp"
+#endif
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -99,6 +113,15 @@ struct PackedVertex {
 };
 
 static_assert(sizeof(PackedVertex) == 40, "Packed PICA vertex layout changed");
+
+// Static fog keeps position/UV attributes in the immutable cache block. Only
+// the independent fog coordinate and load-time shade alpha enter this stream.
+struct StaticFogVertex {
+    float coordinate[2];
+    uint8_t color[4];
+    float unusedDepth;
+};
+static_assert(sizeof(StaticFogVertex) == 16, "Static fog stream layout changed");
 
 constexpr uint32_t ScaledDimension(uint32_t dimension, uint8_t percent) {
     return dimension * percent / 100U;
@@ -409,6 +432,7 @@ struct GfxRenderingAPICitro3D::Impl {
     bool initialized = false;
     bool ready = false;
     bool frameActive = false;
+    bool presentationUncapped = false;
     bool newModel = false;
     uint32_t outputWidth = kTopLogicalWidth;
     bool originalAspect = false;
@@ -433,6 +457,17 @@ struct GfxRenderingAPICitro3D::Impl {
     int nativeLightDirectionUniform = -1;
     int nativeLightDiffuseUniform = -1;
     int nativeLightAmbientUniform = -1;
+    int staticMeshUniform = -1;
+    int staticUvUniform = -1;
+    int staticConstantColorUniform = -1;
+    int staticColorUniform = -1;
+    int staticColorMaskUniform = -1;
+    int originalFogUniform = -1;
+    // False while a static run's buffer or a presentation quad is bound, or
+    // static mode is still enabled in the shared vertex shader.
+    bool packedBufferBound = false;
+    bool staticVertexStateValid = false;
+    StaticRunDraw3DS staticVertexState{};
     mk64_3ds::NativeGeometryDraw nativeGeometry;
     mk64_3ds::NativeLightingState nativeLighting;
     bool nativeLightingEnabled = false;
@@ -442,6 +477,7 @@ struct GfxRenderingAPICitro3D::Impl {
     bool distanceFogTextureBound = false;
     uint32_t distanceFogColor = 0;
     bool tevStateDistanceFog = false;
+    uint32_t tevStateOriginalFog = 0;
     C3D_RenderTarget* topTarget = nullptr;
     C3D_Tex sceneTexture = {};
     C3D_RenderTarget* sceneTarget = nullptr;
@@ -512,6 +548,8 @@ struct GfxRenderingAPICitro3D::Impl {
     uint64_t linearHeapFlushFrameCount = 0;
 
     uint32_t frameBeginWaitMicroseconds = 0;
+    uint32_t pendingPresentWaitMicroseconds = 0;
+    uint32_t recordingPresentWaitMicroseconds = 0;
 
     ~Impl() {
         for (auto& slot : framebuffers) {
@@ -564,6 +602,10 @@ GfxRenderingAPICitro3D::GfxRenderingAPICitro3D() : mImpl(std::make_unique<Impl>(
 }
 
 GfxRenderingAPICitro3D::~GfxRenderingAPICitro3D() = default;
+
+void GfxRenderingAPICitro3D::SetPresentationUncapped(bool uncapped) {
+    mImpl->presentationUncapped=uncapped;
+}
 
 bool GfxRenderingAPICitro3D::IsInitialized() const {
     return mImpl->ready;
@@ -686,6 +728,26 @@ ShaderProgram* GfxRenderingAPICitro3D::CreateAndLoadNewShader(uint64_t shaderId0
         }
     }
 
+    // The layout advertises both coordinate sets for textured two-cycle
+    // shaders, including MODULATE/PASS2. Fog can use the second coordinate
+    // only when the enabled operations do not actually sample that unit.
+    for (int cycle = 0; cycle < (program->twoCycle ? 2 : 1); ++cycle) {
+        for (int channel = 0; channel < (program->alpha ? 2 : 1); ++channel) {
+            for (size_t operation = 0; operation < program->tevOperationCount[cycle][channel]; ++operation) {
+                const auto& encoded = program->tevOperations[cycle][channel][operation];
+                size_t terms = 3;
+                if (encoded.function == GPU_REPLACE) terms = 1;
+                else if (encoded.function == GPU_MODULATE || encoded.function == GPU_SUBTRACT) terms = 2;
+                for (size_t term = 0; term < terms; ++term) {
+                    const int source = encoded.source[term];
+                    if (source == SourceTexel0 || source == SourceTexel0Alpha)
+                        program->sampledTextures[cycle] = true;
+                    else if (source == SourceTexel1 || source == SourceTexel1Alpha)
+                        program->sampledTextures[cycle ^ 1] = true;
+                }
+            }
+        }
+    }
 
     ShaderProgram* result = program.get();
     mImpl->shaderPrograms[key] = std::move(program);
@@ -725,6 +787,30 @@ void GfxRenderingAPICitro3D::SelectTexture(int tile, uint32_t textureId) {
     if (slot.initialized && tile < 3) {
         C3D_TexBind(tile, &slot.texture);
     }
+}
+
+void GfxRenderingAPICitro3D::UploadNativeKartTexture(const uint8_t* source,uint32_t width,uint32_t height,
+        size_t logicalOffset,size_t lineBytes,size_t sourceStep,size_t loadedBytes) {
+    if(!source || !width || !height || width>kMaxTextureSize || height>kMaxTextureSize)
+        throw std::runtime_error("Shared native texture dimensions");
+    const auto id=mImpl->selectedTextures[mImpl->selectedTextureUnit];
+    if(!id || id>=mImpl->textures.size())throw std::runtime_error("Shared native texture slot");
+    const auto bw=NextPowerOfTwo(width),bh=NextPowerOfTwo(height);auto& slot=mImpl->textures[id];
+    if(!slot.initialized || !slot.texture.data || slot.texture.width!=bw || slot.texture.height!=bh || slot.texture.fmt!=GPU_RGBA8) {
+        if(slot.initialized)C3D_TexDelete(&slot.texture);
+        slot.initialized=false;slot.allocatedBytes=0;
+        if(!C3D_TexInit(&slot.texture,bw,bh,GPU_RGBA8))throw mk64_3ds::TextureAllocationFailure(bw,bh);
+        slot.initialized=true;slot.allocatedBytes=size_t(bw)*bh*4;
+    }
+    if(!mk64_3ds::CopyNativeKartUpload(source,static_cast<uint8_t*>(slot.texture.data),bw,bh,width,height,
+            logicalOffset,lineBytes,sourceStep,loadedBytes))throw std::runtime_error("Shared native texture range");
+    uint8_t alpha=255;const auto* pixels=static_cast<const uint8_t*>(slot.texture.data);
+    for(size_t i=0;i<slot.allocatedBytes;i+=4)alpha&=pixels[i];
+    slot.hasTransparency=alpha!=255;slot.sourceWidth=width;slot.sourceHeight=height;
+    if(!Mk64System3DSCleanDataCache(slot.texture.data,slot.allocatedBytes))throw std::runtime_error("Shared texture cache clean");
+    ++mImpl->textureCacheUploadCount;mImpl->textureCacheUploadBytes+=slot.allocatedBytes;
+    C3D_TexSetFilter(&slot.texture,GPU_NEAREST,GPU_NEAREST);
+    C3D_TexBind(mImpl->selectedTextureUnit,&slot.texture);
 }
 
 void GfxRenderingAPICitro3D::UploadTexture(const uint8_t* rgba32Buf, uint32_t width, uint32_t height) {
@@ -1043,14 +1129,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         program->strideFloats == 0 || bufVboNumTris == 0) {
         return;
     }
-    if (mImpl->activeTarget == mImpl->sceneTarget || mImpl->activeTarget == mImpl->topTarget) {
-        const bool scene = mImpl->activeTarget == mImpl->sceneTarget;
-        const auto clip = mk64_3ds::ClipViewportScissor(mImpl->viewportX, mImpl->viewportY,
-            mImpl->viewportWidth, mImpl->viewportHeight, mImpl->scissorX, mImpl->scissorY,
-            mImpl->scissorWidth, mImpl->scissorHeight, mImpl->scissorEnabled,
-            scene ? mImpl->renderWidth : mImpl->outputWidth, scene ? mImpl->renderHeight : kTopHeight);
-        if (!clip.width || !clip.height) return;
-    }
+    if (!DrawTargetVisible()) return;
 
     // Fail through the recoverable renderer path before libctru's fatal
     // capacity assertion. Keep room to submit/close the partial frame safely.
@@ -1177,29 +1256,7 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     // centered "cover" presentation without stretching or moving menus, HUD
     // elements, portraits, or other sprites.
     const float coverScale = coverNativeFullscreenTexture ? kFullscreenCoverScale : 1.0f;
-    std::array<float, 2> textureScaleU = { 1.0f, 1.0f };
-    std::array<float, 2> textureScaleV = { 1.0f, 1.0f };
-    for (int texture = 0; texture < 2; ++texture) {
-        if (!program->usedTextures[texture]) {
-            continue;
-        }
-        const uint32_t textureId = mImpl->selectedTextures[texture];
-        if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
-            const auto& slot = mImpl->textures[textureId];
-            textureScaleU[texture] *= static_cast<float>(slot.sourceWidth) / slot.texture.width;
-            textureScaleV[texture] *= static_cast<float>(slot.sourceHeight) / slot.texture.height;
-        }
-        const int framebufferId = mImpl->selectedFramebuffers[texture];
-        if (framebufferId > 0 && framebufferId < static_cast<int>(mImpl->framebuffers.size()) &&
-            mImpl->framebuffers[framebufferId] != nullptr &&
-            mImpl->framebuffers[framebufferId]->initialized) {
-            const auto& slot = *mImpl->framebuffers[framebufferId];
-            textureScaleU[texture] *= static_cast<float>(slot.logicalWidth) / slot.texture.width;
-            textureScaleV[texture] *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
-        }
-    }
-    std::array<float, 4> uvScale = {textureScaleU[0], textureScaleV[0],
-                                    textureScaleU[1], textureScaleV[1]};
+    const std::array<float, 4> uvScale = SelectedTextureScale(program, 1.0f);
     // Raw signed N64 texture coordinates, including tile shifts, are far
     // below this exactly representable bound. Unused clamps remain inactive.
     std::array<float, 4> uvClamp = {0x1p30f, 0x1p30f, 0x1p30f, 0x1p30f};
@@ -1236,51 +1293,60 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         mImpl->textureClampState = uvClamp;
         mImpl->textureTransformValid = true;
     }
-    const auto packStarted = mk64_3ds::PerformanceNow();
-    for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
-        const float* source = drawVertices + vertex * program->strideFloats;
-        PackedVertex& destination = mImpl->packedVertices[firstVertex + vertex];
-        destination.position[0] = source[0] * coverScale;
-        destination.position[1] = source[1] * coverScale;
-        destination.position[2] = source[2];
-        destination.position[3] = source[3];
-        destination.clipDepth = mImpl->nativeGeometry.enabled
-            ? mk64_3ds::PicaObjectClipDepth(source, mImpl->nativeGeometry.matrix, source[3])
-            : mk64_3ds::PicaClipDepth(source[2], source[3]);
+    {
+        mk64_3ds::PerformanceTimer packTimer(mk64_3ds::PerformanceCurrent().vertex_pack_us);
+        const bool reuseConvertedVertices = vertexCount >= 6;
+        mk64_3ds::PackedVertexConversionCache<PackedVertex, kMaxVertexStrideFloats> conversions(program->strideFloats);
+        for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+            const float* source = drawVertices + vertex * program->strideFloats;
+            PackedVertex& destination = mImpl->packedVertices[firstVertex + vertex];
+            if (reuseConvertedVertices && conversions.Copy(source, destination)) continue;
+            destination.position[0] = source[0] * coverScale;
+            destination.position[1] = source[1] * coverScale;
+            destination.position[2] = source[2];
+            destination.position[3] = source[3];
+            destination.clipDepth = mImpl->nativeGeometry.enabled
+                ? mk64_3ds::PicaObjectClipDepth(source, mImpl->nativeGeometry.matrix, source[3])
+                : mk64_3ds::PicaClipDepth(source[2], source[3]);
 
-        for (int texture = 0; texture < 2; ++texture) {
-            float u = 0.0f;
-            float v = 0.0f;
-            if (program->usedTextures[texture]) {
-                const uint8_t textureOffset = program->textureOffsets[texture];
-                u = source[textureOffset];
-                v = source[textureOffset + 1];
-                if (!uniformClamps) {
-                    uint8_t offset = textureOffset + 2;
-                    if (program->clamp[texture][0]) u = std::min(u, source[offset++]);
-                    if (program->clamp[texture][1]) v = std::min(v, source[offset]);
+            for (int texture = 0; texture < 2; ++texture) {
+                float u = 0.0f;
+                float v = 0.0f;
+                if (program->usedTextures[texture]) {
+                    const uint8_t textureOffset = program->textureOffsets[texture];
+                    u = source[textureOffset];
+                    v = source[textureOffset + 1];
+                    if (!uniformClamps) {
+                        uint8_t offset = textureOffset + 2;
+                        if (program->clamp[texture][0]) u = std::min(u, source[offset++]);
+                        if (program->clamp[texture][1]) v = std::min(v, source[offset]);
+                    }
                 }
+                float* texcoord = texture == 0 ? destination.texcoord0 : destination.texcoord1;
+                texcoord[0] = u;
+                texcoord[1] = v;
             }
-            float* texcoord = texture == 0 ? destination.texcoord0 : destination.texcoord1;
-            texcoord[0] = u;
-            texcoord[1] = v;
-        }
 
-        if (varyingInput >= 0) {
-            const float* color = source + program->inputOffsets[varyingInput];
-            destination.color[0] = FloatColorToByte(color[0]);
-            destination.color[1] = FloatColorToByte(color[1]);
-            destination.color[2] = FloatColorToByte(color[2]);
-            destination.color[3] = program->alpha ? FloatColorToByte(color[3]) : 255;
-        } else {
-            destination.color[0] = 255;
-            destination.color[1] = 255;
-            destination.color[2] = 255;
-            destination.color[3] = 255;
+            // Unit 1 is unused by these materials. Keep original fog independent
+            // of primary alpha (texture edges and the second combiner cycle).
+            if (program->fog && !program->sampledTextures[1])
+                destination.texcoord1[0] = mk64_3ds::OriginalFogCoordinate(source[program->fogOffset + 3]);
+
+            if (varyingInput >= 0) {
+                const float* color = source + program->inputOffsets[varyingInput];
+                destination.color[0] = FloatColorToByte(color[0]);
+                destination.color[1] = FloatColorToByte(color[1]);
+                destination.color[2] = FloatColorToByte(color[2]);
+                destination.color[3] = program->alpha ? FloatColorToByte(color[3]) : 255;
+            } else {
+                destination.color[0] = 255;
+                destination.color[1] = 255;
+                destination.color[2] = 255;
+                destination.color[3] = 255;
+            }
+            if (reuseConvertedVertices) conversions.Store(source, destination);
         }
     }
-
-    mk64_3ds::PerformanceCurrent().vertex_pack_us += static_cast<uint32_t>(mk64_3ds::PerformanceNow() - packStarted);
 
     std::array<float, 4> grayscaleColor = { 1.0f, 1.0f, 1.0f, 0.0f };
     if (program->grayscale) {
@@ -1288,6 +1354,68 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         std::copy_n(color, grayscaleColor.size(), grayscaleColor.begin());
     }
 
+    const std::array<float, 4> fogColor = program->fog
+        ? std::array<float, 4>{drawVertices[program->fogOffset], drawVertices[program->fogOffset + 1],
+                              drawVertices[program->fogOffset + 2], drawVertices[program->fogOffset + 3]}
+        : std::array<float, 4>{};
+    ApplyCombinerState(program, varyingInput, constants, grayscaleColor, reachesDistanceFog, fogColor);
+    if (mImpl->dirtyVertexBegin == mImpl->dirtyVertexEnd) {
+        mImpl->dirtyVertexBegin = firstVertex;
+    }
+    mImpl->dirtyVertexEnd = firstVertex + vertexCount;
+    BindPackedVertices();
+    ApplyNativeVertexState();
+    C3D_DrawArrays(GPU_TRIANGLES, static_cast<int>(firstVertex), static_cast<int>(vertexCount));
+    ++mImpl->drawCallCount;
+    mImpl->triangleCount += vertexCount / 3;
+    mImpl->packedVertexCount += vertexCount;
+}
+
+bool GfxRenderingAPICitro3D::DrawTargetVisible() const {
+    if (mImpl->activeTarget == mImpl->sceneTarget || mImpl->activeTarget == mImpl->topTarget) {
+        const bool scene = mImpl->activeTarget == mImpl->sceneTarget;
+        const auto clip = mk64_3ds::ClipViewportScissor(mImpl->viewportX, mImpl->viewportY,
+            mImpl->viewportWidth, mImpl->viewportHeight, mImpl->scissorX, mImpl->scissorY,
+            mImpl->scissorWidth, mImpl->scissorHeight, mImpl->scissorEnabled,
+            scene ? mImpl->renderWidth : mImpl->outputWidth, scene ? mImpl->renderHeight : kTopHeight);
+        if (!clip.width || !clip.height) return false;
+    }
+    return true;
+}
+
+std::array<float, 4> GfxRenderingAPICitro3D::SelectedTextureScale(const ShaderProgram* program,
+                                                                  float coverScale) const {
+    std::array<float, 2> textureScaleU = { coverScale, coverScale };
+    std::array<float, 2> textureScaleV = { coverScale, coverScale };
+    for (int texture = 0; texture < 2; ++texture) {
+        if (!program->usedTextures[texture]) {
+            continue;
+        }
+        const uint32_t textureId = mImpl->selectedTextures[texture];
+        if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
+            const auto& slot = mImpl->textures[textureId];
+            textureScaleU[texture] *= static_cast<float>(slot.sourceWidth) / slot.texture.width;
+            textureScaleV[texture] *= static_cast<float>(slot.sourceHeight) / slot.texture.height;
+        }
+        const int framebufferId = mImpl->selectedFramebuffers[texture];
+        if (framebufferId > 0 && framebufferId < static_cast<int>(mImpl->framebuffers.size()) &&
+            mImpl->framebuffers[framebufferId] != nullptr &&
+            mImpl->framebuffers[framebufferId]->initialized) {
+            const auto& slot = *mImpl->framebuffers[framebufferId];
+            textureScaleU[texture] *= static_cast<float>(slot.logicalWidth) / slot.texture.width;
+            textureScaleV[texture] *= static_cast<float>(slot.logicalHeight) / slot.texture.height;
+        }
+    }
+    std::array<float, 4> uvScale = {textureScaleU[0], textureScaleV[0],
+                                    textureScaleU[1], textureScaleV[1]};
+    return uvScale;
+}
+
+void GfxRenderingAPICitro3D::ApplyCombinerState(ShaderProgram* program, int varyingInput,
+                                                const std::array<std::array<float, 4>, 7>& constants,
+                                                const std::array<float, 4>& grayscaleColor,
+                                                bool reachesDistanceFog,
+                                                const std::array<float, 4>& fogColor) {
     std::array<uint32_t, 7> packedTevConstants = {};
     for (size_t index = 0; index < program->numInputs; ++index) {
         if (static_cast<int>(index) == varyingInput) {
@@ -1303,13 +1431,20 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     // all nearer cannot cross that plane, so omit its texture read/TEV stage.
     const bool distanceFog = fogEligible && reachesDistanceFog;
     if (fogEligible && !distanceFog) ++gMk64DistanceFogBypassed3DS;
-    if (distanceFog && !mImpl->distanceFogTextureBound) {
+    const bool originalFog = program->fog && !program->sampledTextures[1];
+    // Fog alpha is a varying factor in the coordinate stream. This stage's
+    // alpha passes GPU_PREVIOUS, so only the fog RGB belongs in its state key.
+    const uint32_t packedOriginalFog = originalFog
+        ? PackColor({fogColor[0], fogColor[1], fogColor[2], 0.0f}) : 0;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->originalFogUniform, originalFog);
+    if ((distanceFog || originalFog) && !mImpl->distanceFogTextureBound) {
         C3D_TexBind(2, &mImpl->distanceFogTexture);
         mImpl->distanceFogTextureBound = true;
         ++gMk64DistanceFogBinds3DS;
     }
     const bool updateTevState = !mImpl->tevStateValid ||
                                 mImpl->tevStateDistanceFog != distanceFog ||
+                                mImpl->tevStateOriginalFog != packedOriginalFog ||
                                 mImpl->tevStateProgram != program ||
                                 mImpl->tevStateVaryingInput != varyingInput ||
                                 mImpl->tevStateConstants != packedTevConstants ||
@@ -1438,11 +1573,21 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
                                    std::clamp(grayscaleColor[1], 0.0f, 1.0f),
                                    std::clamp(grayscaleColor[2], 0.0f, 1.0f), 1.0f }));
     }
+    if (originalFog && stage < 6) {
+        C3D_TexEnv* environment = C3D_GetTexEnv(stage++);
+        C3D_TexEnvInit(environment);
+        C3D_TexEnvSrc(environment, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_TEXTURE2);
+        C3D_TexEnvOpRgb(environment, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_R);
+        C3D_TexEnvFunc(environment, C3D_RGB, GPU_INTERPOLATE);
+        C3D_TexEnvColor(environment, packedOriginalFog);
+        ConfigureAlphaPass(environment);
+    }
     if (distanceFog) {
         if (stage < 6) {
             C3D_TexEnv* environment = C3D_GetTexEnv(stage++);
             C3D_TexEnvInit(environment);
             C3D_TexEnvSrc(environment, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_TEXTURE2);
+            C3D_TexEnvOpRgb(environment, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_G);
             C3D_TexEnvFunc(environment, C3D_RGB, GPU_INTERPOLATE);
             C3D_TexEnvColor(environment, mImpl->distanceFogColor);
             ConfigureAlphaPass(environment);
@@ -1468,16 +1613,151 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
         mImpl->tevStateDepthTest = mImpl->depthTest;
         mImpl->tevStateDepthWrite = mImpl->depthWrite;
         mImpl->tevStateDistanceFog = distanceFog;
+        mImpl->tevStateOriginalFog = packedOriginalFog;
     }
-    if (mImpl->dirtyVertexBegin == mImpl->dirtyVertexEnd) {
-        mImpl->dirtyVertexBegin = firstVertex;
+}
+
+void GfxRenderingAPICitro3D::BindPackedVertices() {
+    if (mImpl->packedBufferBound) return;
+    C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufferInfo);
+    BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 5, 0x43210);
+    mImpl->staticVertexStateValid = false;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticMeshUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticConstantColorUniform, false);
+    mImpl->packedBufferBound = true;
+}
+
+void GfxRenderingAPICitro3D::DrawStaticRun(const StaticRunDraw3DS& draw) {
+    ShaderProgram* program = mImpl->currentProgram;
+    if (!mImpl->frameActive || program == nullptr || program->invisible || draw.vertices == nullptr ||
+        draw.indices == nullptr || draw.indexCount < 3 || draw.materialVertex == nullptr ||
+        program->strideFloats == 0 || program->strideFloats > kMaxVertexStrideFloats) {
+        return;
     }
-    mImpl->dirtyVertexEnd = firstVertex + vertexCount;
-    ApplyNativeVertexState();
-    C3D_DrawArrays(GPU_TRIANGLES, static_cast<int>(firstVertex), static_cast<int>(vertexCount));
+    if (!DrawTargetVisible()) return;
+    RequireGpuCommandRoom(mk64_3ds::kGpuCommandTailWords + mk64_3ds::kGpuCommandDrawWords);
+
+    // Constant inputs come from the material vertex exactly as DrawTriangles
+    // reads them from a batch's first vertex. The shade input varies per
+    // vertex through the recorded colours.
+    const float* material = draw.materialVertex;
+    std::array<std::array<float, 4>, 7> constants = {};
+    for (uint8_t input = 0; input < program->numInputs; ++input) {
+        const uint8_t inputOffset = program->inputOffsets[input];
+        for (int component = 0; component < 4; ++component)
+            constants[input][component] = component == 3 && !program->alpha ? 1.0f : material[inputOffset + component];
+    }
+    const int varyingInput = program->numInputs == 1 ? 0 : draw.varyingInput;
+
+    const std::array<float, 4> uvScale = SelectedTextureScale(program, 1.0f);
+    std::array<float, 4> uvClamp = {0x1p30f, 0x1p30f, 0x1p30f, 0x1p30f};
+    for (int texture = 0; texture < 2; ++texture) {
+        if (!program->usedTextures[texture]) continue;
+        uint8_t offset = program->textureOffsets[texture] + 2;
+        for (int axis = 0; axis < 2; ++axis)
+            if (program->clamp[texture][axis]) uvClamp[texture * 2 + axis] = material[offset++];
+    }
+    if (!mImpl->textureTransformValid || mImpl->textureScaleState != uvScale ||
+        mImpl->textureClampState != uvClamp) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureScaleUniform,
+                     uvScale[0], uvScale[1], uvScale[2], uvScale[3]);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureClampUniform,
+                     uvClamp[0], uvClamp[1], uvClamp[2], uvClamp[3]);
+        mImpl->textureScaleState = uvScale;
+        mImpl->textureClampState = uvClamp;
+        mImpl->textureTransformValid = true;
+    }
+    // Distance fog cannot be pre-decided from CPU w here; the ramp is zero
+    // before its start, so an always-present stage leaves near pixels intact.
+    const std::array<float, 4> fogColor = program->fog
+        ? std::array<float, 4>{material[program->fogOffset], material[program->fogOffset + 1],
+                              material[program->fogOffset + 2], material[program->fogOffset + 3]}
+        : std::array<float, 4>{};
+    ApplyCombinerState(program, varyingInput, constants, {1.0f, 1.0f, 1.0f, 0.0f}, true, fogColor);
+
+    // Consecutive static runs own these uniforms until an interpreted draw,
+    // UI restoration or presentation switches the shared shader state.
+    const bool valid = mImpl->staticVertexStateValid;
+    const auto& previous = mImpl->staticVertexState;
+    for (int row = 0; row < 4; ++row) {
+        if (valid && std::memcmp(draw.rows[row], previous.rows[row], sizeof(draw.rows[row])) == 0) continue;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->nativeMatrixUniform + row,
+                     draw.rows[row][0], draw.rows[row][1], draw.rows[row][2], draw.rows[row][3]);
+    }
+    for (int texture = 0; texture < 2; ++texture) {
+        if (valid && std::memcmp(draw.uvAffine[texture], previous.uvAffine[texture], sizeof(draw.uvAffine[texture])) == 0) continue;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->staticUvUniform + texture,
+                     draw.uvAffine[texture][0], draw.uvAffine[texture][1],
+                     draw.uvAffine[texture][2], draw.uvAffine[texture][3]);
+    }
+    if (!valid) {
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeGeometryUniform, false);
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->nativeLightingUniform, false);
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticMeshUniform, true);
+    }
+    if (!valid || previous.constantColor != draw.constantColor)
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticConstantColorUniform, draw.constantColor);
+    if (draw.constantColor) {
+        if (!valid || !previous.constantColor || std::memcmp(draw.color, previous.color, sizeof(draw.color)) != 0)
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->staticColorUniform,
+                         draw.color[0], draw.color[1], draw.color[2], draw.color[3]);
+        if (!valid || !previous.constantColor || std::memcmp(draw.colorMask, previous.colorMask, sizeof(draw.colorMask)) != 0)
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->staticColorMaskUniform,
+                         draw.colorMask[0], draw.colorMask[1], draw.colorMask[2], draw.colorMask[3]);
+    }
+    if (!valid || previous.cull != draw.cull) {
+        GPU_CULLMODE cull = GPU_CULL_NONE;
+        if (draw.cull == mk64_3ds::NativeGeometryCull::Front) cull = GPU_CULL_FRONT_CCW;
+        if (draw.cull == mk64_3ds::NativeGeometryCull::Back) cull = GPU_CULL_BACK_CCW;
+        C3D_CullFace(cull);
+    }
+    mImpl->staticVertexState = draw;
+    mImpl->staticVertexStateValid = true;
+    // The next interpreted draw must re-upload its native rows and cull mode.
+    mImpl->nativeVertexStateDirty = true;
+
+    StaticFogVertex* fogVertices = nullptr;
+    if (draw.fogTransform.fog || program->fog) {
+        // Immutable positions/indices stay cached. Only fog-dependent colors
+        // and the independent fog coordinate enter the owned frame stream.
+        // Never change the cached GPU block, which can be in flight already.
+        const size_t occupied = (size_t(draw.vertexCount) * sizeof(StaticFogVertex) + sizeof(PackedVertex) - 1) / sizeof(PackedVertex);
+        if (draw.vertexCount == 0 || mImpl->packedVertexCount + occupied > kVertexBufferCapacity)
+            throw std::length_error("3DS fog vertex buffer exhausted");
+        const auto* source = static_cast<const mk64_3ds::StaticRunVertex*>(draw.vertices);
+        fogVertices = reinterpret_cast<StaticFogVertex*>(mImpl->packedVertices + mImpl->packedVertexCount);
+        for (size_t vertex = 0; vertex < draw.vertexCount; ++vertex) {
+            auto& packed = fogVertices[vertex];
+            packed.coordinate[0] = packed.coordinate[1] = packed.unusedDepth = 0.0f;
+            std::memcpy(packed.color, source[vertex].color, sizeof(packed.color));
+            float object[3];
+            for (int axis = 0; axis < 3; ++axis) object[axis] = source[vertex].position[axis] + draw.center[axis];
+            const auto fog = draw.fogTransform.fog
+                ? mk64_3ds::OriginalFogVertex(object, draw.fogTransform.matrix,
+                    draw.fogTransform.fogMul, draw.fogTransform.fogOffset)
+                : source[vertex].color[3];
+            if (draw.fogTransform.fog) packed.color[3] = fog;
+            if (program->fog && !program->sampledTextures[1])
+                packed.coordinate[0] = mk64_3ds::OriginalFogCoordinate(
+                    draw.fogFromVertex ? fog / 255.0f : fogColor[3]);
+        }
+        if (mImpl->dirtyVertexBegin == mImpl->dirtyVertexEnd) mImpl->dirtyVertexBegin = mImpl->packedVertexCount;
+        mImpl->packedVertexCount += occupied;
+        mImpl->dirtyVertexEnd = mImpl->packedVertexCount;
+    }
+    C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufferInfo);
+    if (fogVertices != nullptr) {
+        BufInfo_Add(bufferInfo, draw.vertices, sizeof(PackedVertex), 2, 0x10);
+        BufInfo_Add(bufferInfo, fogVertices, sizeof(StaticFogVertex), 3, 0x432);
+    } else {
+        BufInfo_Add(bufferInfo, draw.vertices, sizeof(PackedVertex), 5, 0x43210);
+    }
+    mImpl->packedBufferBound = false;
+    C3D_DrawElements(GPU_TRIANGLES, draw.indexCount, C3D_UNSIGNED_SHORT, draw.indices);
     ++mImpl->drawCallCount;
-    mImpl->triangleCount += vertexCount / 3;
-    mImpl->packedVertexCount += vertexCount;
+    mImpl->triangleCount += draw.indexCount / 3;
 }
 
 void GfxRenderingAPICitro3D::FlushPackedVertices() {
@@ -1587,6 +1867,16 @@ bool GfxRenderingAPICitro3D::EnsurePresentationResources() {
 }
 
 void GfxRenderingAPICitro3D::UploadProjectionForActiveTarget(bool viewportSlide) {
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+    // Native draws supply their complete object-to-PICA MVP. A viewport change
+    // still updates viewport/scissor, but the Fast3D projection would overwrite
+    // that MVP in the shared hardware registers. RestoreFast3DState uploads it
+    // after the native owner releases its batch.
+    if(mNativeSceneBatch)return;
+#ifdef MK64_3DS_NATIVE_KART_LAB
+    if(mNativeSpriteBatch)return;
+#endif
+#endif
     C3D_Mtx depthConversion;
     Mtx_Identity(&depthConversion);
     if (viewportSlide) {
@@ -1640,6 +1930,11 @@ void GfxRenderingAPICitro3D::PresentSceneToTopTarget() {
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
     BufInfo_Add(bufferInfo, mImpl->postprocessVertices, sizeof(PackedVertex), 5, 0x43210);
+    mImpl->staticVertexStateValid = false;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticMeshUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticConstantColorUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->originalFogUniform, false);
+    mImpl->packedBufferBound = false;
     UploadProjectionForActiveTarget(false); // Presentation quad is not a departing game viewport.
 
     C3D_SetViewport(0, 0, kTopHeight, mImpl->outputWidth);
@@ -1794,6 +2089,11 @@ void GfxRenderingAPICitro3D::RestoreFast3DState() {
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 5, 0x43210);
+    mImpl->staticVertexStateValid = false;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticMeshUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticConstantColorUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->originalFogUniform, false);
+    mImpl->packedBufferBound = true;
 
     UploadProjectionForActiveTarget();
 
@@ -1840,9 +2140,108 @@ void GfxRenderingAPICitro3D::RestoreFast3DState() {
         const uint32_t textureId = mImpl->selectedTextures[unit];
         if (textureId < mImpl->textures.size() && mImpl->textures[textureId].initialized) {
             C3D_TexBind(unit, &mImpl->textures[textureId].texture);
-        }
+        } else C3D_TexBind(unit,nullptr);
     }
+    C3D_ProcTexBind(0,nullptr);
 }
+
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+void GfxRenderingAPICitro3D::BeginNativeSceneBatch(mk64_3ds::native_scene::GpuScene& scene) {
+    if(mNativeSceneBatch)throw std::runtime_error("Nested native scene batch");
+#ifdef MK64_3DS_NATIVE_KART_LAB
+    if(mNativeSpriteBatch)throw std::runtime_error("Sprite batch must end before native scene batch");
+#endif
+    FlushPackedVertices();
+    // The native shader exports texcoord0 only. Do not leave legacy fog,
+    // dual-texture or Citro2D procedural samplers enabled across this boundary.
+    C3D_TexBind(1,nullptr);C3D_TexBind(2,nullptr);C3D_ProcTexBind(0,nullptr);
+    scene.BeginBatch();mNativeSceneBatch=&scene;
+}
+void GfxRenderingAPICitro3D::EndNativeSceneBatch() {
+    if(!mNativeSceneBatch)return;
+    mNativeSceneBatch=nullptr;RestoreFast3DState();
+}
+void GfxRenderingAPICitro3D::DrawNativeCourse(mk64_3ds::native_scene::GpuScene& scene,
+        uint32_t view,const float matrix[16],float horizontalScale) {
+    mk64_3ds::native_scene::Camera camera;
+    if(!mk64_3ds::native_scene::PrepareCamera(matrix,horizontalScale,camera))
+        throw std::runtime_error("Native course camera is invalid");
+    const bool standalone=mNativeSceneBatch==nullptr;
+    if(standalone)BeginNativeSceneBatch(scene);
+    else if(mNativeSceneBatch!=&scene)throw std::runtime_error("Native scene batch owner changed");
+    // Intermediate scene targets are landscape. The physical top buffer is
+    // rotated; PrepareCamera already includes that rotation for direct draws.
+    if(mImpl->activeTarget==mImpl->sceneTarget) {
+        for(unsigned i=0;i<4;++i){const float x=camera.rows[0][i];camera.rows[0][i]=-camera.rows[1][i];camera.rows[1][i]=x;}
+    }
+    try {
+        C3D_DepthMap(true,-1.f,mk64_3ds::PicaDecalBias(mImpl->decal));
+        mImpl->drawCallCount+=scene.Draw(view,camera,mImpl->triangleCount,true);
+    } catch(...) { EndNativeSceneBatch();throw; }
+    if(standalone)EndNativeSceneBatch();
+}
+#endif
+
+#ifdef MK64_3DS_NATIVE_KART_LAB
+void GfxRenderingAPICitro3D::BeginNativeSpriteBatch(mk64_3ds::native_scene::GpuSprites& sprites) {
+    if(mNativeSpriteBatch)throw std::runtime_error("Nested native sprite batch");
+    if(mNativeSceneBatch)throw std::runtime_error("Scene batch must end before native sprite batch");
+    FlushPackedVertices();
+    C3D_TexBind(1,nullptr);C3D_TexBind(2,nullptr);C3D_ProcTexBind(0,nullptr);
+    sprites.BeginBatch();mNativeSpriteBatch=&sprites;
+}
+void GfxRenderingAPICitro3D::EndNativeSpriteBatch() {
+    if(!mNativeSpriteBatch)return;
+    mNativeSpriteBatch->EndBatch();
+    mNativeSpriteBatch=nullptr;RestoreFast3DState();
+}
+void GfxRenderingAPICitro3D::DrawNativeSprite(mk64_3ds::native_scene::GpuSprites& sprites,
+        uint32_t key,const mk64_3ds::native_scene::Vertex* vertices,const float matrix[16],
+        float horizontalScale,const mk64_3ds::native_scene::SpriteStyle& style) {
+    mk64_3ds::native_scene::Camera camera;
+    if(!mk64_3ds::native_scene::PrepareCamera(matrix,horizontalScale,camera))throw std::runtime_error("Native sprite camera invalid");
+    const bool standalone=mNativeSpriteBatch==nullptr;
+    if(standalone)BeginNativeSpriteBatch(sprites);
+    else if(mNativeSpriteBatch!=&sprites)throw std::runtime_error("Native sprite batch owner changed");
+    if(mImpl->activeTarget==mImpl->sceneTarget)for(unsigned i=0;i<4;++i){const float x=camera.rows[0][i];camera.rows[0][i]=-camera.rows[1][i];camera.rows[1][i]=x;}
+    const auto before=sprites.Statistics().draws;
+    // Native packets use raster depth, independent of the last legacy shader's
+    // primitive-depth specialization. The migration exit restores that shader.
+    C3D_DepthMap(true,-1.f,mk64_3ds::PicaDecalBias(mImpl->decal));
+    try{sprites.Draw(key,vertices,camera,style);}catch(...){EndNativeSpriteBatch();throw;}
+    const auto emitted=sprites.Statistics().draws-before;mImpl->drawCallCount+=emitted;mImpl->triangleCount+=emitted*style.quads*2;
+    if(standalone)EndNativeSpriteBatch();
+}
+bool GfxRenderingAPICitro3D::CaptureNativeFrame(const char* path) {
+    if(!path || mImpl->frameActive || !mImpl->topTarget)return false;
+    const size_t bytes=240u*mImpl->outputWidth*4;
+    auto* pixels=static_cast<uint32_t*>(linearMemAlign(bytes,128));if(!pixels)return false;
+    constexpr uint32_t transfer=GX_TRANSFER_FLIP_VERT(0)|GX_TRANSFER_OUT_TILED(0)|GX_TRANSFER_RAW_COPY(0)|
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+    C3D_SyncDisplayTransfer(static_cast<uint32_t*>(mImpl->topTarget->frameBuf.colorBuf),GX_BUFFER_DIM(240,mImpl->outputWidth),
+        pixels,GX_BUFFER_DIM(240,mImpl->outputWidth),transfer);
+    bool ok=R_SUCCEEDED(GSPGPU_InvalidateDataCache(pixels,bytes));
+    if(ok){FILE* f=std::fopen(path,"wb");ok=f && std::fwrite(pixels,1,bytes,f)==bytes;if(f)ok=std::fclose(f)==0 && ok;}
+    linearFree(pixels);return ok;
+}
+#ifdef MK64_3DS_NATIVE_PARTICLE_COMPARE_LAB
+size_t GfxRenderingAPICitro3D::NativeComparisonFrameBytes() const {
+    return mImpl->topTarget?240u*mImpl->outputWidth*4:0;
+}
+bool GfxRenderingAPICitro3D::CaptureNativeComparisonPixels(void* pixels,size_t bytes) {
+    if(mImpl->frameActive || !mImpl->topTarget || !pixels ||
+       (reinterpret_cast<uintptr_t>(pixels)&127) || bytes!=NativeComparisonFrameBytes())return false;
+    constexpr uint32_t transfer=GX_TRANSFER_FLIP_VERT(0)|GX_TRANSFER_OUT_TILED(0)|GX_TRANSFER_RAW_COPY(0)|
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+    // Outside a frame, citro3d waits/clears the prior graphics queue before
+    // scheduling this transfer and waits for PPF completion before returning.
+    // Its latched drawing time then belongs to the completed graphics pass.
+    C3D_SyncDisplayTransfer(static_cast<uint32_t*>(mImpl->topTarget->frameBuf.colorBuf),GX_BUFFER_DIM(240,mImpl->outputWidth),
+        static_cast<uint32_t*>(pixels),GX_BUFFER_DIM(240,mImpl->outputWidth),transfer);
+    return R_SUCCEEDED(GSPGPU_InvalidateDataCache(pixels,bytes));
+}
+#endif
+#endif
 
 void GfxRenderingAPICitro3D::Init() {
     if (mImpl->initialized) {
@@ -1933,24 +2332,35 @@ void GfxRenderingAPICitro3D::Init() {
     mImpl->nativeLightDirectionUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightDirection");
     mImpl->nativeLightDiffuseUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightDiffuse");
     mImpl->nativeLightAmbientUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "nativeLightAmbient");
+    mImpl->staticMeshUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "staticMeshEnabled");
+    mImpl->staticUvUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "staticUv");
+    mImpl->staticConstantColorUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "staticConstantColor");
+    mImpl->staticColorUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "staticColor");
+    mImpl->staticColorMaskUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "staticColorMask");
+    mImpl->originalFogUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "originalFogEnabled");
     if (mImpl->textureScaleUniform < 0 || mImpl->textureClampUniform < 0 ||
         mImpl->projectionUniform < 0 || mImpl->distanceFogUniform < 0 ||
         mImpl->nativeGeometryUniform < 0 || mImpl->nativeMatrixUniform < 0 ||
         mImpl->nativeAspectUniform < 0 || mImpl->nativeLightingUniform < 0 ||
         mImpl->nativeLightDirectionUniform < 0 || mImpl->nativeLightDiffuseUniform < 0 ||
-        mImpl->nativeLightAmbientUniform < 0) return;
-    // An independently generated 8x8 intensity ramp, shared by all courses.
-    // It blends the final textured RGB while leaving alpha and depth intact.
-    mImpl->distanceFogTextureInitialized = C3D_TexInit(&mImpl->distanceFogTexture, 8, 8, GPU_RGBA8);
+        mImpl->nativeLightAmbientUniform < 0 || mImpl->staticMeshUniform < 0 ||
+        mImpl->staticUvUniform < 0 || mImpl->staticConstantColorUniform < 0 ||
+        mImpl->staticColorUniform < 0 || mImpl->staticColorMaskUniform < 0 || mImpl->originalFogUniform < 0) return;
+    // Independent ramps: R holds all 256 original fog factors; G retains the
+    // exact eight distance-option samples. Both leave alpha and depth intact.
+    mImpl->distanceFogTextureInitialized = C3D_TexInit(&mImpl->distanceFogTexture, 256, 8, GPU_RGBA8);
     if (!mImpl->distanceFogTextureInitialized) return;
     auto* fogPixels = static_cast<uint32_t*>(mImpl->distanceFogTexture.data);
     for (uint32_t y = 0; y < 8; ++y) {
-        for (uint32_t x = 0; x < 8; ++x) {
-            const uint32_t value = (x * 255 + 3) / 7;
-            fogPixels[MortonOffset8x8(x, y)] = __builtin_bswap32(0xFF000000U | value * 0x010101U);
+        for (uint32_t x = 0; x < 256; ++x) {
+            // PICA V=0 samples the bottom physical row. The distance ramp
+            // must start there; R stays horizontal for original N64 fog.
+            const uint32_t value = ((7 - y) * 255 + 3) / 7;
+            fogPixels[(x / 8) * 64 + MortonOffset8x8(x & 7, y)] =
+                __builtin_bswap32(0xFF000000U | x | (value << 8));
         }
     }
-    if (!Mk64System3DSCleanDataCache(fogPixels, 8 * 8 * sizeof(uint32_t))) return;
+    if (!Mk64System3DSCleanDataCache(fogPixels, 256 * 8 * sizeof(uint32_t))) return;
     C3D_TexSetFilter(&mImpl->distanceFogTexture, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&mImpl->distanceFogTexture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     mImpl->packedVertices =
@@ -1968,6 +2378,11 @@ void GfxRenderingAPICitro3D::Init() {
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
     BufInfo_Add(bufferInfo, mImpl->packedVertices, sizeof(PackedVertex), 5, 0x43210);
+    mImpl->staticVertexStateValid = false;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticMeshUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->staticConstantColorUniform, false);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->originalFogUniform, false);
+    mImpl->packedBufferBound = true;
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthMap(true, -1.0f, 0.0f);
     // The simulation pacer owns the 30 Hz game clock on both models. A
@@ -2010,16 +2425,30 @@ void GfxRenderingAPICitro3D::StartFrame() {
     mImpl->gameTarget = mImpl->postprocessActive ? mImpl->sceneTarget : mImpl->topTarget;
     const uint64_t beginTick = svcGetSystemTick();
     mImpl->frameBeginWaitMicroseconds = 0;
+    mImpl->pendingPresentWaitMicroseconds = 0;
+    mImpl->recordingPresentWaitMicroseconds = 0;
     // Honor an already elapsed display interval instead of unconditionally
     // waiting for another one. FrameBegin still waits for the GPU queue;
     // same-interval midpoint/key frames retain the VBlank synchronization.
     const bool displayAdvanced = mImpl->hasSubmittedFrame &&
         C3D_FrameCounter(0) != mImpl->submittedVBlank[0] &&
         C3D_FrameCounter(1) != mImpl->submittedVBlank[1];
-    if (!mk64_3ds::BeginFrame3DS(displayAdvanced ? 0 : C3D_FRAME_SYNCDRAW,
-                                "startup-gpu-queue-wait-enter")) return;
+    // Off releases presentation synchronization, not the original simulation
+    // clock. FrameBegin still provides the required GPU ownership fence.
+    const bool uncapped = mImpl->presentationUncapped;
+    mk64_3ds::FrameBeginWait3DS measuredWait;
+    if (!mk64_3ds::BeginFrame3DS(displayAdvanced || uncapped ? 0 : C3D_FRAME_SYNCDRAW,
+                                "startup-gpu-queue-wait-enter", &measuredWait)) return;
+    mImpl->pendingPresentWaitMicroseconds = measuredWait.pendingPresentUs;
+    mImpl->recordingPresentWaitMicroseconds = measuredWait.pendingPresentUs;
     mImpl->frameBeginWaitMicroseconds = static_cast<uint32_t>((svcGetSystemTick() - beginTick) * 1000000ULL / SYSCLOCK_ARM11);
     mImpl->frameActive = true;
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+    if(Mk64NativeLuigiGpuFrameReady)Mk64NativeLuigiGpuFrameReady();
+#endif
+#ifdef MK64_3DS_NATIVE_KART_LAB
+    if(Mk64NativeKartGpuFrameReady)Mk64NativeKartGpuFrameReady();
+#endif
     gMk64DistanceFar3DS = Mk64GameState3DSDistanceFog != nullptr
                             ? Mk64GameState3DSDistanceFog(&mImpl->distanceFogColor) : 0.0f;
     gMk64DistanceCulled3DS = 0;
@@ -2280,7 +2709,13 @@ bool GfxRenderingAPICitro3D::FenceTextureReuseBatch() {
         mImpl->topTarget,
         [this] { FlushPackedVertices(); },
         [] { C3D_FrameEnd(GX_CMDLIST_FLUSH); },
-        [] { return mk64_3ds::BeginFrame3DS(0, "texture-batch-gpu-queue-wait"); });
+        [this] {
+            mk64_3ds::FrameBeginWait3DS measuredWait;
+            const bool ready = mk64_3ds::BeginFrame3DS(0, "texture-batch-gpu-queue-wait", &measuredWait);
+            mImpl->pendingPresentWaitMicroseconds += measuredWait.pendingPresentUs;
+            mImpl->recordingPresentWaitMicroseconds = measuredWait.pendingPresentUs;
+            return ready;
+        });
     if (!completed) return false;
     mImpl->frameBeginWaitMicroseconds += static_cast<uint32_t>(
         (svcGetSystemTick() - started) * 1000000ULL / SYSCLOCK_ARM11);
@@ -2395,6 +2830,13 @@ float GfxRenderingAPICitro3D::GetPresentedFps(uint64_t windowMilliseconds) const
 
 uint32_t GfxRenderingAPICitro3D::GetFrameBeginWaitMicroseconds() const {
     return mImpl->frameBeginWaitMicroseconds;
+}
+uint32_t GfxRenderingAPICitro3D::GetPendingPresentWaitMicroseconds() const {
+    return mImpl->pendingPresentWaitMicroseconds;
+}
+float GfxRenderingAPICitro3D::GetActiveProcessingMilliseconds() const {
+    return mk64_3ds::ActiveRecordingMilliseconds(C3D_GetProcessingTime(),
+                                                mImpl->recordingPresentWaitMicroseconds);
 }
 
 void GfxRenderingAPICitro3D::ResetPresentedFps() {

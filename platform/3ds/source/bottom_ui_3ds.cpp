@@ -1,3 +1,6 @@
+#include "presentation_fps_3ds.hpp"
+#include "native_texture_storage_3ds.hpp"
+#include "improved_texture_pack_3ds.hpp"
 #include "hud_layout_3ds.hpp"
 #include "standings_presentation_3ds.hpp"
 #include "frame_begin_3ds.hpp"
@@ -7,6 +10,7 @@
 #include "art/menu_art_3ds.hpp"
 #include "menu_hint_native_3ds.hpp"
 #include "options_layout_3ds.hpp"
+#include "texture_mode_3ds.hpp"
 #include "art/option_icons_art_3ds.hpp"
 #include "render_policy_3ds.hpp"
 #include "bottom_ui_3ds.h"
@@ -26,8 +30,6 @@
 #include "updater.h"
 #include "select_policy_3ds.hpp"
 #include "title_credit_native_3ds.hpp"
-#include "art/native_hud_art_3ds.hpp"
-#include "art/native_map_art_3ds.hpp"
 #include "native_sprite_3ds.hpp"
 #include "texture_lease_3ds.hpp"
 
@@ -61,8 +63,6 @@ constexpr float kBottomHeight = 240.0f;
 constexpr uint32_t kMaxUiTextureDimension = 512;
 constexpr int kCStickTurboDeadzone = 30;
 static_assert(mk64_3ds::SelectPolicy3DS::kChord == (KEY_L | KEY_R | KEY_SELECT));
-constexpr uint64_t kFpsWindowMilliseconds = 2000;
-constexpr size_t kFpsHistoryCount = 5;
 constexpr size_t kC2DObjectCapacity = 1024;
 constexpr size_t kRetiredTextureCapacity = 8;
 constexpr float kBinaryAngleToRadians = 6.28318530717958647692f / 65536.0f;
@@ -195,15 +195,11 @@ struct RaceHudTextures {
     UiTexture minimapDotWhite;
 };
 
-struct FpsSample {
-    uint32_t frames = 0;
-    uint64_t milliseconds = 0;
-};
-
 struct BottomUiState {
     bool initialized = false;
     C3D_RenderTarget* bottomTarget = nullptr;
     UiFontAtlas font;
+    UiFontAtlas fpsFont;
     NativeUiFont nativeFont;
     std::array<UiFontAtlas, 6> dataFonts;
     C3D_RenderTarget* lastTopTarget = nullptr;
@@ -260,15 +256,7 @@ struct BottomUiState {
     uint64_t statusExpiresAt = 0;
     char status[64] = {};
 
-    uint64_t previousPresentationTick = 0;
-    float instantaneousFps = 0.0f;
-    uint64_t fpsWindowStartedAt = 0;
-    uint32_t fpsWindowFrames = 0;
-    std::array<FpsSample, kFpsHistoryCount> fpsHistory = {};
-    size_t fpsHistoryNext = 0;
-    size_t fpsHistorySize = 0;
-    float currentFps = 0.0f;
-    float averageFps = 0.0f;
+    mk64_3ds::PresentationFps fps;
 };
 
 BottomUiState sUi;
@@ -776,6 +764,8 @@ void LoadWhiteMinimapVariant(const UiTexture& original, UiTexture& destination) 
     white.width = original.width;
     white.height = original.height;
     white.subTexture = original.subTexture;
+    for(unsigned i=0;i<original.nativeCount;++i)
+        AddPackVariant(white,original.resourceName,original.native[i].width,original.native[i].height,true);
     PublishBackdropTexture(destination, white);
 }
 
@@ -802,8 +792,7 @@ void LoadMenuHint(const std::array<uint32_t, N>& pixels, UiTexture& destination)
     decoded.height = decoded.subTexture.height = height;
     decoded.subTexture.right = float(width) / backingWidth;
     decoded.subTexture.bottom = 1.0f - float(height) / 32;
-    const auto source=ReadUiPixels(decoded);
-    AddNativeVariant(decoded,mk64_3ds::native_sprite::ScaleBilinear(source,std::lround(width*1.5f),29),false,0,0,MK64_UI_TEXTURES_3DS_SCALED);
+    C3D_TexSetFilter(&decoded.texture,GPU_NEAREST,GPU_NEAREST);
     PublishBackdropTexture(destination, decoded);
 }
 
@@ -839,6 +828,10 @@ void LoadRandomCupHint() {
     mk64_3ds::MakeAutoHint(automatic, read);
     LoadMenuHint(random, sUi.randomCupHint);
     LoadMenuHint(automatic, sUi.autoHint);
+    AddPackVariant(sUi.gameSelectOption,"@hint_option",87,29);
+    AddPackVariant(sUi.gameSelectData,"@hint_data",87,29);
+    AddPackVariant(sUi.randomCupHint,"@hint_random",192,29);
+    AddPackVariant(sUi.autoHint,"@hint_auto",122,29);
 }
 
 void LoadOptionIcons() {
@@ -909,6 +902,13 @@ void LoadNativeFont() try {
         mk64_3ds::native_sprite::Image source{26,16,{}};
         source.pixels.resize(26*16);
         for (size_t p=0;p<source.pixels.size();++p) source.pixels[p]=DecodeTexturePixel(resource,p);
+        const auto packed=mk64_3ds::improved::LocalPack().Load(kFontResources[index],26,16);
+        if (packed && packed.width==26 && packed.height==16) {
+            const auto* bytes=reinterpret_cast<const uint8_t*>(packed.pixels->data());
+            for(size_t p=0;p<source.pixels.size();++p)
+                source.pixels[p]=uint32_t(bytes[p*4])|uint32_t(bytes[p*4+1])<<8|
+                    uint32_t(bytes[p*4+2])<<16|uint32_t(bytes[p*4+3])<<24;
+        }
         const auto image=mk64_3ds::native_sprite::ScaleBilinear(source,std::lround(26*h/16.f),h);
         if (atlasX+image.width>512) {atlasX=0;atlasY+=rowHeight;rowHeight=0;}
         if (atlasY+h>256) {C3D_TexDelete(&font.texture);font={};return;}
@@ -1085,7 +1085,7 @@ void DrawText(const char* value, float x, float y, float scale, uint32_t color,
             const int glyphIndex = GlyphIndexForCharacter(*character);
             if (glyphIndex >= 0 && sUi.font.glyphs[static_cast<size_t>(glyphIndex)].loaded) {
                 const int nativeHeight=std::lround(16*scale);
-                if (Mk64Settings3DSGetUiTextures()==MK64_UI_TEXTURES_3DS_SCALED &&
+                if (!sUi.modalOpen && mk64_3ds::ImprovedUiTextures(Mk64Settings3DSGetUiTextures()) &&
                     sUi.nativeFont.initialized && nativeHeight>=8 && nativeHeight<=16) {
                     auto& sub=sUi.nativeFont.glyphs[nativeHeight-8][glyphIndex];
                     C2D_Image image{&sUi.nativeFont.texture,&sub};
@@ -1185,6 +1185,34 @@ void DrawStandingLayer(UiTexture& texture, const mk64_3ds::HudRect& box,
                        width, height, depth, angle, tint);
 }
 
+void DrawStandingBacking(UiTexture& portrait, const mk64_3ds::HudRect& box,
+                         float angle, uint8_t alpha) {
+    float width = box.width, height = box.height;
+    float centerX = box.x + width * .5f, centerY = box.y + height * .5f;
+    // Match DrawTextureRotated's native-pixel alignment, including half pixels
+    // in the original mode. The backing belongs to the rotating portrait.
+    if (NativeVariantFor(portrait, width, height)) {
+        width = std::round(width); height = std::round(height);
+        centerX = std::round(centerX); centerY = std::round(centerY);
+    }
+    const uint32_t color = C2D_Color32(0, 0, 0, alpha);
+    constexpr float depth = .48f;
+    if (angle == 0.0f) {
+        C2D_DrawRectSolid(centerX - width * .5f, centerY - height * .5f,
+                         depth, width, height, color);
+        return;
+    }
+    const float cosine = std::cos(angle), sine = std::sin(angle);
+    const float wx = width * .5f * cosine, wy = width * .5f * sine;
+    const float hx = -height * .5f * sine, hy = height * .5f * cosine;
+    C2D_DrawTriangle(centerX-wx-hx, centerY-wy-hy, color,
+                     centerX+wx-hx, centerY+wy-hy, color,
+                     centerX-wx+hx, centerY-wy+hy, color, depth);
+    C2D_DrawTriangle(centerX+wx-hx, centerY+wy-hy, color,
+                     centerX+wx+hx, centerY+wy+hy, color,
+                     centerX-wx+hx, centerY-wy+hy, color, depth);
+}
+
 void DrawTextureRegion(UiTexture& texture, float sourceX, float sourceY, float sourceWidth,
                        float sourceHeight, float x, float y, float width, float height,
                        float depth, const C2D_ImageTint* tint = nullptr) {
@@ -1238,6 +1266,8 @@ void DeleteTextures(std::array<UiTexture, Count>& textures) {
 }
 
 void DeleteFontAtlas() {
+    if (sUi.fpsFont.initialized) C3D_TexDelete(&sUi.fpsFont.texture);
+    sUi.fpsFont={};
     if (sUi.nativeFont.initialized) C3D_TexDelete(&sUi.nativeFont.texture);
     sUi.nativeFont={};
     if (sUi.font.initialized) C3D_TexDelete(&sUi.font.texture);
@@ -1379,34 +1409,8 @@ void SaveChangedSetting(const char* successText) {
 #include "options_actions_3ds.inc.cpp"
 
 void UpdateFpsCounter() {
-    const uint64_t tick = svcGetSystemTick();
-    if (sUi.previousPresentationTick != 0 && tick > sUi.previousPresentationTick) {
-        sUi.instantaneousFps = static_cast<float>(SYSCLOCK_ARM11) /
-            static_cast<float>(tick - sUi.previousPresentationTick);
-    }
-    sUi.previousPresentationTick = tick;
-    const uint64_t now = osGetTime();
-    if (sUi.fpsWindowStartedAt == 0) sUi.fpsWindowStartedAt = now;
-    ++sUi.fpsWindowFrames;
-    const uint64_t elapsed = now - sUi.fpsWindowStartedAt;
-    if (elapsed < kFpsWindowMilliseconds) return;
-
-    sUi.currentFps = static_cast<float>(sUi.fpsWindowFrames) * 1000.0f /
-                     static_cast<float>(std::max<uint64_t>(elapsed, 1));
-    sUi.fpsHistory[sUi.fpsHistoryNext] = { sUi.fpsWindowFrames, elapsed };
-    sUi.fpsHistoryNext = (sUi.fpsHistoryNext + 1U) % sUi.fpsHistory.size();
-    sUi.fpsHistorySize = std::min(sUi.fpsHistorySize + 1U, sUi.fpsHistory.size());
-    uint64_t totalMilliseconds = 0;
-    uint64_t totalFrames = 0;
-    for (size_t i = 0; i < sUi.fpsHistorySize; ++i) {
-        totalMilliseconds += sUi.fpsHistory[i].milliseconds;
-        totalFrames += sUi.fpsHistory[i].frames;
-    }
-    sUi.averageFps = totalMilliseconds == 0 ? 0.0f
-        : static_cast<float>(totalFrames) * 1000.0f / static_cast<float>(totalMilliseconds);
-    sUi.fpsWindowStartedAt = now;
-    sUi.fpsWindowFrames = 0;
-    if (Mk64Settings3DSGetOverlayEnabled()) sUi.bottomDirty = true;
+    if (sUi.fps.Record(svcGetSystemTick(), SYSCLOCK_ARM11) && Mk64Settings3DSGetOverlayEnabled())
+        sUi.bottomDirty = true;
 }
 
 bool StatusActive() {
@@ -1429,7 +1433,7 @@ void DrawRandomCupHint(bool fullRandom, float reveal = 1.0f) {
     const float y = fullRandom ? 142.0f : 185.0f;
     if (sUi.randomCupHint.initialized) {
         const float width=mk64_3ds::kRandomHintWidth*1.5f*reveal;
-        DrawTexture(sUi.randomCupHint,160-width/2,y,width,28.5f,0.76f);
+        DrawTexture(sUi.randomCupHint,160-width/2,y,width,29.f,0.76f);
     } else {
         DrawText("SELECT RANDOM CUP",160,y+11,0.62f,C2D_Color32(255,255,255,255),C2D_AlignCenter,0.76f,true,reveal);
     }
@@ -1449,14 +1453,14 @@ void DrawGameSelect() {
     }
     sDrawOpacity = option;
     if (option > 0.0f && sUi.gameSelectOption.initialized) {
-        DrawTexture(sUi.gameSelectOption, 88.0f-43.5f*option, 76.0f, 87.0f*option, 28.5f, 0.7f);
+        DrawTexture(sUi.gameSelectOption, 88.0f-43.5f*option, 76.0f, 87.0f*option, 29.0f, 0.7f);
     } else if (option > 0.0f) {
         DrawText("L OPTION", 88.0f, 81.0f, 0.8f, C2D_Color32(255, 255, 255, 255),
                  C2D_AlignCenter, 0.7f, true);
     }
     sDrawOpacity = data;
     if (data > 0.0f && sUi.gameSelectData.initialized) {
-        DrawTexture(sUi.gameSelectData, 232.0f-43.5f*data, 76.0f, 87.0f*data, 28.5f, 0.7f);
+        DrawTexture(sUi.gameSelectData, 232.0f-43.5f*data, 76.0f, 87.0f*data, 29.0f, 0.7f);
     } else if (data > 0.0f) {
         DrawText("R DATA", 232.0f, 81.0f, 0.8f, C2D_Color32(255, 255, 255, 255),
                  C2D_AlignCenter, 0.7f, true);
@@ -1473,7 +1477,7 @@ void DrawAutoHint() {
     sDrawOpacity*=reveal;
     if (sUi.autoHint.initialized) {
         const float width=mk64_3ds::kAutoHintWidth*1.5f*reveal;
-        DrawTexture(sUi.autoHint,160-width/2,185,width,28.5f,0.76f);
+        DrawTexture(sUi.autoHint,160-width/2,185,width,29.f,0.76f);
     } else {
         DrawText("SELECT AUTO",160,196,0.62f,C2D_Color32(255,255,255,255),C2D_AlignCenter,0.76f,true,reveal);
     }
@@ -1606,13 +1610,11 @@ void DrawStandings(bool top = false, float topLeft = 8.0f) {
         if (character < 0 || character >= 8) continue;
         const auto box = top ? mk64_3ds::HudRect{topLeft, 50.0f + rank * 34.0f, 30, 30}
                              : mk64_3ds::BottomStandingRect(rank, sUi.game.raceFinished);
-        const float x = box.x, y = box.y, portraitSize = box.width;
+        const float portraitSize = box.width;
         const bool isPlayer = sUi.game.standingPlayerIds[rank] == sUi.game.observedPlayer;
         const bool unknown = sUi.game.standingUnknown[rank];
         const uint8_t portraitAlpha = unknown ? sUi.game.standingAlpha
                                               : (isPlayer ? 255 : sUi.game.standingAlpha);
-        C2D_DrawRectSolid(x, y, 0.48f, portraitSize, portraitSize,
-                          C2D_Color32(0, 0, 0, portraitAlpha));
         C2D_ImageTint portraitTint = {};
         // Preserve the native CI8/TLUT RGB and apply only the ranking fade.
         // A solid white tint at blend=1 replaces the complete image color and
@@ -1624,6 +1626,7 @@ void DrawStandings(bool top = false, float topLeft = 8.0f) {
         const int playerId=sUi.game.standingPlayerIds[rank];
         const float angle=!sUi.game.raceFinished && playerId>=0 && playerId<MK64_BOTTOM_UI_RACER_COUNT
             ? sUi.game.racers[playerId].portraitHitAngle*kBinaryAngleToRadians : 0;
+        DrawStandingBacking(portrait, box, angle, portraitAlpha);
         DrawStandingLayer(portrait,box,0,0,portraitSize,portraitSize,.6f,angle,&portraitTint);
         if (unknown) continue;
         if (isPlayer) {
@@ -1658,7 +1661,7 @@ void DrawPlace(const mk64_3ds::HudRect& box) {
 
 void DrawLap(float x, float y, float scale) {
     if (sUi.game.gameMode == 3) return;
-    DrawTexture(sUi.raceHud.lapLabel, x, y + 4 * scale, 40 * scale, 10 * scale, 0.8f);
+    DrawTexture(sUi.raceHud.lapLabel, x, y, 40 * scale, 17 * scale, 0.8f);
     DrawTexture(sUi.raceHud.lapCounts[std::clamp<int>(sUi.game.currentLap, 1, 3) - 1],
                 x + 44 * scale, y, 34 * scale, 17 * scale, 0.8f);
 }
@@ -1675,7 +1678,7 @@ void DrawRaceHudHeader() {
     // Preserve the original 320x240 HUD scale: lap at upper left, the live
     // item-window/roulette state in the center, and time at upper right.
     if (sUi.game.gameMode != 3 && !lapOnTop) {
-        DrawTexture(sUi.raceHud.lapLabel, 13.0f, 15.0f, 40.0f, 10.0f, 0.7f);
+        DrawTexture(sUi.raceHud.lapLabel, 13.0f, 12.0f, 40.0f, 17.0f, 0.7f);
         const int lap = std::clamp<int>(sUi.game.currentLap, 1, 3) - 1;
         DrawTexture(sUi.raceHud.lapCounts[static_cast<size_t>(lap)],
                     56.0f, 12.0f, 34.0f, 17.0f, 0.7f);
@@ -1809,8 +1812,8 @@ void DrawDeveloperOverlay() {
     std::snprintf(lines[0].data(), lines[0].size(), "VERSION   %s", kBuildVersion);
     std::snprintf(lines[1].data(), lines[1].size(), "MODEL     %s",
                   Mk64Diagnostics3DSGetSystemModelName());
-    std::snprintf(lines[2].data(), lines[2].size(), "FPS 2S    %.1f", sUi.currentFps);
-    std::snprintf(lines[3].data(), lines[3].size(), "FPS 10S   %.1f", sUi.averageFps);
+    std::snprintf(lines[2].data(), lines[2].size(), "FPS AVG   %.1f  LAST SECOND", sUi.fps.OneSecond());
+    std::snprintf(lines[3].data(), lines[3].size(), "FPS NOW   %.1f  PRESENTED", sUi.fps.Instant());
     const uint16_t configuredWidth = Mk64Diagnostics3DSSupportsWideMode()
                                          ? Mk64Settings3DSGetResolutionWidth()
                                          : 400;
@@ -1882,6 +1885,53 @@ void DrawTopRaceHud() {
     }
 }
 
+void LoadFpsFont() {
+    auto& font=sUi.fpsFont;
+    if(font.initialized || !sUi.nativeFont.initialized ||
+       !C3D_TexInit(&font.texture,256,32,GPU_RGBA8))return;
+    std::memset(font.texture.data,0,256*32*4);
+    unsigned column=0;
+    // Prebake native-size lime glyphs and their black shadows. This avoids a
+    // procedural tint dependency when the native 3D pass changes texture state.
+    for(char c: std::string_view("FPS0123456789.-")) {
+        const int i=GlyphIndexForCharacter(c);if(i<0)continue;
+        const auto& sub=sUi.nativeFont.glyphs[2][i]; // Exactly ten logical pixels high.
+        const unsigned sx=std::lround(sub.left*512),sy=std::lround((1-sub.top)*256);
+        if(sub.width>16 || sub.height!=10)continue;
+        for(unsigned y=0;y<10;++y)for(unsigned x=0;x<sub.width;++x) {
+            const unsigned tx=sx+x,ty=sy+y;
+            const size_t at=(size_t(ty/8)*64+tx/8)*64+MortonOffset8x8(tx%8,ty%8);
+            const unsigned alpha=(static_cast<const uint8_t*>(sUi.nativeFont.texture.data)[at]&15)*17;
+            WriteTiledPixel(font.texture,256,column*16+x,y,C2D_Color32(210,255,0,alpha));
+            WriteTiledPixel(font.texture,256,column*16+x,y+16,C2D_Color32(0,0,0,alpha));
+        }
+        auto& glyph=font.glyphs[i];glyph.loaded=true;
+        glyph.subTexture={sub.width,10,column*16/256.f,1.f,(column*16+sub.width)/256.f,1-10/32.f};
+        ++column;
+    }
+    if(!Mk64System3DSCleanDataCache(font.texture.data,256*32*4)) {C3D_TexDelete(&font.texture);font={};return;}
+    C3D_TexSetFilter(&font.texture,GPU_NEAREST,GPU_NEAREST);
+    C3D_TexSetWrap(&font.texture,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
+    font.initialized=true;
+}
+void DrawFpsGlyphs(const char* value,float right,float y) {
+    const float left=right-MeasureText(value,.62f);
+    for(unsigned shadow=0;shadow<2;++shadow) {
+        float x=left;
+        for(const char* c=value;*c;++c) {
+            const int i=GlyphIndexForCharacter(*c);
+            if(i>=0 && sUi.fpsFont.glyphs[i].loaded) {
+                auto sub=sUi.fpsFont.glyphs[i].subTexture;
+                if(!shadow){sub.top-=.5f;sub.bottom-=.5f;}
+                const C2D_Image image{&sUi.fpsFont.texture,&sub};
+                const C2D_DrawParams params={.pos={std::round(x)+(shadow?0:1),std::round(y)+(shadow?0:1),float(sub.width),float(sub.height)},
+                    .center={0,0},.depth=shadow?.9f:.89f,.angle=0};
+                C2D_DrawImage(image,&params,nullptr);
+            }
+            x+=CharacterAdvance(*c)*.62f;
+        }
+    }
+}
 void DrawTopFps(C3D_RenderTarget* topTarget) {
     if (topTarget == nullptr || !Mk64Settings3DSGetShowFpsEnabled()) return;
     if (sUi.game.demo || sUi.game.autoCinematic || (sUi.game.racing && sUi.game.raceFinished)) return;
@@ -1889,10 +1939,11 @@ void DrawTopFps(C3D_RenderTarget* topTarget) {
     // Fast3D renders into the 800-wide high-density target.
     constexpr float topWidth = 400.0f;
     char fps[32] = {};
-    if (sUi.instantaneousFps <= 0) std::snprintf(fps, sizeof(fps), "FPS --");
-    else std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.instantaneousFps);
-    DrawText(fps, topWidth - 8.0f, DrawsTopRaceHud() ? mk64_3ds::TopHudFpsY(Mk64Settings3DSGetHudLayout(), sUi.game.topHudRenderMode) : 6.0f, 0.62f,
-             C2D_Color32(125, 255, 145, 255), C2D_AlignRight, 0.9f, true);
+    if (sUi.fps.OneSecond() <= 0) std::snprintf(fps, sizeof(fps), "FPS --");
+    else std::snprintf(fps, sizeof(fps), "FPS %.1f", sUi.fps.OneSecond());
+    const float y=DrawsTopRaceHud() ? mk64_3ds::TopHudFpsY(Mk64Settings3DSGetHudLayout(),sUi.game.topHudRenderMode) : 6.f;
+    if(sUi.fpsFont.initialized)DrawFpsGlyphs(fps,topWidth-8,y);
+    else DrawText(fps,topWidth-8,y,.62f,C2D_Color32(210,255,0,255),C2D_AlignRight,.9f,true);
 }
 
 
@@ -2142,11 +2193,15 @@ void DrawMenuConveyor() {
         auto& texture = sUi.menuMaps[tile.map];
         if (!texture.initialized || tile.x + mk64_3ds::kMenuConveyorSpacing <= 0 ||
             tile.x >= kBottomWidth) continue;
-        const float width = mk64_3ds::kBottomMinimapAreaWidth;
-        const float height = mk64_3ds::kBottomMinimapAreaHeight;
+        // Keep the conveyor cadence and horizontal centers; give the hint
+        // below it more room with a 20% smaller map, raised by 10% of the screen.
+        constexpr float mapScale = 0.8f;
+        constexpr float centerY = kBottomHeight * (0.5f - 0.10f);
+        const float width = mk64_3ds::kBottomMinimapAreaWidth * mapScale;
+        const float height = mk64_3ds::kBottomMinimapAreaHeight * mapScale;
         const uint32_t color = C2D_Color32(255, 255, 255, 230);
         DrawMinimapOutline(texture, tile.x + (mk64_3ds::kMenuConveyorSpacing - width) * 0.5f,
-                           120 - height * 0.5f, width, height, color, false, 0.3f);
+                           centerY - height * 0.5f, width, height, color, false, 0.3f);
     }
 }
 
@@ -2259,8 +2314,9 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
     // Preserve the completed game color buffer and clear only reverse-depth so
     // the overlay cannot be hidden behind scene geometry.
     // Split the queued lower-screen commands before clearing top depth.
-    // EndFrame cleans the captured C2D buffers before the GPU queue runs.
-    C3D_FrameSplit(0);
+    // EndFrame cleans C2D geometry, but its narrow ranges do not include this
+    // command-list fragment. Publish each list independently before GSP reads it.
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
     C3D_RenderTargetClear(topTarget, C3D_CLEAR_DEPTH, 0, 0);
     PrepareC2DBatch();
     Mk64Graphics3DSMarkExternalLinearBuffersDirty();
@@ -2269,8 +2325,9 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
     if (TitleCreditVisible()) {
         C2D_ImageTint tint = {};
         C2D_AlphaImageTint(&tint, (255-sMenuTransition.alpha)/255.0f);
-        const float width=sUi.titleCredit.width,height=sUi.titleCredit.height;
-        DrawTexture(sUi.titleCredit,std::floor((400-width)*.5f),220,width,height,.80f,&tint);
+        const float width=sUi.titleCredit.width;
+        const float height=sUi.titleCredit.height;
+        DrawTexture(sUi.titleCredit,std::floor((400-width)*.5f),202,width,height,.80f,&tint);
     }
     // Native Fast3D fades were drawn before this custom overlay. Fade the HUD
     // with that same retained exit state; never redraw rank over held black.
@@ -2357,13 +2414,14 @@ extern "C" bool Mk64BottomUI3DSInit() {
     sUi.view = GetBaseView(sUi.game);
     LoadTexture(sUi.game.mainBackgroundTexture, sUi.menuBackground, nullptr, sUi.game.dataCourse);
     LoadNativeFont();
+    LoadFpsFont();
     LoadRandomCupHint();
     LoadOptionIcons();
     LoadFontAtlas(sUi.dataFonts[5], 5); // Native cyan/magenta lettering survives the selection flash.
     LoadTexture(kSelectionTriangleResource, sUi.selectionTriangle);
     UiTexture copyright{};
     if (LoadTexture("__OTR__textures/player_selection/copyright_1996",copyright)) {
-        const auto image=mk64_3ds::MakeNativeTitleCredit(ReadUiPixels(copyright));
+        const auto image=mk64_3ds::MakeNativeTitleCredits(ReadUiPixels(copyright));
         DeleteTexture(copyright); // Owned staging image, never submitted to a draw.
         UiTexture credit{};
         const auto bw=NextPowerOfTwo(image.width),bh=NextPowerOfTwo(image.height);
@@ -2375,6 +2433,8 @@ extern "C" bool Mk64BottomUI3DSInit() {
             credit.subTexture.right=float(image.width)/bw;
             credit.subTexture.bottom=1-float(image.height)/bh;
             C3D_TexSetFilter(&credit.texture,GPU_NEAREST,GPU_NEAREST);
+            // This image already contains both lines at their final size.
+            // The artwork pack's older port-only variant must not replace it.
             PublishBackdropTexture(sUi.titleCredit,credit);
         }
     }
@@ -2677,7 +2737,6 @@ extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
     // work is complete, so textures replaced during PrepareFrame are now safe
     // to release before issuing any new Citro2D commands.
     DrainRetiredTextures();
-    Mk64BottomUI3DSRecordPresentation();
     sUi.threatWarning.Advance(osGetTime());
     if (sUi.view == BaseView::RaceHud && sUi.game.racing && !sUi.game.raceFinished) {
         const mk64_3ds::StandingsPresentation3DS oldStandings(sUi.game);
@@ -2762,6 +2821,7 @@ extern "C" void Mk64BottomUI3DSShowProgress(const char* title, const char* detai
 }
 
 extern "C" void Mk64BottomUI3DSShowLoadingProgress(const char* title, const char* detail, unsigned percent) {
+    sUi.fps.Reset();
     const bool artwork = Mk64Settings3DSGetShowLoadingScreens();
     // With loading artwork disabled, one black presentation lasts until the
     // next game image. Do not perform two GPU/VBlank waits per progress step.
@@ -2771,15 +2831,7 @@ extern "C" void Mk64BottomUI3DSShowLoadingProgress(const char* title, const char
 }
 
 extern "C" void Mk64BottomUI3DSResetFps() {
-    sUi.previousPresentationTick = 0;
-    sUi.instantaneousFps = 0;
-    sUi.fpsWindowStartedAt = 0;
-    sUi.fpsWindowFrames = 0;
-    sUi.fpsHistory = {};
-    sUi.fpsHistoryNext = 0;
-    sUi.fpsHistorySize = 0;
-    sUi.currentFps = 0;
-    sUi.averageFps = 0;
+    sUi.fps.Reset();
 }
 
 extern "C" void Mk64BottomUI3DSRecordPresentation() {
@@ -2794,6 +2846,10 @@ extern "C" bool Mk64BottomUI3DSNeedsTopOverlay() {
     return sUi.initialized && (showFps || DrawsTopRaceHud() ||
                               TitleCreditVisible() ||
                               UpdateIsOpen() || DataActive() || StatusActive() || RaceExitBlackHold());
+}
+
+extern "C" bool Mk64BottomUI3DSHasTitleCopyright() {
+    return sUi.initialized && sUi.titleCredit.initialized;
 }
 
 extern "C" void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget) {
@@ -2823,11 +2879,11 @@ extern "C" bool Mk64BottomUI3DSIsModalOpen() {
 }
 
 extern "C" float Mk64BottomUI3DSGetCurrentFps() {
-    return sUi.currentFps;
+    return sUi.fps.OneSecond();
 }
 
 extern "C" float Mk64BottomUI3DSGetAverageFps() {
-    return sUi.averageFps;
+    return sUi.fps.Average();
 }
 
 extern "C" bool Mk64BottomUI3DSIsUpdateOpen() { return sUi.initialized && UpdateIsOpen(); }

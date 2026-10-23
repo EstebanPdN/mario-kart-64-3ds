@@ -42,8 +42,18 @@ int main(int argc, char** argv) {
             Mk64Settings3DSApplyDisplayProfile(MK64_DISPLAY_PROFILE_3DS_PERFORMANCE);
             assert(Mk64Settings3DSGetUiTextures() == MK64_UI_TEXTURES_3DS_SCALED);
             assert(Mk64Settings3DSSave());
+        } else if (!std::strcmp(argv[1], "menu")) {
+            assert(Mk64Settings3DSGetUiTextures() == MK64_UI_TEXTURES_3DS_MENU);
+            Mk64Settings3DSApplyDisplayProfile(MK64_DISPLAY_PROFILE_3DS_PERFORMANCE);
+            assert(Mk64Settings3DSGetUiTextures() == MK64_UI_TEXTURES_3DS_MENU);
+            assert(Mk64Settings3DSSave());
         } else if (!std::strcmp(argv[1], "invalid-textures")) {
-            assert(Mk64Settings3DSGetUiTextures() == MK64_UI_TEXTURES_3DS_MODIFIED);
+            assert(Mk64Settings3DSGetUiTextures() == (newModel ? MK64_UI_TEXTURES_3DS_IMPROVED : MK64_UI_TEXTURES_3DS_MENU));
+        } else if ((!std::strcmp(argv[1], "frame-off") || !std::strcmp(argv[1], "frame-off-reversed"))) {
+            assert(Mk64Settings3DSGetFrameLimit()==MK64_FRAME_LIMIT_3DS_OFF);
+            assert(Mk64Settings3DSSave());
+        } else if (!std::strcmp(argv[1], "frame-legacy")) {
+            assert(Mk64Settings3DSGetFrameLimit()==MK64_FRAME_LIMIT_3DS_60);
         } else if (!std::strcmp(argv[1], "mismatch")) {
             assert(Mk64Settings3DSGetDisplayProfile() == MK64_DISPLAY_PROFILE_3DS_CUSTOM);
             assert(Mk64Settings3DSGetRenderScalePercent() == 75);
@@ -56,7 +66,7 @@ int main(int argc, char** argv) {
     assert(Mk64Settings3DSGetHudLayout() == MK64_HUD_LAYOUT_3DS_MKDS_2);
     assert(Mk64Settings3DSGetSelectAction() == MK64_SELECT_ACTION_3DS_CAMERA);
     assert(Mk64Settings3DSGetMenuBlur() == 1 && Mk64Settings3DSGetMenuMaps());
-    assert(Mk64Settings3DSGetUiTextures() == MK64_UI_TEXTURES_3DS_MODIFIED);
+    assert(Mk64Settings3DSGetUiTextures() == (newModel ? MK64_UI_TEXTURES_3DS_IMPROVED : MK64_UI_TEXTURES_3DS_MENU));
     Mk64Settings3DSSetUiTextures(MK64_UI_TEXTURES_3DS_ORIGINAL);
     Mk64Settings3DSSetSelectAction(MK64_SELECT_ACTION_3DS_DUMP);
     Mk64Settings3DSSetTurboMultiplier(5);

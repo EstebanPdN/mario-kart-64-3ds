@@ -23,7 +23,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang cmake
       - name: Check documentation and generated source
-        run: python3 platform/3ds/tests/check-project.py
+        run: |
+          ./platform/3ds/prepare-dependencies.sh
+          python3 platform/3ds/tests/check-project.py
       - name: Run asset-free host regressions with sanitizers
         run: python3 platform/3ds/tests/run-host-tests.py --output "$RUNNER_TEMP/mk64-host-tests"
 

@@ -346,6 +346,27 @@ static bool mk64_3ds_collision_mark_visited(uintptr_t addr, s8 surfaceType, u16 
     if(SPAGHETTIKART_3DS_COLLISION_TEXT STREQUAL SPAGHETTIKART_COLLISION_TEXT)
         message(FATAL_ERROR "The upstream racing collision mesh insertion point changed")
     endif()
+    if(MK64_3DS_NATIVE_FULL_GAME)
+        string(PREPEND SPAGHETTIKART_3DS_COLLISION_TEXT "#include \"native_program_3ds.h\"\n")
+        string(REPLACE "void nullify_displaylist(uintptr_t addr) {"
+            "void nullify_displaylist(uintptr_t addr) {\n    Mk64NativeProgramDisable(addr);"
+            SPAGHETTIKART_3DS_COLLISION_TEXT "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
+        string(REPLACE "void find_and_set_tile_size(uintptr_t addr, s32 uls, s32 ult) {"
+            "void find_and_set_tile_size(uintptr_t addr, s32 uls, s32 ult) {\n    Mk64NativeProgramSetTileBounds(addr,uls,ult);"
+            SPAGHETTIKART_3DS_COLLISION_TEXT "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
+    endif()
+    if(MK64_3DS_NATIVE_DYNAMIC)
+        string(FIND "${SPAGHETTIKART_3DS_COLLISION_TEXT}" "void find_and_set_tile_size(" nativeScrollBegin)
+        string(FIND "${SPAGHETTIKART_3DS_COLLISION_TEXT}" "void set_vertex_colours(" nativeScrollEnd)
+        if(nativeScrollBegin LESS 0 OR nativeScrollEnd LESS nativeScrollBegin)
+            message(FATAL_ERROR "Native texture scroll function bounds changed")
+        endif()
+        math(EXPR nativeScrollLength "${nativeScrollEnd}-${nativeScrollBegin}")
+        string(SUBSTRING "${SPAGHETTIKART_3DS_COLLISION_TEXT}" ${nativeScrollBegin} ${nativeScrollLength} nativeScrollLegacy)
+        string(REPLACE "${nativeScrollLegacy}"
+            "void find_and_set_tile_size(uintptr_t addr, s32 uls, s32 ult) {\n    Mk64NativeProgramSetTileBounds(addr,uls,ult);\n}\n\n"
+            SPAGHETTIKART_3DS_COLLISION_TEXT "${SPAGHETTIKART_3DS_COLLISION_TEXT}")
+    endif()
     set(SPAGHETTIKART_3DS_COLLISION_EXISTING "")
     if(EXISTS "${SPAGHETTIKART_3DS_COLLISION_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_COLLISION_SOURCE}" SPAGHETTIKART_3DS_COLLISION_EXISTING)
@@ -443,7 +464,7 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
         gLastAnimFrameSelector[screenId][playerId] = player->animFrameSelector[screenId];]=]
         [=[        }
 
-#if defined(PLATFORM_3DS)
+#if defined(PLATFORM_3DS) && !defined(MK64_3DS_NATIVE_FULL_GAME)
         if (!Mk64Resource3DSIsResident()) {
         const char* initialKartTexture = ((screenId == 0) || (screenId == 1))
             ? (const char*)gEncodedKartTexture[0][screenId][playerId].unk_00
@@ -606,6 +627,8 @@ static void mk64_3ds_prefetch_initial_kart(const char* path) {
     string(REPLACE "    Vec3f sp94 = { 9.0f, 7.0f, 5.0f };"
         "    Vec3f sp94 = { 9.0f, 7.0f, 5.0f };\n    if (playerId < 0 || playerId >= 3) return;"
         SPAGHETTIKART_3DS_RENDER_PLAYER_TEXT "${SPAGHETTIKART_3DS_RENDER_PLAYER_TEXT}")
+    include(platform/3ds/cmake/native_kart_game_3ds.cmake)
+    include(platform/3ds/cmake/kart_visual_preparation_3ds.cmake)
     set(SPAGHETTIKART_3DS_RENDER_PLAYER_EXISTING "")
     set(SMOKE_VISIBILITY_ANCHOR "check_player_camera_collision(player, camera, (f32) D_80165580, (f32) D_80165582) == 1")
     string(FIND "${SPAGHETTIKART_3DS_RENDER_PLAYER_TEXT}" "${SMOKE_VISIBILITY_ANCHOR}" SMOKE_VISIBILITY_FOUND)

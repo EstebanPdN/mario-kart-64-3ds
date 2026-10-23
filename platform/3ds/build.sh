@@ -8,8 +8,6 @@ BUILD="${MK64_3DS_BUILD_DIR:-${ROOT}/build-3ds/game}"
 TOOLS_ROOT="${MK64_3DS_TOOLS_ROOT:-${ROOT}/../Tools/bin}"
 MAKEROM="${MAKEROM:-${TOOLS_ROOT}/makerom}"
 BANNERTOOL="${BANNERTOOL:-${TOOLS_ROOT}/bannertool}"
-TORCH_DIR="${ROOT}/third_party/SpaghettiKart/torch"
-TORCH_PATCH="${ROOT}/platform/3ds/patches/torch-3ds-devkitarm.patch"
 
 if [[ ! -x "${MAKEROM}" ]] && command -v makerom >/dev/null 2>&1; then
   MAKEROM="$(command -v makerom)"
@@ -24,14 +22,7 @@ if [[ ! -x "${BANNERTOOL}" && -x "${DEVKITPRO}/tools/bin/bannertool" ]]; then
   BANNERTOOL="${DEVKITPRO}/tools/bin/bannertool"
 fi
 
-if git -C "${TORCH_DIR}" apply --check "${TORCH_PATCH}" >/dev/null 2>&1; then
-  git -C "${TORCH_DIR}" apply "${TORCH_PATCH}"
-elif git -C "${TORCH_DIR}" apply --reverse --check "${TORCH_PATCH}" >/dev/null 2>&1; then
-  :
-else
-  printf 'Could not apply or verify the 3DS Torch compatibility patch.\n' >&2
-  exit 1
-fi
+"${ROOT}/platform/3ds/prepare-dependencies.sh"
 
 UPDATE_DEPS="${MK64_3DS_UPDATE_DEPS:-${BUILD}/update-deps/prefix}"
 if [[ ! -f "${UPDATE_DEPS}/lib/libcurl.a" ]]; then
@@ -42,6 +33,18 @@ cmake -S "${ROOT}" -B "${BUILD}" \
   -DCMAKE_TOOLCHAIN_FILE="${DEVKITPRO}/cmake/3DS.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
   -DMK64_3DS_UPDATE_DEPS="${UPDATE_DEPS}" \
+  -DMK64_3DS_NATIVE_LUIGI_LAB=OFF \
+  -DMK64_3DS_NATIVE_PLAYTEST=OFF \
+  -DMK64_3DS_NATIVE_KART_LAB=OFF \
+  -DMK64_3DS_NATIVE_CHARACTER_SCENARIOS=OFF \
+  -DMK64_3DS_NATIVE_PROJECTILE_LAB=OFF \
+  -DMK64_3DS_NATIVE_CACHE_LAB=OFF \
+  -DMK64_3DS_NATIVE_COMPARE_LAB=OFF \
+  -DMK64_3DS_NATIVE_BATCH_COMPARE_LAB=OFF \
+  -DMK64_3DS_NATIVE_PARTICLE_LAB=OFF \
+  -DMK64_3DS_NATIVE_PARTICLE_COMPARE_LAB=OFF \
+  -DMK64_3DS_NATIVE_ITEM_BOX_LAB=OFF \
+  -DMK64_3DS_NATIVE_VEGETATION_LAB=OFF \
   -DMK64_3DS_BUILD_GAME_CORE=ON \
   -DMK64_3DS_BUILD_GAME_ENGINE=ON \
   -DMK64_3DS_ENABLE_O2R_READER=ON \

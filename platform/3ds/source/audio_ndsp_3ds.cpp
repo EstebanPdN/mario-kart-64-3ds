@@ -27,7 +27,14 @@ std::array<AudioBuffer, kBufferCount> sBuffers;
 std::atomic<uint32_t> sQueuedBuffers{ 0 };
 std::atomic<uint32_t> sDroppedBuffers{ 0 };
 LightLock sBufferLock;
+LightEvent sRefillEvent;
 bool sInitialized = false;
+
+void OnDspFrame(void*) {
+    // The DSP callback only wakes the sole producer. It never synthesizes,
+    // allocates, logs, or takes the producer's buffer lock.
+    LightEvent_Signal(&sRefillEvent);
+}
 
 class BufferLockGuard {
   public:
@@ -61,6 +68,7 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
     // From this point on Shutdown must balance ndspInit even when a later
     // linear allocation fails.
     LightLock_Init(&sBufferLock);
+    LightEvent_Init(&sRefillEvent, RESET_ONESHOT);
     sInitialized = true;
 
     for (auto& buffer : sBuffers) {
@@ -86,11 +94,14 @@ extern "C" bool Mk64Audio3DSInit(uint32_t sampleRate) {
     mix[1] = 1.0f;
     ndspChnSetMix(kChannel, mix);
     ndspChnSetPaused(kChannel, false);
+    ndspSetCallback(OnDspFrame, nullptr);
     return true;
 }
 
 extern "C" void Mk64Audio3DSShutdown(void) {
     if (sInitialized) {
+        ndspSetCallback(nullptr, nullptr);
+        LightEvent_Signal(&sRefillEvent);
         ndspChnSetPaused(kChannel, true);
         ndspChnWaveBufClear(kChannel);
         // Stop libctru's NDSP worker and unregister its APT/DSP hooks before
@@ -158,6 +169,14 @@ extern "C" uint32_t Mk64Audio3DSQueuedCount(void) {
 
 extern "C" uint32_t Mk64Audio3DSDroppedCount(void) {
     return sDroppedBuffers.load(std::memory_order_relaxed);
+}
+
+extern "C" void Mk64Audio3DSWaitForRefill(uint64_t timeoutNs) {
+    if (sInitialized) LightEvent_WaitTimeout(&sRefillEvent, static_cast<int64_t>(timeoutNs));
+}
+
+extern "C" void Mk64Audio3DSWakeRefill(void) {
+    if (sInitialized) LightEvent_Signal(&sRefillEvent);
 }
 
 extern "C" int16_t* Mk64Audio3DSAcquireStereoS16(size_t frameCount, uint32_t* bufferToken) {

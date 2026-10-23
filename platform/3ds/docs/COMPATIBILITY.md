@@ -1,4 +1,4 @@
-# Compatibility and preservation — 2.0 experimental
+# Compatibility and preservation — 2.0
 
 The experimental line changes menus and adds gameplay options while retaining
 the existing title/data identity and original game integration. A passing host

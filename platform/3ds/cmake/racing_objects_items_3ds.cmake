@@ -320,6 +320,9 @@ s16 add_actor_to_empty_slot(Vec3f pos, Vec3s rot, Vec3f velocity, s16 actorType)
 ]=])
     string(REPLACE "${CPU_BLUE_PAIR_OLD}" "${CPU_BLUE_PAIR_HOOK}${CPU_BLUE_PAIR_OLD}"
         SPAGHETTIKART_3DS_ACTORS_TEXT "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
+    include(platform/3ds/cmake/native_vegetation_game_3ds.cmake)
+    include(platform/3ds/cmake/native_item_box_game_3ds.cmake)
+    include(platform/3ds/cmake/native_projectile_game_3ds.cmake)
     file(WRITE "${SPAGHETTIKART_3DS_ACTORS_SOURCE}"
          "${SPAGHETTIKART_3DS_ACTORS_TEXT}")
 

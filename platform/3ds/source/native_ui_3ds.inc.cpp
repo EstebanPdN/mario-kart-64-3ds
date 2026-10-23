@@ -15,7 +15,7 @@ mk64_3ds::native_sprite::Image ReadUiPixels(const UiTexture& source) {
 
 void AddNativeVariant(UiTexture& destination, const mk64_3ds::native_sprite::Image& image,
                       bool alphaOnly = false, unsigned logicalWidth = 0, unsigned logicalHeight = 0,
-                      Mk64UiTextures3DS style=MK64_UI_TEXTURES_3DS_MODIFIED) {
+                      Mk64UiTextures3DS style=MK64_UI_TEXTURES_3DS_IMPROVED) {
     if (!image.Valid() || destination.nativeCount == destination.native.size()) return;
     NativeUiVariant variant{};
     variant.style=style;
@@ -41,71 +41,66 @@ void AddNativeVariant(UiTexture& destination, const mk64_3ds::native_sprite::Ima
     destination.native[destination.nativeCount++]=variant;
 }
 
-void AddNativeArtwork(UiTexture& texture,const mk64_3ds::native_art::Sprite& sprite,
-                      unsigned logicalWidth=0,unsigned logicalHeight=0) {
-    const mk64_3ds::native_sprite::Image image{sprite.width,sprite.height,
-        std::vector<uint32_t>(sprite.pixels,sprite.pixels+sprite.width*sprite.height)};
-    AddNativeVariant(texture,image,false,logicalWidth,logicalHeight);
-}
-
-void AddNativeArtwork(UiTexture& texture,const mk64_3ds::native_art::MaskSprite& sprite) {
-    AddNativeVariant(texture,mk64_3ds::native_art::DecodeMask(sprite),true);
+bool AddPackVariant(UiTexture& texture,const char* name,unsigned width,unsigned height,bool white=false) {
+    const auto packed=mk64_3ds::improved::LocalPack().Load(name,width,height);
+    if (!packed) return false;
+    mk64_3ds::native_sprite::Image image{packed.width,packed.height,{}};
+    image.pixels.resize(size_t(image.width)*image.height);
+    const auto* p=reinterpret_cast<const uint8_t*>(packed.pixels->data());
+    for (size_t i=0;i<image.pixels.size();++i) {
+        const size_t at=packed.nativeGpuTiled?mk64_3ds::MortonTexel(i%64,63-i/64,64):i*4;
+        image.pixels[i]=packed.nativeGpuTiled
+            ? (uint32_t(p[at+3]) | uint32_t(p[at+2])<<8 | uint32_t(p[at+1])<<16 | uint32_t(p[at])<<24)
+            : (uint32_t(p[at]) | uint32_t(p[at+1])<<8 | uint32_t(p[at+2])<<16 | uint32_t(p[at+3])<<24);
+    }
+    if (white) for(auto& pixel:image.pixels) pixel=mk64_3ds::WhiteMinimapPixel(pixel);
+    AddNativeVariant(texture,image,false,packed.logicalWidth,packed.logicalHeight);
+    return true;
 }
 
 void LoadNativeVariants(UiTexture& texture,bool activeMap=false) {
     using namespace mk64_3ds;
-    using namespace native_art;
     const char* name=texture.resourceName;
-    const auto scaleText=[&](const native_art::Sprite& target) {
-        AddNativeVariant(texture,native_sprite::ScaleBilinear(ReadUiPixels(texture),target.width,target.height),
-            false,0,0,MK64_UI_TEXTURES_3DS_SCALED);
-    };
-    if (std::strstr(name,"common_texture_hud_lap_")) {
-        const Sprite* normal[]={&kLapCount1,&kLapCount2,&kLapCount3};
-        const Sprite* top[]={&kLapCount1Top,&kLapCount2Top,&kLapCount3Top};
-        for (unsigned i=0;i<3;++i) if (std::strcmp(name,kLapCountResources[i])==0) {
-            AddNativeArtwork(texture,*normal[i]); AddNativeArtwork(texture,*top[i]);
-            scaleText(*normal[i]);scaleText(*top[i]); return;
+    const auto add=[&](unsigned w,unsigned h) {
+        if (!AddPackVariant(texture,name,w,h)) {
+            // A missing optional pack uses the authentic source shape. Never
+            // substitute the old inaccurate hand-traced map or invented font.
+            AddNativeVariant(texture,native_sprite::ScaleBilinear(ReadUiPixels(texture),w,h));
         }
-    }
-    if (!std::strcmp(name,kHudLapResource)) {AddNativeArtwork(texture,kLap);AddNativeArtwork(texture,kLapTop);scaleText(kLap);scaleText(kLapTop);return;}
-    if (!std::strcmp(name,kHudTimeResource)) {AddNativeArtwork(texture,kTime);scaleText(kTime);return;}
-    if (!std::strcmp(name,kHudTotalTimeResource)) {AddNativeArtwork(texture,kTotal);scaleText(kTotal);return;}
-    if (!std::strcmp(name,kHudTimerDigitsResource)) {AddNativeArtwork(texture,kTimerDigits,96,16);
-        const auto source=ReadUiPixels(texture);AddNativeVariant(texture,source,false,0,0,MK64_UI_TEXTURES_3DS_SCALED);return;}
-    const bool portrait=std::strstr(name,"common_texture_portrait_") || !std::strcmp(name,kPortraitBorderResource);
+    };
     const bool map=std::strstr(name,"textures/other_textures/minimap_");
-    const bool item=std::strstr(name,"common_texture_item_window_");
+    const bool portrait=std::strstr(name,"common_texture_portrait_") || !std::strcmp(name,kPortraitBorderResource);
     const bool rank=std::strstr(name,"common_texture_hud_type_C_rank_font_");
     const bool place=std::strstr(name,"common_texture_hud_") &&
         (std::strstr(name,"st") || std::strstr(name,"nd") || std::strstr(name,"rd") || std::strstr(name,"th"));
-    if (map) for (const auto& course:kCourseMaps) {
-        const char* basename=std::strrchr(name,'/');
-        if (!basename || std::strcmp(basename+1,course.resource)) continue;
-        AddNativeArtwork(texture,course.sizes[0]);
-        if (activeMap) {AddNativeArtwork(texture,course.sizes[1]);AddNativeArtwork(texture,course.sizes[2]);}
-        break;
-    }
-    if (!portrait && !map && !item && !rank && !place) return;
-    const auto source=ReadUiPixels(texture);
-    const auto add=[&](unsigned w,unsigned h,bool alphaOnly=false) {
-        AddNativeVariant(texture,native_sprite::ScaleBilinear(source,w,h),
-            alphaOnly,0,0,MK64_UI_TEXTURES_3DS_SCALED);
-    };
-    if (portrait) for (unsigned size : {18U,30U,40U,48U}) add(size,size);
-    else if (map) {
-        for (const auto area : {std::array<unsigned,2>{149,184},{110,140},{68,176}}) {
-            const float scale=std::min(float(area[0])/source.width,float(area[1])/source.height);
-            add(std::lround(source.width*scale),std::lround(source.height*scale),true);
-            if (!activeMap) break; // Conveyor owns one LA4 variant per style/course.
+    if (map) {
+        // Menu maps have their own final-size pack variant. Shrinking the
+        // larger race variant with nearest sampling drops thin curve pixels.
+        const std::array<float,2> firstArea = activeMap
+            ? std::array<float,2>{149,184}
+            : std::array<float,2>{149*.8f,184*.8f};
+        for (const auto area:{firstArea,std::array<float,2>{110,140},{68,176}}) {
+            const float scale=std::min(float(area[0])/texture.width,float(area[1])/texture.height);
+            add(std::lround(texture.width*scale),std::lround(texture.height*scale));
+            if (!activeMap) break;
         }
-    } else if (item) add(48,38);
-    else if (rank) for (unsigned size : {15U,20U,24U}) add(size,size);
+    } else if (portrait) {for (unsigned size:{18U,30U,40U,48U}) add(size,size);}
+    else if (!std::strcmp(name,kHudLapResource)) {add(40,17);add(48,20);}
+    else if (std::strstr(name,"common_texture_hud_lap_") && !std::strstr(name,"_time")) {add(34,17);add(41,20);}
+    else if (!std::strcmp(name,kHudTimeResource) || !std::strcmp(name,kHudTotalTimeResource)) add(32,16);
+    else if (!std::strcmp(name,kHudTimerDigitsResource)) add(texture.width,texture.height);
+    else if (std::strstr(name,"common_texture_item_window_")) {add(40,32);add(48,38);}
+    else if (rank) {for(unsigned size:{15U,20U,24U}) add(size,size);}
     else if (place) {add(80,40);add(160,80);}
+    else {
+        const float scale=std::min(1.5f,512.f/std::max(texture.width,texture.height));
+        add(std::lround(texture.width*scale),std::lround(texture.height*scale));
+    }
 }
 
 NativeUiVariant* NativeVariantFor(UiTexture& texture,float width,float height) {
-    const auto style=Mk64Settings3DSGetUiTextures();
+    const auto mode=Mk64Settings3DSGetUiTextures();
+    const auto style=mk64_3ds::ImprovedUiTextures(mode) ? MK64_UI_TEXTURES_3DS_IMPROVED : MK64_UI_TEXTURES_3DS_ORIGINAL;
     if (style==MK64_UI_TEXTURES_3DS_ORIGINAL || !texture.nativeCount) return nullptr;
     NativeUiVariant* result=nullptr;
     float score=1e30f;

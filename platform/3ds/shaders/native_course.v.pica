@@ -1,0 +1,20 @@
+.fvec mvp[4], uvScaleOffset, uvClamp
+.constf constants(0.0, 1.0, 0.00392156862745, 0.0)
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+.proc main
+    mov r0.xyz, v0
+    mov r0.w, constants.y
+    dp4 outpos.x, mvp[0], r0
+    dp4 outpos.y, mvp[1], r0
+    dp4 outpos.z, mvp[2], r0
+    dp4 outpos.w, mvp[3], r0
+    mov r1, constants.xxxy
+    mul r1.xy, uvScaleOffset, v1
+    add r1.xy, uvScaleOffset.zwzw, r1
+    min r1.xy, uvClamp, r1
+    mov outtc0, r1
+    mul outclr, constants.zzzz, v2
+    end
+.end

@@ -58,6 +58,11 @@ void Watch(void*) {
 }
 extern "C" void Mk64Startup3DSMarkEntry(void) { mainEntered = osGetTime(); }
 extern "C" void Mk64Startup3DSStart(void) {
+#ifdef MK64_3DS_AUTODUMP_LAB
+    // Lab checkpoints are buffered in the per-session runtime log. A second
+    // periodic SD writer would contaminate the intervals being diagnosed.
+    return;
+#endif
     if (!Mk64Settings3DSGetLogging() || worker != nullptr) return;
     // Append preserves the evidence if the owner relaunches after a freeze.
     // Keep the report path stable; every appended session records its build.

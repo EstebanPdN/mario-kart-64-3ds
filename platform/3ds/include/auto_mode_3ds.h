@@ -23,6 +23,9 @@ bool Mk64Auto3DSCinematic(void);
 bool Mk64Auto3DSWatchedAudio(int playerId);
 bool Mk64Auto3DSFinishAudio(int playerId);
 bool Mk64Auto3DSCameraTick(void* camera);
+// Requests one lightweight trace dump at 30 s and one at the finish of every
+// AUTO race, so whole AUTO cups measure each course on hardware.
+void Mk64Auto3DSBenchmarkTick(void);
 int Mk64CpuItem3DSHud(int playerId);
 bool Mk64CpuItem3DSRolling(int playerId);
 #ifdef __cplusplus

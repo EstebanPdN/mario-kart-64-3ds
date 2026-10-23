@@ -1,0 +1,29 @@
+MK64 Extractor
+
+Mario Kart 64 Nintendo 3DS adaptation and desktop utility: EstebanPdN, with help from Codex.
+Mario Kart 64 name and game content: Nintendo.
+Project logo and icon: existing artwork from this Nintendo 3DS port.
+Background: the original background layer from this port's 3DS ROM extraction
+screen / Nintendo artwork. Its RGB565 colors and baked attenuation are preserved;
+the separate EXTRACTING ROM title layer is omitted.
+Small white menu text: a complete transparent HD alphabet generated from scratch
+with ImageGen, using the original Mario Kart 64 menu lettering as its style guide.
+Heading and action sprites: generated for this tool with ImageGen, using
+GhostlyDark's MK64 Reloaded GAME SELECT / MARIO GP / BEGIN textures as references.
+Desktop interface and extraction adapter: authored for this tool.
+Extraction: Harbour Masters' SpaghettiKart and Torch contributors.
+Torch includes BinaryTools, N64Graphics, miniz, stb, strhash64 and hj/sha1;
+their original source notices remain in the source package.
+Native dependencies: yaml-cpp, spdlog/fmt and TinyXML2 contributors.
+GUI: Qt / PySide6 Essentials, The Qt Company and contributors.
+Packaging: PyInstaller contributors. Python: Python Software Foundation.
+
+This unofficial fan utility is not affiliated with Nintendo or Harbour Masters.
+No ROM, playable game-data archive, save or dump is included.
+The local desktop package contains the owner-selected interface artwork and
+generated menu font. That does not grant a license to Nintendo's game content.
+All conversion takes place locally on the user's computer.
+Licenses and notices remain component-specific. Native dependency notices are
+included under licenses/. Qt/PySide6 are dynamically loaded and retain their
+bundled licenses and LGPL notices; see https://doc.qt.io/qtforpython-6/licenses.html
+and https://code.qt.io/pyside/pyside-setup for corresponding Qt for Python source.

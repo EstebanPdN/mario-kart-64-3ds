@@ -27,6 +27,8 @@ void Mk64BottomUI3DSResetFps(void);
 void Mk64BottomUI3DSResetTurbo(void);
 /* Every presented top image, including interpolation, must include active overlays. */
 bool Mk64BottomUI3DSNeedsTopOverlay(void);
+/* Keep the original copyright when the replacement texture is unavailable. */
+bool Mk64BottomUI3DSHasTitleCopyright(void);
 void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget);
 void Mk64BottomUI3DSDraw(void* existingTopTarget);
 

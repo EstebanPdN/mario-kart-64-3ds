@@ -15,8 +15,12 @@ constexpr std::uint32_t LinearHeapBytesForCommitLimit(std::uint64_t limit) {
     return (limit != 0 && limit <= 80u * kMiB ? 20u : 24u) * kMiB;
 }
 
-constexpr std::size_t ArchiveResidencyBudget(std::size_t heap, std::size_t used) {
-    return heap > used && heap - used > kArchiveReserveBytes
-        ? heap - used - kArchiveReserveBytes : 0;
+constexpr std::size_t ArchiveResidencyBudget(std::size_t heap, std::size_t used,
+                                            std::size_t replacing = 0) {
+    // Compute after reclaiming the previous range, before clamping to zero.
+    // Adding its size to an already-clamped budget would hide a reserve deficit.
+    const auto retained = used - (replacing < used ? replacing : used);
+    return heap > retained && heap - retained > kArchiveReserveBytes
+        ? heap - retained - kArchiveReserveBytes : 0;
 }
 }
