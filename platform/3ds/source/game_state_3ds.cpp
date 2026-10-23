@@ -8,6 +8,7 @@
 #include "menu_transition_3ds.hpp"
 #include "random_cup_3ds.hpp"
 #include "resource_runtime_3ds.h"
+#include "resource_loading_3ds.h"
 #include "game_runtime_3ds.h"
 #include "diagnostics_3ds.h"
 #include "auto_mode_3ds.h"
@@ -268,6 +269,7 @@ extern "C" void Mk64GameState3DSPrepareRaceResources(void) {
     world->SetCurrentTrack(nullptr);
     Mk64Resource3DSReleaseRaceResources();
     Mk64Diagnostics3DSRaceResourceBoundary("after-release", selected.data());
+    Mk64Resource3DSPrepareCourse(TrackAssetDirectory(selected.data()));
     if (std::strcmp(selected.data(), "mk:podium_ceremony") == 0) {
         SelectPodiumCeremony();
     } else {

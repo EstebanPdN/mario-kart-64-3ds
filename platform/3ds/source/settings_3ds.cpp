@@ -35,7 +35,7 @@ struct Settings {
     bool overlayEnabled;
     bool showLoadingScreens;
     bool newItems;
-    bool frameLimiter;
+    Mk64FrameLimit3DS frameLimiter;
     Mk64HudMeters3DS hudMeters;
     bool zrDebug;
     bool logging;
@@ -61,7 +61,7 @@ constexpr Settings kDefaults = {
     false,
     false,
     true,
-    true,
+    MK64_FRAME_LIMIT_3DS_30,
     MK64_HUD_METERS_3DS_OFF,
     false,
     true,
@@ -78,15 +78,20 @@ Settings ModelDefaults() {
     Settings defaults = kDefaults;
     // Only the initial/reset profile depends on hardware. Saved values are
     // applied afterwards and must keep precedence, even on another model.
-    defaults.frameLimiter = !sNewModelDefaults;
+    defaults.frameLimiter = sNewModelDefaults ? MK64_FRAME_LIMIT_3DS_60 : MK64_FRAME_LIMIT_3DS_30;
+    defaults.uiTextures = sNewModelDefaults ? MK64_UI_TEXTURES_3DS_IMPROVED : MK64_UI_TEXTURES_3DS_MENU;
     if (sNewModelDefaults) defaults.renderDistance = MK64_RENDER_DISTANCE_3DS_NORMAL;
     return defaults;
 }
 Settings sSettings = kDefaults;
+// Renderer experiment switch, independent of display profiles: recorded
+// static geometry runs drawn by PICA (on) or the CPU interpreter path (off).
+bool sGpuStaticMeshes = true;
 bool sLoaded = false;
 bool sLayoutRead = false;
 bool sLegacyHudRead = false;
 bool sProfileRead = false;
+bool sFrameLimitRead = false;
 constexpr const char* kLayoutNames[] = { "clean", "mk7", "mkds", "mkds2", "classic" };
 constexpr const char* kLegacyLayoutNames[] = { "clean", "focus", "race", "hybrid", "classic" };
 constexpr const char* kMeterNames[] = { "off", "distance", "speed", "position_lap" };
@@ -100,7 +105,8 @@ Settings ProfileValues(Mk64DisplayProfile3DS profile) {
     result.displayFilter = MK64_DISPLAY_FILTER_3DS_BILINEAR;
     result.menuBlur = 1;
     result.menuMaps = profile == MK64_DISPLAY_PROFILE_3DS_QUALITY;
-    result.frameLimiter = profile == MK64_DISPLAY_PROFILE_3DS_PERFORMANCE || !sNewModelDefaults;
+    result.frameLimiter = profile == MK64_DISPLAY_PROFILE_3DS_PERFORMANCE || !sNewModelDefaults
+        ? MK64_FRAME_LIMIT_3DS_30 : MK64_FRAME_LIMIT_3DS_60;
     result.renderDistance = profile == MK64_DISPLAY_PROFILE_3DS_PERFORMANCE
         ? MK64_RENDER_DISTANCE_3DS_LOW
         : (sNewModelDefaults ? MK64_RENDER_DISTANCE_3DS_HIGH : MK64_RENDER_DISTANCE_3DS_NORMAL);
@@ -254,12 +260,15 @@ void ApplySetting(const char* key, const char* value) {
     }
     if (std::strcmp(key, "ui_textures") == 0) {
         if (EqualsIgnoreCase(value, "original")) sSettings.uiTextures = MK64_UI_TEXTURES_3DS_ORIGINAL;
-        else if (EqualsIgnoreCase(value, "scaled")) sSettings.uiTextures = MK64_UI_TEXTURES_3DS_SCALED;
-        else if (EqualsIgnoreCase(value, "modified")) sSettings.uiTextures = MK64_UI_TEXTURES_3DS_MODIFIED;
+        else if (EqualsIgnoreCase(value, "menu") || EqualsIgnoreCase(value, "menu_only"))
+            sSettings.uiTextures = MK64_UI_TEXTURES_3DS_MENU;
+        else if (EqualsIgnoreCase(value, "improved") || EqualsIgnoreCase(value, "scaled") ||
+                 EqualsIgnoreCase(value, "modified")) sSettings.uiTextures = MK64_UI_TEXTURES_3DS_IMPROVED;
         return;
     }
     if (std::strcmp(key, "menu_maps") == 0 && ParseBoolean(value, &parsed)) { sSettings.menuMaps = parsed; return; }
     if (std::strcmp(key, "threat_warnings") == 0 && ParseBoolean(value, &parsed)) { sSettings.threatWarnings = parsed; return; }
+    if (std::strcmp(key, "gpu_static_meshes") == 0 && ParseBoolean(value, &parsed)) { sGpuStaticMeshes = parsed; return; }
     if (std::strcmp(key, "hud_meters") == 0) {
         for (int i = 0; i < 4; ++i)
             if (EqualsIgnoreCase(value, kMeterNames[i]))
@@ -293,8 +302,17 @@ void ApplySetting(const char* key, const char* value) {
         // ZR remains unassigned, including legacy saved bindings.
         return;
     }
+    if (std::strcmp(key, "frame_limit") == 0) {
+        const char* names[] = {"30", "60", "off"};
+        for (unsigned i=0; i<3; ++i) if (std::strcmp(value,names[i])==0) {
+            sSettings.frameLimiter=static_cast<Mk64FrameLimit3DS>(i); sFrameLimitRead=true;
+        }
+        return;
+    }
     if (std::strcmp(key, "frame_limiter") == 0) {
-        if (ParseBoolean(value, &booleanValue)) sSettings.frameLimiter = booleanValue;
+        // E1 and earlier used off to mean 60. Never migrate it to uncapped.
+        if (!sFrameLimitRead && ParseBoolean(value, &booleanValue))
+            sSettings.frameLimiter = booleanValue ? MK64_FRAME_LIMIT_3DS_30 : MK64_FRAME_LIMIT_3DS_60;
         return;
     }
     if (std::strcmp(key, "new_items") == 0) {
@@ -379,7 +397,7 @@ extern "C" void Mk64Settings3DSLoad(void) {
         return;
     }
     sSettings = ModelDefaults();
-    sLayoutRead = sLegacyHudRead = sProfileRead = false;
+    sLayoutRead = sLegacyHudRead = sProfileRead = sFrameLimitRead = false;
     sLoaded = true;
 
     FILE* file = std::fopen(kSettingsPath, "rb");
@@ -444,7 +462,7 @@ extern "C" bool Mk64Settings3DSSave(void) {
         "show_fps=%s\n"
         "show_loading_screens=%s\n"
         "new_items=%s\n"
-        "frame_limiter=%s\n"
+        "frame_limit=%s\n"
         "hud_meters=%s\n"
         "profile=%s\n"
         "select_for_dump=%s\n"
@@ -452,7 +470,8 @@ extern "C" bool Mk64Settings3DSSave(void) {
         "menu_blur=%u\n"
         "menu_maps=%s\n"
         "threat_warnings=%s\n"
-        "ui_textures=%s\n",
+        "ui_textures=%s\n"
+        "gpu_static_meshes=%s\n",
         sSettings.aspectRatio == MK64_ASPECT_RATIO_3DS_ORIGINAL ? "original" : "wide",
         sSettings.topHudEnabled ? "on" : "off",
         kLayoutNames[static_cast<int>(sSettings.hudLayout)],
@@ -467,14 +486,16 @@ extern "C" bool Mk64Settings3DSSave(void) {
         static_cast<unsigned int>(sSettings.masterVolumePercent),
         sSettings.showFpsEnabled ? "on" : "off",
         sSettings.showLoadingScreens ? "on" : "off", sSettings.newItems ? "on" : "off",
-        sSettings.frameLimiter ? "on" : "off", kMeterNames[sSettings.hudMeters],
+        sSettings.frameLimiter == MK64_FRAME_LIMIT_3DS_30 ? "30" :
+            (sSettings.frameLimiter == MK64_FRAME_LIMIT_3DS_60 ? "60" : "off"), kMeterNames[sSettings.hudMeters],
         kProfileNames[sSettings.profile],
         sSettings.selectAction == MK64_SELECT_ACTION_3DS_DUMP ? "on" : "off",
         sSettings.selectAction == MK64_SELECT_ACTION_3DS_OVERLAY ? "on" : "off",
         static_cast<unsigned>(sSettings.menuBlur), sSettings.menuMaps ? "on" : "off",
         sSettings.threatWarnings ? "on" : "off",
         sSettings.uiTextures == MK64_UI_TEXTURES_3DS_ORIGINAL ? "original" :
-            sSettings.uiTextures == MK64_UI_TEXTURES_3DS_SCALED ? "scaled" : "modified");
+            sSettings.uiTextures == MK64_UI_TEXTURES_3DS_MENU ? "menu" : "improved",
+        sGpuStaticMeshes ? "on" : "off");
     const bool flushSucceeded = std::fflush(file) == 0;
     const bool closeSucceeded = std::fclose(file) == 0;
     const bool writeSucceeded = written >= 0 && flushSucceeded && closeSucceeded;
@@ -492,7 +513,7 @@ extern "C" bool Mk64Settings3DSSave(void) {
 
 extern "C" void Mk64Settings3DSResetDefaults(void) {
     sSettings = ModelDefaults();
-    sLayoutRead = sLegacyHudRead = sProfileRead = false;
+    sLayoutRead = sLegacyHudRead = sProfileRead = sFrameLimitRead = false;
     sLoaded = true;
 }
 
@@ -501,8 +522,16 @@ extern "C" bool Mk64Settings3DSGetShowLoadingScreens(void) {
     return sSettings.showLoadingScreens;
 }
 
-extern "C" bool Mk64Settings3DSGetFrameLimiter(void) { EnsureLoaded(); return sSettings.frameLimiter; }
-extern "C" void Mk64Settings3DSSetFrameLimiter(bool enabled) { EnsureLoaded(); MarkCustom(); sSettings.frameLimiter = enabled; }
+extern "C" Mk64FrameLimit3DS Mk64Settings3DSGetFrameLimit(void) { EnsureLoaded(); return sSettings.frameLimiter; }
+extern "C" void Mk64Settings3DSSetFrameLimit(Mk64FrameLimit3DS limit) {
+    EnsureLoaded();
+    if (limit<MK64_FRAME_LIMIT_3DS_30 || limit>MK64_FRAME_LIMIT_3DS_OFF) return;
+    MarkCustom(); sSettings.frameLimiter=limit;
+}
+extern "C" bool Mk64Settings3DSGetFrameLimiter(void) { return Mk64Settings3DSGetFrameLimit()==MK64_FRAME_LIMIT_3DS_30; }
+extern "C" void Mk64Settings3DSSetFrameLimiter(bool enabled) {
+    Mk64Settings3DSSetFrameLimit(enabled ? MK64_FRAME_LIMIT_3DS_30 : MK64_FRAME_LIMIT_3DS_60);
+}
 extern "C" bool Mk64Settings3DSGetZrDebug(void) { EnsureLoaded(); return sSettings.zrDebug; }
 extern "C" void Mk64Settings3DSSetZrDebug(bool enabled) { EnsureLoaded(); sSettings.zrDebug = enabled; }
 extern "C" bool Mk64Settings3DSGetLogging(void) { EnsureLoaded(); return sSettings.logging; }
@@ -665,11 +694,12 @@ extern "C" void Mk64Settings3DSSetMenuBlur(uint8_t strength) { EnsureLoaded(); M
 extern "C" bool Mk64Settings3DSGetMenuMaps(void) { EnsureLoaded(); return sSettings.menuMaps; }
 extern "C" void Mk64Settings3DSSetMenuMaps(bool enabled) { EnsureLoaded(); MarkCustom(); sSettings.menuMaps = enabled; }
 extern "C" bool Mk64Settings3DSGetThreatWarnings(void) { EnsureLoaded(); return sSettings.threatWarnings; }
+extern "C" bool Mk64Settings3DSGetStaticMeshes(void) { EnsureLoaded(); return sGpuStaticMeshes; }
 extern "C" void Mk64Settings3DSSetThreatWarnings(bool enabled) { EnsureLoaded(); MarkCustom(); sSettings.threatWarnings = enabled; }
 
 extern "C" Mk64UiTextures3DS Mk64Settings3DSGetUiTextures(void) { EnsureLoaded(); return sSettings.uiTextures; }
 extern "C" void Mk64Settings3DSSetUiTextures(Mk64UiTextures3DS textures) {
     EnsureLoaded();
-    sSettings.uiTextures = textures >= MK64_UI_TEXTURES_3DS_ORIGINAL && textures <= MK64_UI_TEXTURES_3DS_MODIFIED
+    sSettings.uiTextures = textures >= MK64_UI_TEXTURES_3DS_ORIGINAL && textures <= MK64_UI_TEXTURES_3DS_MENU
         ? textures : MK64_UI_TEXTURES_3DS_MODIFIED;
 }

@@ -183,3 +183,5 @@ mk64_native_replace(
     "normal emission")
 
 include("${CMAKE_CURRENT_LIST_DIR}/native_lighting_3ds.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/stage_timers_3ds.cmake")

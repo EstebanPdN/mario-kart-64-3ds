@@ -47,6 +47,8 @@ bool Mk64Diagnostics3DSRequestCleanDumps(void);
 bool Mk64Diagnostics3DSRequestDump(void);
 // L+R+SELECT retains the existing expanded application-memory capture.
 bool Mk64Diagnostics3DSRequestFullDump(void);
+// Lightweight trace/screen dump used by AUTO benchmark races.
+bool Mk64Diagnostics3DSRequestBenchmarkDump(void);
 bool Mk64Diagnostics3DSIsNewModel(void);
 bool Mk64Diagnostics3DSSupportsWideMode(void);
 const char* Mk64Diagnostics3DSGetSystemModelName(void);

@@ -43,7 +43,15 @@ class O2rArchiveReader final {
     std::uint64_t PhysicalReadCalls() const;
     std::uint64_t PhysicalReadBytes() const;
     bool CacheEntryByIndex(std::size_t entryIndex, std::size_t budget);
+    // Loading-boundary preparation for exact course/kart/effect dependencies.
+    // Shares the automatic compressed LRU; never allocates a second cache.
+    std::size_t CacheEntries(const char* const* names, std::size_t count, std::size_t budget);
     std::size_t CachedBytes() const;
+    struct CacheStats {
+        std::size_t entries, payloadBytes, allocationBytes;
+        std::uint64_t hits, misses, byteEvictions;
+    };
+    CacheStats StreamingCacheStats() const;
     void SetStreamingCacheBudget(std::size_t budget);
     bool ReclaimPerformanceCache();
     const std::vector<std::string>& Entries() const;

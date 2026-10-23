@@ -1,4 +1,4 @@
-# Configuration reference — 2.0 experimental
+# Configuration reference — 2.0
 
 Options are saved in `sd:/3ds/MK64/mk64-3ds.cfg`. Menu changes use the same
 validated settings implementation as loading that file. The writer uses a
@@ -13,13 +13,14 @@ separate. If the main file is missing, a complete `.bak` is loaded. See
 | Profile | Performance, Quality, Custom. Applying a preset restores its display values. |
 | Aspect ratio | Wide or Original. |
 | HUD layout | Clean, MK7, MKDS, MKDS 2, Classic; Y cycles the complete presets in a manual race. |
+| Texture | Original, Improved, Menu. Menu improves UI/HUD/maps and selection portraits while retaining original race drivers/world artwork. |
 | Render | 50–100% internal scale, in 5% steps; touch or left/right adjusts the rail. |
 | Distance | Low, Normal, High. |
-| Frame limiter | 30 FPS or 60 FPS presentation target. The original simulation remains 30 Hz. |
+| Frame limiter | 30 FPS, 60 FPS or Off presentation target. The original simulation remains 30 Hz. |
 | Advanced | Opens the remaining display settings. |
 
 Advanced contains Filter (Bilinear/Blur/CRT), Show loading screens, HUD meters,
-Menu blur (Off/Light/Medium/Strong), Scrolling maps, Warning widget, Textures (Original/Scaled/Modified) and Back to
+Menu blur (Off/Light/Medium/Strong), Scrolling maps, Warning widget and Back to
 Display. B returns to the Advanced row of the main page. HUD meters may be
 unavailable for a layout; the UI marks that state rather than silently changing
 the setting. LIGHT retains the original background detail; stronger blur uses
@@ -77,12 +78,12 @@ wins, and saving writes one normalized exclusive pair.
 | `render_scale` | 50–100, normalized in 5% steps | 100 |
 | `display_filter` | `bilinear`, `blur`, `crt` | `bilinear` (Normal in the menu) |
 | `render_distance` | `low`, `normal`, `high` | Old: `low`; New: `normal` |
-| `frame_limiter` | Boolean; on = 30 FPS target, off = adaptive 60 FPS target | Old: on; New: off |
+| `frame_limit` | `30`, `60`, `off` | Old: `30`; New: `60` |
 | `hud_meters` | `off`, `distance`, `speed`, `position_lap` | `off` |
 | `menu_blur` | Integer clamped to 0–3 (Off/Light/Medium/Strong) | 1 |
 | `menu_maps` | Boolean | on |
 | `threat_warnings` | Boolean | on |
-| `ui_textures` | `original`, `scaled`, `modified` | `modified` |
+| `ui_textures` | `original`, `improved`, `menu` | `improved` |
 | `show_loading_screens` | Boolean | off |
 | `turbo_speed` | Integer clamped to 2–5 | 2 |
 | `master_volume` | Nearest supported 25, 50, 75, 100, 150 or 200; ties use lower | 100 |
@@ -108,8 +109,8 @@ For example, this complete small override keeps the other model defaults:
 profile=custom
 hud_layout=mkds2
 render_scale=100
-frame_limiter=on
-ui_textures=scaled
+frame_limit=30
+ui_textures=improved
 select_for_dump=off
 select_for_overlay=on
 ```
@@ -120,11 +121,33 @@ select_for_overlay=on
 The host settings fixtures cover these compatibility categories. Edit the
 file while the game is closed, preserving the main and recovery copies first.
 
-`ui_textures=original` uses the archive artwork and original sampling path.
-`ui_textures=scaled` uses premultiplied-alpha bilinear resampling of that art.
-`ui_textures=modified` uses the hand-authored HUD labels/counters and course maps;
-unfinished hand-authored replacements retain their original appearance. The
-corrected runtime-composed port credit is common to all three modes. The five
-HUD layouts, approved option icons and controls are independent of this choice.
-An absent or initially invalid texture value leaves the Modified default. Switching uses prepared GPU
-images; it does not reload or regenerate textures during a race.
+`ui_textures=original` uses the archive artwork. `ui_textures=improved` selects
+optional prepared art for supported UI, maps and characters. Missing or invalid
+replacements retain authentic source artwork. `ui_textures=menu` improves the
+interface, including race HUD/maps and selection portraits, while keeping race
+drivers and world effects original. The Texture row uses the former Render
+icon; Render uses the same chip as Memory dump. Legacy `scaled` and `modified`
+values both normalize to `improved`. The approved options dialog, five HUD
+layouts and controls keep their design. See [native artwork](NATIVE_SPRITES.md)
+for preparation, fallback and credits.
+
+Frame Limiter cycles through 30 FPS, 60 FPS and Off. Off removes presentation
+synchronization; GPU completion fences and the original fixed 30 Hz simulation
+remain active. The 60 FPS choice uses existing adaptive intermediate
+presentation when supported. Neither choice guarantees a sustained rate or
+changes physics speed. Physical display refresh is still a hardware limit.
+
+Legacy `frame_limiter=on` migrates to 30 and `frame_limiter=off` migrates to 60,
+matching the old meaning. A valid modern `frame_limit` key takes precedence
+regardless of position relative to a legacy key. Invalid values are ignored.
+Saving writes the explicit modern choice.
+
+### Presentation FPS display
+
+The top counter uses a completed one-second presentation window, updates once
+per second and uses the lime HUD time color. The Developer overlay shows that
+average and the last image-interval rate separately. Skipped simulation ticks
+are excluded; successful interpolation images are included. These counters
+measure submitted game images, not the original 30 Hz simulation or an emulator
+host speed indicator. Loading/dump pauses reset the history. Existing diagnostic
+log summaries retain their separately labelled 2-second/10-second windows.

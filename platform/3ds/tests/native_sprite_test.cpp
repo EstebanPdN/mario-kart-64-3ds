@@ -42,6 +42,15 @@ int main() {
             assert(credit_font::At(glyph,xx,yy)==(copyright.At(x+xx,y+yy)&255));
     }
     const auto y=credit_font::Letter('y',copyright);
+    // Keep the P/a counters open and the s waist narrow on the native grid.
+    const auto p=credit_font::Letter('P',copyright);
+    for(unsigned yy=1;yy<9;++yy)assert(credit_font::At(p,1,yy)>0);
+    assert(!credit_font::At(p,3,2) && !credit_font::At(p,4,3));
+    const auto a=credit_font::Letter('a',copyright);
+    assert(!credit_font::At(a,3,4) && !credit_font::At(a,4,5));
+    assert(credit_font::At(a,6,4)>0);
+    const auto s=credit_font::Letter('s',copyright);
+    assert(!credit_font::At(s,6,3) && credit_font::At(s,6,1)>0 && credit_font::At(s,6,6)>0);
     bool descender=false;
     for(unsigned yy=8;yy<y.height;++yy)for(unsigned x=0;x<y.width;++x)descender|=credit_font::At(y,x,yy)>0;
     assert(descender);
@@ -57,6 +66,17 @@ int main() {
     }
     assert(white && black && lastInk>=14 && lastInk+1<credit.height);
     assert(!MakeNativeTitleCredit(source).Valid());
+    const auto nintendo=MakeNativeTitleCopyright(copyright);
+    const auto combined=MakeNativeTitleCredits(copyright);
+    assert(combined.width==std::max(nintendo.width,credit.width));
+    assert(combined.height==nintendo.height+credit.height);
+    unsigned top=0;
+    for(const auto* line:{&nintendo,&credit}) {
+        const unsigned left=(combined.width-line->width)/2;
+        for(unsigned yy=0;yy<line->height;++yy)for(unsigned x=0;x<line->width;++x)
+            assert(combined.At(left+x,top+yy)==line->At(x,yy));
+        top+=line->height;
+    }
 
     // Every authored course must decode at all three output sizes. Verify the
     // complete RLE stream and tintable coverage, including malformed streams.

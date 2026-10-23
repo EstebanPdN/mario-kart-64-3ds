@@ -179,6 +179,7 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
         platform/3ds/source/lakitu_sprite_3ds.cpp
         platform/3ds/source/threat_warning_3ds.cpp
         platform/3ds/source/auto_mode_3ds.cpp
+        platform/3ds/source/autodump_lab_3ds.cpp
         platform/3ds/source/solo_modes_3ds.cpp
         platform/3ds/source/gbi_middleware_3ds.cpp
         platform/3ds/source/install_log_3ds.cpp

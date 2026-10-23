@@ -1,0 +1,9 @@
+.venv/
+build/
+dist/
+runtime/
+packages/
+previews/
+licenses/
+assets/icon.icns
+assets/icon.ico

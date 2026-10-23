@@ -11,17 +11,17 @@ enum class DisplayOption : uint8_t {
     Profile, Aspect, Hud, Render, Distance, FrameLimiter, Advanced,
     Filter, Loading, Meters, Blur, Maps, Warnings, Back, Textures
 };
-inline constexpr std::array<DisplayOption, 7> kDisplayOptions = {
+inline constexpr std::array<DisplayOption, 8> kDisplayOptions = {
     DisplayOption::Profile, DisplayOption::Aspect, DisplayOption::Hud,
-    DisplayOption::Render, DisplayOption::Distance, DisplayOption::FrameLimiter,
+    DisplayOption::Textures, DisplayOption::Render, DisplayOption::Distance, DisplayOption::FrameLimiter,
     DisplayOption::Advanced
 };
-inline constexpr std::array<DisplayOption, 8> kAdvancedDisplayOptions = {
+inline constexpr std::array<DisplayOption, 7> kAdvancedDisplayOptions = {
     DisplayOption::Filter, DisplayOption::Loading, DisplayOption::Meters,
     DisplayOption::Blur, DisplayOption::Maps, DisplayOption::Warnings,
-    DisplayOption::Textures, DisplayOption::Back
+    DisplayOption::Back
 };
-inline constexpr uint8_t kAdvancedDisplayRow = 6;
+inline constexpr uint8_t kAdvancedDisplayRow = 7;
 // Same triangular greyscale ramp as the native slow selection (64 ticks).
 constexpr uint8_t OptionSelectionShade(uint32_t nativeFlashTick) {
     unsigned shade = (nativeFlashTick % 64U) * 512U / 64U;

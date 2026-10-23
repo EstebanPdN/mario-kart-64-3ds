@@ -53,9 +53,21 @@ typedef enum Mk64SelectAction3DS {
 
 typedef enum Mk64UiTextures3DS {
     MK64_UI_TEXTURES_3DS_ORIGINAL = 0,
-    MK64_UI_TEXTURES_3DS_SCALED = 1,
-    MK64_UI_TEXTURES_3DS_MODIFIED = 2,
+    MK64_UI_TEXTURES_3DS_IMPROVED = 1,
+    MK64_UI_TEXTURES_3DS_MENU = 2,
+    // Source compatibility for the older UI modules. Saved values migrate.
+    MK64_UI_TEXTURES_3DS_SCALED = MK64_UI_TEXTURES_3DS_IMPROVED,
+    MK64_UI_TEXTURES_3DS_MODIFIED = MK64_UI_TEXTURES_3DS_IMPROVED,
 } Mk64UiTextures3DS;
+
+typedef enum Mk64FrameLimit3DS {
+    MK64_FRAME_LIMIT_3DS_30 = 0,
+    MK64_FRAME_LIMIT_3DS_60 = 1,
+    MK64_FRAME_LIMIT_3DS_OFF = 2,
+} Mk64FrameLimit3DS;
+
+Mk64FrameLimit3DS Mk64Settings3DSGetFrameLimit(void);
+void Mk64Settings3DSSetFrameLimit(Mk64FrameLimit3DS limit);
 
 Mk64UiTextures3DS Mk64Settings3DSGetUiTextures(void);
 void Mk64Settings3DSSetUiTextures(Mk64UiTextures3DS textures);
@@ -69,6 +81,8 @@ void Mk64Settings3DSSetMenuBlur(uint8_t strength);
 bool Mk64Settings3DSGetMenuMaps(void);
 void Mk64Settings3DSSetMenuMaps(bool enabled);
 bool Mk64Settings3DSGetThreatWarnings(void);
+// gpu_static_meshes: draw recorded static geometry runs on PICA (default on).
+bool Mk64Settings3DSGetStaticMeshes(void);
 void Mk64Settings3DSSetThreatWarnings(bool enabled);
 
 Mk64HudMeters3DS Mk64Settings3DSGetHudMeters(void);

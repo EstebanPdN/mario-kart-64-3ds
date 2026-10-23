@@ -8,6 +8,7 @@
 #include <cstddef>
 
 namespace {
+Mk64Jumbotron3DSState sPublished{};
 
 constexpr unsigned kNativeScreenWidth = 320;
 constexpr unsigned kCaptureLeft = 88;
@@ -87,4 +88,10 @@ extern "C" void Mk64Jumbotron3DSUpdate(uint16_t* topLeft, uint16_t* topRight,
                 PackBigEndianRgba5551(pixel);
         }
     }
+    for(unsigned i=0;i<targets.size();++i)sPublished.tiles[i]=targets[i];
+    ++sPublished.generation;
+}
+extern "C" bool Mk64Jumbotron3DSGetState(Mk64Jumbotron3DSState* state) {
+    if(!state || !sPublished.generation)return false;
+    *state=sPublished;return true;
 }

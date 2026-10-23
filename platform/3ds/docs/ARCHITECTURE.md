@@ -16,6 +16,8 @@ those adaptations by responsibility. A dependency update is a separate change.
 | `options_layout_3ds.hpp`, `options_actions_3ds.inc.cpp`, `options_view_3ds.inc.cpp` | Display option identity/order and shared drawing/touch row geometry. Moving an option does not change the persisted settings schema. |
 | `settings_3ds.cpp` | Defaults, model-aware presets, manual Custom mode and configuration persistence. Applying a display preset preserves unrelated controls/audio/gameplay settings. |
 | `gfx_citro3d.cpp`, `frame_interpolation_3ds.cpp` | PICA rendering and bounded recording/interpolation. Cache keys include state that affects output; invalid pairs fall back to a keyframe. |
+| `native_mesh_format_3ds.hpp`, `native_mesh_draw_3ds.cpp` | Validated native cache and persistent indexed PICA drawing, integrated through guarded course working sets in the full-game configuration. See [Native mesh](NATIVE_MESH.md). |
+| `native_dynamic_3ds.cpp`, `tools/generate_native_emit.py`, `tools/generate_native_embedded.py` | Full-game typed producers, bounded direct native frame replay and compiled embedded procedures. The native configuration does not select an opcode-interpreter fallback. |
 | `resource_runtime_3ds.cpp`, `o2r_archive_reader.cpp` | Archive reads, decoded resources, ownership leases and cache eviction. A pointer to evictable storage must not escape its lifetime; UI decoders use scoped texture leases. |
 | `audio_runtime_3ds.cpp`, `audio_ndsp_3ds.cpp` | Producer scheduling and NDSP buffer ownership. A buffer remains alive until synthesis and playback consumers have finished. |
 | `solo_modes_3ds.cpp`, `auto_mode_3ds.cpp` | Solo race/Battle orchestration and bounded AUTO input pulses. Course transitions reset scene-specific state. |
@@ -115,10 +117,14 @@ map. RLE coverage is decoded and uploaded to LA4 only at resource load. The
 original coordinate frame anchors racer/finish markers; generated art contains
 no sampled reference bitmap. See [sprite authoring](NATIVE_SPRITES.md).
 
-`title_credit_native_3ds.hpp` composes the port credit from the owner's runtime
-copyright lettering and stroke recipes for missing characters. Its height
-includes the y descender, outline and drop shadow. All texture modes share this
-credit at its 166x18 size; aspect mode does not stretch it.
+`title_credit_native_3ds.hpp` composes both title lines from the owner's runtime
+copyright lettering and stroke recipes for missing characters. Copyright and
+port credit share the face, outline, shadow and fade in one native 166x32
+canvas. P/s/a use explicit native strokes; neither line is fractionally resized. The y descender and shadow remain inside its bounds. All texture
+modes use this native-size overlay without aspect stretching. The stock copyright
+is retained when the replacement texture is unavailable. The composed image
+uses its own uploaded pixels and dimensions in every mode; the older packed
+`@title_credit` port-only variant is not attached to this texture.
 
 `native_ui_3ds.inc.cpp` belongs to the existing bottom-UI texture owner. It
 prepares hand-authored Modified variants and separate bilinear Scaled variants.

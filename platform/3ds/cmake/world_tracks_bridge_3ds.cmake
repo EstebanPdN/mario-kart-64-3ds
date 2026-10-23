@@ -37,6 +37,20 @@
     if(SPAGHETTIKART_3DS_TRACK_TEXT STREQUAL SPAGHETTIKART_3DS_TRACK_DECL_TEXT)
         message(FATAL_ERROR "The upstream Track collision-reset call insertion point changed")
     endif()
+    if(MK64_3DS_NATIVE_FULL_GAME)
+        string(PREPEND SPAGHETTIKART_3DS_TRACK_TEXT "#include \"native_program_3ds.h\"\n")
+        # Record the exact winding mutation producer, including packed-child
+        # selection. The native procedures never inspect modified gfx words.
+        string(FIND "${SPAGHETTIKART_3DS_TRACK_TEXT}" "void InvertTriangleWindingModdedInternal(" mirrorEnd)
+        string(SUBSTRING "${SPAGHETTIKART_3DS_TRACK_TEXT}" 0 ${mirrorEnd} mirrorOriginal)
+        string(REPLACE "        gModifiedGfxSet.insert(nameStr);"
+            "        gModifiedGfxSet.insert(nameStr);\n        Mk64NativeProgramSetMirror(nameStr.c_str(),shouldSwap);" mirrorChanged "${mirrorOriginal}")
+        string(REPLACE "                    shouldSwap = (strstr(name, \"packed\") != nullptr);"
+            "                    shouldSwap = (strstr(name, \"packed\") != nullptr);\n                    Mk64NativeProgramSetMirror(nameStr.c_str(),shouldSwap);" mirrorChanged "${mirrorChanged}")
+        string(REPLACE "${mirrorOriginal}" "${mirrorChanged}" SPAGHETTIKART_3DS_TRACK_TEXT "${SPAGHETTIKART_3DS_TRACK_TEXT}")
+        string(REPLACE "    gModifiedGfxSet.clear();" "    gModifiedGfxSet.clear();\n    Mk64NativeProgramResetMirrors();"
+            SPAGHETTIKART_3DS_TRACK_TEXT "${SPAGHETTIKART_3DS_TRACK_TEXT}")
+    endif()
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
     file(WRITE "${SPAGHETTIKART_3DS_TRACK_SOURCE}" "${SPAGHETTIKART_3DS_TRACK_TEXT}")
 
@@ -71,6 +85,19 @@
     if(SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT STREQUAL
        SPAGHETTIKART_3DS_LUIGI_RACEWAY_INCLUDE_TEXT)
         message(FATAL_ERROR "The upstream Luigi Raceway jumbotron copy call changed")
+    endif()
+    # Every Luigi race geometry pass is native in this experiment. The six mutable
+    # billboard images publish revisions directly, so they have no legacy
+    # texture-cache consumers to invalidate. Keep the old path for comparison.
+    if(MK64_3DS_NATIVE_LUIGI_LAB AND NOT MK64_3DS_NATIVE_COMPARE_LAB)
+        foreach(nativeJumbo 68272C 682928 682B24 682D20 682F1C 683118)
+            set(nativeInvalidate "    gSPInvalidateTexCache(gDisplayListHead++, (uintptr_t) gTexture${nativeJumbo});")
+            string(FIND "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}" "${nativeInvalidate}" nativeLocation)
+            if(nativeLocation LESS 0)
+                message(FATAL_ERROR "Native Luigi mutable image invalidation anchor changed")
+            endif()
+            string(REPLACE "${nativeInvalidate}" "" SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
+        endforeach()
     endif()
     file(WRITE "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_SOURCE}"
          "${SPAGHETTIKART_3DS_LUIGI_RACEWAY_TEXT}")
@@ -187,9 +214,25 @@ void LoadTrack() {
         SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
         "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}"
     )
+    if(MK64_3DS_NATIVE_FULL_GAME)
+        string(PREPEND SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT "extern \"C\" void Mk64NativeCourseRelease();\nextern \"C\" void Mk64NativeCourseLoad(const char*);\nextern \"C\" void Mk64GameAudio3DSBeginLoading();\nextern \"C\" void Mk64GameAudio3DSEndLoading();\n")
+        string(REPLACE "void LoadTrack() {\n    GetWorld()->GetRaceManager().Load();"
+            "void LoadTrack() {\n    struct LoadingAudioScope {\n        LoadingAudioScope() { Mk64GameAudio3DSBeginLoading(); }\n        ~LoadingAudioScope() { Mk64GameAudio3DSEndLoading(); }\n    } loadingAudio;\n    Mk64NativeCourseRelease();\n    GetWorld()->GetRaceManager().Load();"
+            SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+        string(REPLACE "        Mk64Diagnostics3DSRaceResourceBoundary(\"after-track-load\", track->ResourceName.c_str());"
+            "        Mk64NativeCourseLoad(track->ResourceName.c_str());\n        Mk64Diagnostics3DSRaceResourceBoundary(\"after-track-load\", track->ResourceName.c_str());"
+            SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+    endif()
     if(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT STREQUAL
        SPAGHETTIKART_3DS_GAME_TRACK_RELEASE_ORIGINAL)
         message(FATAL_ERROR "The upstream track-load resource boundary changed")
+    endif()
+    if(NOT MK64_3DS_NATIVE_FULL_GAME)
+        string(PREPEND SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
+            "#include \"audio_runtime_3ds.h\"\n")
+        string(REPLACE "void LoadTrack() {\n    GetWorld()->GetRaceManager().Load();"
+            "void LoadTrack() {\n    struct LoadingAudioScope {\n        LoadingAudioScope() { Mk64GameAudio3DSBeginLoading(); }\n        ~LoadingAudioScope() { Mk64GameAudio3DSEndLoading(); }\n    } loadingAudio;\n    GetWorld()->GetRaceManager().Load();"
+            SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
     endif()
     set(SPAGHETTIKART_3DS_CAMERA_CLEAN_ORIGINAL
         "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
@@ -216,6 +259,45 @@ void LoadTrack() {
     if(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT STREQUAL
        SPAGHETTIKART_3DS_CAMERA_CLEAN_ORIGINAL)
         message(FATAL_ERROR "The upstream camera cleanup boundary changed")
+    endif()
+    # The original game tested gCurrentCourseId; SpaghettiKart replaced each
+    # test with a dynamic_cast of the active track. devkitARM's type_info
+    # equality falls back to strcmp, and AI/effects/collision code issues
+    # these checks for every racer on every tick. A vtable pointer identifies
+    # the complete dynamic type, so caching one cast result per vtable is exact.
+    mk64_auto_replace(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT
+        "// clang-format off\nbool IsMarioRaceway()"
+        [=[extern "C++" {
+namespace {
+template <typename T> bool Mk64TrackIs() {
+    static std::atomic<uintptr_t> cached{ 0 };
+    const Track* track = GetWorld()->GetTrack();
+    if (track == nullptr) {
+        return false;
+    }
+    const uintptr_t vtable = *reinterpret_cast<const uintptr_t*>(track);
+    const uintptr_t entry = cached.load(std::memory_order_relaxed);
+    if ((entry & ~uintptr_t{ 1 }) == vtable) {
+        return (entry & 1u) != 0;
+    }
+    const bool match = dynamic_cast<const T*>(track) != nullptr;
+    cached.store(vtable | (match ? 1u : 0u), std::memory_order_relaxed);
+    return match;
+}
+} // namespace
+} // extern "C++"
+
+// clang-format off
+bool IsMarioRaceway()]=])
+    string(REGEX REPLACE
+        [=[bool (Is[A-Za-z]+)\(\) +{ return dynamic_cast<([A-Za-z]+)\*>\(GetWorld\(\)->GetTrack\(\)\) != nullptr; }]=]
+        [=[bool \1() { return Mk64TrackIs<\2>(); }]=]
+        SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}")
+    string(FIND "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}" "dynamic_cast<PodiumCeremony*>(GetWorld()->GetTrack())" MK64_TRACK_CAST_LEFT)
+    string(FIND "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}" "bool IsMarioRaceway() { return Mk64TrackIs<MarioRaceway>(); }" MK64_TRACK_CAST_FIRST)
+    string(FIND "${SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT}" "bool IsPodiumCeremony() { return Mk64TrackIs<PodiumCeremony>(); }" MK64_TRACK_CAST_LAST)
+    if(NOT MK64_TRACK_CAST_LEFT EQUAL -1 OR MK64_TRACK_CAST_FIRST LESS 0 OR MK64_TRACK_CAST_LAST LESS 0)
+        message(FATAL_ERROR "The upstream track identity checks changed")
     endif()
     string(APPEND SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT "\n#include \"turnpike_traffic_3ds.inc.hpp\"\n")
     mk64_auto_replace(SPAGHETTIKART_3DS_GAME_BRIDGE_TEXT

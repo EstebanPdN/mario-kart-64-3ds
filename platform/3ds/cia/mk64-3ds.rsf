@@ -31,6 +31,10 @@ AccessControlInfo:
   IdealProcessor: 0
   AffinityMask: 1
   Priority: 16
+  # Upper bound for APT_SetAppCpuTimeLimit; Old 3DS audio uses system core 1.
+  # Bits 0-6 are the percentage cap and bit 7 selects multi-thread scheduling.
+  # 0x9E capped the share at 30%, so the console refused every usable request.
+  MaxCpu: 0xD0
   HandleTableSize: 0x200
   DisableDebug: false
   CanWriteSharedPage: true
@@ -108,7 +112,7 @@ AccessControlInfo:
 
 SystemControlInfo:
   SaveDataSize: 0KB
-  RemasterVersion: 3
+  RemasterVersion: 8
   StackSize: 0x100000
   Dependency:
     ac: 0x0004013000002402

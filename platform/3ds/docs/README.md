@@ -1,4 +1,4 @@
-# Documentation — 2.0 experimental
+# Documentation — 2.0
 
 Use the document that answers the current task. This documentation describes
 the native port, including implemented behavior and named validation limits.

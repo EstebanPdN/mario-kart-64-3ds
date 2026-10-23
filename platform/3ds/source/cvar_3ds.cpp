@@ -1,14 +1,32 @@
 #include <libultraship/bridge/consolevariablebridge.h>
 
+#include <functional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace {
-std::unordered_map<std::string, int32_t> sIntegers;
-std::unordered_map<std::string, float> sFloats;
-std::unordered_map<std::string, std::string> sStrings;
-std::unordered_map<std::string, Color_RGBA8> sColors;
-std::unordered_map<std::string, Color_RGB8> sColors24;
+// Game and renderer code reads CVars by literal name many times per frame.
+// Transparent lookup hashes the C string in place; the previous std::string
+// key construction cost a heap allocation, free and newlib lock per read.
+struct NameHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view name) const noexcept {
+        return std::hash<std::string_view>{}(name);
+    }
+};
+template <typename T>
+using CVarMap = std::unordered_map<std::string, T, NameHash, std::equal_to<>>;
+
+CVarMap<int32_t> sIntegers;
+CVarMap<float> sFloats;
+CVarMap<std::string> sStrings;
+CVarMap<Color_RGBA8> sColors;
+CVarMap<Color_RGB8> sColors24;
+
+std::string_view NameOrEmpty(const char* name) {
+    return name == nullptr ? std::string_view() : std::string_view(name);
+}
 
 template <typename Map>
 void ClearPrefix(Map& map, const char* prefix) {
@@ -26,27 +44,27 @@ void ClearPrefix(Map& map, const char* prefix) {
 extern "C" {
 
 int32_t CVarGetInteger(const char* name, int32_t defaultValue) {
-    const auto it = sIntegers.find(name == nullptr ? "" : name);
+    const auto it = sIntegers.find(NameOrEmpty(name));
     return it == sIntegers.end() ? defaultValue : it->second;
 }
 
 float CVarGetFloat(const char* name, float defaultValue) {
-    const auto it = sFloats.find(name == nullptr ? "" : name);
+    const auto it = sFloats.find(NameOrEmpty(name));
     return it == sFloats.end() ? defaultValue : it->second;
 }
 
 const char* CVarGetString(const char* name, const char* defaultValue) {
-    const auto it = sStrings.find(name == nullptr ? "" : name);
+    const auto it = sStrings.find(NameOrEmpty(name));
     return it == sStrings.end() ? defaultValue : it->second.c_str();
 }
 
 Color_RGBA8 CVarGetColor(const char* name, Color_RGBA8 defaultValue) {
-    const auto it = sColors.find(name == nullptr ? "" : name);
+    const auto it = sColors.find(NameOrEmpty(name));
     return it == sColors.end() ? defaultValue : it->second;
 }
 
 Color_RGB8 CVarGetColor24(const char* name, Color_RGB8 defaultValue) {
-    const auto it = sColors24.find(name == nullptr ? "" : name);
+    const auto it = sColors24.find(NameOrEmpty(name));
     return it == sColors24.end() ? defaultValue : it->second;
 }
 
@@ -93,8 +111,10 @@ void CVarClear(const char* name) {
 
 bool CVarExists(const char* name) {
     if (name == nullptr) return false;
-    return sIntegers.count(name) != 0 || sFloats.count(name) != 0 || sStrings.count(name) != 0 ||
-           sColors.count(name) != 0 || sColors24.count(name) != 0;
+    const std::string_view key(name);
+    return sIntegers.find(key) != sIntegers.end() || sFloats.find(key) != sFloats.end() ||
+           sStrings.find(key) != sStrings.end() || sColors.find(key) != sColors.end() ||
+           sColors24.find(key) != sColors24.end();
 }
 
 void CVarClearBlock(const char* name) {

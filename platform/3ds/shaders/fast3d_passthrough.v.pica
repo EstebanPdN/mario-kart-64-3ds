@@ -7,7 +7,11 @@
 .fvec textureScale, textureClamp
 .bool nativeGeometryEnabled
 .bool nativeLightingEnabled
+.bool staticMeshEnabled
+.bool staticConstantColor
+.bool originalFogEnabled
 .fvec nativeMatrix[4], nativeAspect
+.fvec staticUv[2], staticColor, staticColorMask
 .fvec nativeLightDirection, nativeLightDiffuse, nativeLightAmbient
 
 .constf shaderConstants(1.0, 0.0, 0.00392156862745, 0.0)
@@ -27,6 +31,9 @@
 
 .proc main
     mov r4, inpos
+    mov r8, indepth
+    mov r9.xy, intex0
+    mov r9.zw, intex1.xyxy
     ifu nativeGeometryEnabled
         ; Packed w retains the exact CPU depth used by clipping/LOD/fog.
         ; Position input to the captured object matrix is homogeneous xyz1.
@@ -38,9 +45,25 @@
         ; deferred; recomputing Z/W on float24 loses far-surface separation.
         mul r4.x, nativeAspect.x, r4.x
     .end
+    ifu staticMeshEnabled
+        ; Recorded static runs carry centred object coordinates and raw RSP
+        ; texture coordinates. The rows fold the centre, X aspect, W and the
+        ; (Z-W)/2 depth row in double precision on ARM11; each tile maps its
+        ; raw coordinates with one scale/offset pair.
+        mov r5.xyz, inpos
+        mov r5.w, shaderConstants.x
+        dp4 r4.x, nativeMatrix[0], r5
+        dp4 r4.y, nativeMatrix[1], r5
+        dp4 r8.x, nativeMatrix[2], r5
+        dp4 r4.w, nativeMatrix[3], r5
+        mul r9.xy, staticUv[0].xy, intex0.xy
+        add r9.xy, staticUv[0].zw, r9.xy
+        mul r9.zw, staticUv[1].xyxy, intex0.xyxy
+        add r9.zw, staticUv[1].zwzw, r9.zw
+    .end
     dp4 r0.x, projection[0], r4
     dp4 r0.y, projection[1], r4
-    mov r0.z, indepth.x
+    mov r0.z, r8.x
     dp4 r0.w, projection[3], r4
 
     ; Let hardware CLIP at the near/far planes. Clamping each vertex instead
@@ -49,8 +72,8 @@
     ; Conversion ran on ARM11; triangles crossing w=0 are clipped on the CPU.
     mov outpos, r0
     ; Texture dimensions and tile clamps are draw state, not CPU vertex work.
-    min r6.xy, textureClamp, intex0
-    min r6.zw, textureClamp, intex1.xyxy
+    min r6.xy, textureClamp, r9.xy
+    min r6.zw, textureClamp, r9.zw
     mul r6, textureScale, r6
     ; Write complete output vectors, including finite z/w padding, as the
     ; original passthrough did. Keep all UV clamp/scale arithmetic on PICA.
@@ -62,11 +85,22 @@
     ; Perspective w is eye-space distance in the game cameras. Generate a
     ; third texture coordinate without increasing the packed vertex size.
     mov r1, shaderConstants.yyyy
-    mul r1.x, distanceFog[0].x, inpos.w
-    add r1.x, distanceFog[0].y, r1.x
-    mov r1.y, distanceFog[0].z
+    ; R samples the independent 256-value original fog ramp; G samples the
+    ; unchanged eight-value distance ramp. Preserve both policies in one read.
+    mov r1.x, distanceFog[0].z
+    mul r1.y, distanceFog[0].x, r4.w
+    add r1.y, distanceFog[0].y, r1.y
+    ifu originalFogEnabled
+        mov r1.x, intex1.x
+    .end
     mov outtc2, r1
     mov r2, incolor
+    ; Match packed colours per channel: RGB and alpha can independently
+    ; select shade or a material constant. Unused alpha remains opaque.
+    ifu staticConstantColor
+        mul r2, staticColorMask, r2
+        add r2, staticColor, r2
+    .end
     ifu nativeLightingEnabled
         add r3.xyz, -lightingConstants.xxx, r2.xyz
         mul r3.xyz, nativeLightDirection.xyz, r3.xyz

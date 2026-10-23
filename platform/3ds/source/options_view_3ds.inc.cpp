@@ -36,11 +36,19 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
                 case mk64_3ds::DisplayOption::Distance: { *label="DISTANCE"; constexpr const char* names[]={"LOW","NORMAL","HIGH"}; put(names[Mk64Settings3DSGetRenderDistance()]); break; }
                 case mk64_3ds::DisplayOption::Filter: { *label="FILTER"; constexpr const char* names[]={"NORMAL","BLUR","CRT"}; put(names[Mk64Settings3DSGetDisplayFilter()]); break; }
                 case mk64_3ds::DisplayOption::Loading: *label="LOADING SCREENS"; put(Mk64Settings3DSGetShowLoadingScreens() ? "ON" : "OFF"); break;
-                case mk64_3ds::DisplayOption::FrameLimiter: *label="FRAME LIMITER"; put(Mk64Settings3DSGetFrameLimiter() ? "30 FPS" : "60 FPS"); break;
+                case mk64_3ds::DisplayOption::FrameLimiter: *label="FRAME LIMITER";
+                    put(Mk64Settings3DSGetFrameLimit()==MK64_FRAME_LIMIT_3DS_30 ? "30 FPS" :
+                        (Mk64Settings3DSGetFrameLimit()==MK64_FRAME_LIMIT_3DS_60 ? "60 FPS" : "OFF")); break;
                 case mk64_3ds::DisplayOption::Meters: { *label="HUD METERS"; constexpr const char* names[]={"OFF","DISTANCE","SPEED","POSITION/LAP"}; put(names[Mk64Settings3DSGetHudMeters()]); break; }
                 case mk64_3ds::DisplayOption::Blur: { *label="MENU BLUR"; constexpr const char* names[]={"OFF","LIGHT","MEDIUM","STRONG"}; put(names[Mk64Settings3DSGetMenuBlur()]); break; }
                 case mk64_3ds::DisplayOption::Maps: *label="SCROLLING MAPS"; put(Mk64Settings3DSGetMenuMaps() ? "ON" : "OFF"); break;
-                case mk64_3ds::DisplayOption::Textures: *label="TEXTURES"; { constexpr const char* names[]={"ORIGINAL","SCALED","MODIFIED"}; put(names[Mk64Settings3DSGetUiTextures()]); } break;
+                case mk64_3ds::DisplayOption::Textures: *label="TEXTURE";
+                    switch (Mk64Settings3DSGetUiTextures()) {
+                        case MK64_UI_TEXTURES_3DS_ORIGINAL: put("ORIGINAL"); break;
+                        case MK64_UI_TEXTURES_3DS_MENU: put("MENU"); break;
+                        default: put("IMPROVED"); break;
+                    }
+                    break;
                 case mk64_3ds::DisplayOption::Warnings: *label="WARNING WIDGET"; put(Mk64Settings3DSGetThreatWarnings() ? "ON" : "OFF"); break;
                 case mk64_3ds::DisplayOption::Back: *label="BACK TO DISPLAY"; break;
             }
@@ -68,6 +76,7 @@ mk64_3ds::OptionIcon OptionIconForRow(OptionsTab tab, uint8_t row) {
     switch (tab) {
         case OptionsTab::Screen:
             if (mk64_3ds::DisplayOptionAt(sUi.displayAdvanced, row) == mk64_3ds::DisplayOption::Textures) return OptionIcon::Render;
+            if (mk64_3ds::DisplayOptionAt(sUi.displayAdvanced, row) == mk64_3ds::DisplayOption::Render) return OptionIcon::Dump;
             return static_cast<OptionIcon>(mk64_3ds::DisplayOptionAt(sUi.displayAdvanced, row));
         case OptionsTab::Gameplay:
             return static_cast<OptionIcon>(static_cast<unsigned>(OptionIcon::Turbo) + row);

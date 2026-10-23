@@ -1,6 +1,7 @@
 #include "auto_mode_3ds.h"
 #include "solo_modes_3ds.h"
 #include "auto_confirm_3ds.hpp"
+#include "diagnostics_3ds.h"
 #include <array>
 #include <cmath>
 #include <libultraship.h>
@@ -197,3 +198,35 @@ extern "C" bool Mk64Auto3DSCameraTick(void* rawCamera) {
     }
     return true;
 }
+
+extern "C" void Mk64Auto3DSBenchmarkTick() {
+#ifdef MK64_3DS_AUTODUMP_LAB
+    return; // The lab owns the exact three full captures per race.
+#endif
+    static bool midDumped = false, finishDumped = false;
+    if (gGamestate != RACING || gRaceState < RACE_IN_PROGRESS) {
+        midDumped = finishDumped = false;
+        return;
+    }
+#ifdef MK64_3DS_BENCHMARK_DEMO_TEST
+    // Emulator-only verification: attract demos exercise the same dump path.
+    const bool benchmarkRace = Mk64Auto3DSActive() || gDemoMode;
+    constexpr float kMidDumpSeconds = 8.0f;
+#else
+    const bool benchmarkRace = Mk64Auto3DSActive();
+    constexpr float kMidDumpSeconds = 30.0f;
+#endif
+    if (!benchmarkRace || gIsGamePaused) return;
+    const bool finished = gModeSelection == BATTLE ? gRaceState >= RACE_FINISHED
+                                                   : gLapCountByPlayerId[0] >= 3;
+    // A refused request (another dump pending) retries on the next tick.
+    if (!midDumped && !finished && gCourseTimer >= kMidDumpSeconds)
+        midDumped = Mk64Diagnostics3DSRequestBenchmarkDump();
+    if (!finishDumped && finished) finishDumped = Mk64Diagnostics3DSRequestBenchmarkDump();
+}
+
+#if defined(MK64_3DS_NATIVE_LUIGI_LAB) || defined(MK64_3DS_AUTODUMP_LAB)
+extern "C" void Mk64Auto3DSLabEnable() {
+    Mk64Auto3DSReset();sEnabled=true;
+}
+#endif

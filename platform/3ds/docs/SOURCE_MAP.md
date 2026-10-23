@@ -1,4 +1,4 @@
-# Source map — 2.0 experimental
+# Source map — 2.0
 
 The maintained implementation is under `platform/3ds`. `third_party/SpaghettiKart`
 and its nested submodules retain their pinned APIs, source layout and notices.

@@ -25,11 +25,13 @@ bool Mk64Graphics3DSResolvedNewModel(void);
 uint32_t Mk64Graphics3DSResolvedOutputWidth(void);
 bool Mk64Graphics3DSUsesIntermediatePresentation(void);
 void Mk64Graphics3DSSuppressNextPresentation(bool suppress);
+bool Mk64Graphics3DSSkipVisualPreparation(void);
 void Mk64Graphics3DSResumeAfterDiagnosticPause(void);
 void Mk64Graphics3DSSetExternalLinearBufferRange(const void* address, size_t size);
 void Mk64Graphics3DSMarkExternalLinearBuffersDirty(void);
 void Mk64Graphics3DSPollEvents(void);
 void Mk64Graphics3DSResetForTrackLoad(void);
+void Mk64Graphics3DSEvictSourceTexture(const void* address);
 bool Mk64Graphics3DSFenceTextureReuseBatch(void);
 
 #ifdef __cplusplus

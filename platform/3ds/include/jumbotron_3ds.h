@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,6 +13,13 @@ extern "C" {
 void Mk64Jumbotron3DSUpdate(uint16_t* topLeft, uint16_t* topRight,
                            uint16_t* middleLeft, uint16_t* middleRight,
                            uint16_t* bottomLeft, uint16_t* bottomRight);
+typedef struct Mk64Jumbotron3DSState {
+    const uint16_t* tiles[6];
+    uint64_t generation;
+} Mk64Jumbotron3DSState;
+// Main-thread publication after all six CPU tiles have been updated. Consumers
+// retain their own source leases and fence GPU ownership before uploading.
+bool Mk64Jumbotron3DSGetState(Mk64Jumbotron3DSState* state);
 
 #ifdef __cplusplus
 }

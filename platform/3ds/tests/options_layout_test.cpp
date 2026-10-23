@@ -26,7 +26,10 @@ int main() {
 
     assert(DisplayOptionAt(false, 0) == DisplayOption::Profile);
     assert(DisplayOptionAt(false, kAdvancedDisplayRow) == DisplayOption::Advanced);
-    assert(DisplayOptionAt(true, 6) == DisplayOption::Textures && DisplayOptionAt(true, 7) == DisplayOption::Back);
+    assert(DisplayOptionAt(false, 3) == DisplayOption::Textures);
+    assert(DisplayOptionAt(false, 4) == DisplayOption::Render);
+    assert(DisplayOptionAt(false, 6) == DisplayOption::FrameLimiter);
+    assert(DisplayOptionAt(true, 6) == DisplayOption::Back);
     assert(RandomCupSubtitle(true, 0, 0)[0] == '\0');
     assert(RandomCupSubtitle(false, 0, 0)[0] != '\0');
     // Every black backing pixel participates in the same image as its glyphs.

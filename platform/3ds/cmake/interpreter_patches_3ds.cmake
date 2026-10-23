@@ -440,6 +440,10 @@ static void Mk64RetainTextureOwners3DS(uint32_t textureId,
 
 static void Mk64ReleaseTextureOwner3DS(uint32_t textureId) {
     if (textureId < sMk64TextureOwners3DS.size()) {
+        // A resource deleter can re-enter TextureCacheDelete. Detach all
+        // identity fields before invoking it, so a recycled cache node cannot
+        // still appear to own the old image and be erased by that callback.
+        auto released = std::move(sMk64TextureOwners3DS[textureId]);
         sMk64TextureOwners3DS[textureId] = {};
         sMk64TextureFrameUses3DS[textureId] = 0;
     }
@@ -454,7 +458,9 @@ static bool Mk64TextureOwnerReferences3DS(uint32_t textureId,
 }
 
 static void Mk64ResetTextureOwners3DS() {
-    for (auto& owners : sMk64TextureOwners3DS) owners = {};
+    for (uint32_t id = 0; id < sMk64TextureOwners3DS.size(); ++id) {
+        Mk64ReleaseTextureOwner3DS(id);
+    }
     for (auto& resource : sMk64PaletteOwners3DS) {
         resource.reset();
     }
@@ -483,27 +489,17 @@ void Interpreter::TextureCacheClear() {]=]
            SPAGHETTIKART_3DS_TEXTURE_FREE_IDS_ORIGINAL)
             message(FATAL_ERROR "The Fast3D free-texture-ID reserve point changed")
         endif()
+        # Clear map/LRU identities before releasing any owner. A last-owner
+        # deleter can call TextureCacheDelete; releasing while iterating the
+        # live map would invalidate the loop and recycle the same ID twice.
         set(SPAGHETTIKART_3DS_TEXTURE_OWNER_CLEAR_ORIGINAL "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
-        string(REPLACE
-            [=[    for (const auto& entry : mTextureCache.map) {
-        mTextureCache.free_texture_ids.push_back(entry.second.texture_id);
-    }]=]
-            [=[    for (const auto& entry : mTextureCache.map) {
-        mTextureCache.free_texture_ids.push_back(entry.second.texture_id);
-#if defined(__3DS__)
-        Mk64ReleaseTextureOwner3DS(entry.second.texture_id);
-#endif
-    }]=]
-            SPAGHETTIKART_3DS_INTERPRETER_TEXT
-            "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}"
-        )
-        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_CLEAR_ORIGINAL)
-            message(FATAL_ERROR "The Fast3D texture-owner clear point changed")
-        endif()
         string(REPLACE
             "    mTextureCache.map.clear();\n    mTextureCache.lru.clear();"
             "    mTextureCache.map.clear();\n    mTextureCache.lru.clear();\n#if defined(__3DS__)\n    mMaskedTextures.clear();\n    Mk64ResetTextureOwners3DS();\n#endif"
             SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+        if(SPAGHETTIKART_3DS_INTERPRETER_TEXT STREQUAL SPAGHETTIKART_3DS_TEXTURE_OWNER_CLEAR_ORIGINAL)
+            message(FATAL_ERROR "The Fast3D texture-owner clear point changed")
+        endif()
         set(SPAGHETTIKART_3DS_TEXTURE_CACHE_LOOKUP_ORIGINAL
             "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
         string(REPLACE
@@ -1499,4 +1495,72 @@ void Interpreter::UnregisterBlendedTexture(const char* name) {
             message(FATAL_ERROR "The Fast3D combiner key construction point changed")
         endif()
         include(platform/3ds/cmake/texture_owner_scan_3ds.cmake)
+        include(platform/3ds/cmake/palette_bounds_3ds.cmake)
+        include(platform/3ds/cmake/native_course_lab_3ds.cmake)
+# Shared native images retain their GPU tiling all the way to the backend.
+string(REPLACE "#include \"fast/types.h\""
+    "#include \"fast/types.h\"\n#include \"native_texture_storage_3ds.hpp\""
+    SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+set(MK64_SHARED_IMPORT_BEFORE "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+string(REPLACE
+    [=[        mRapi->UploadTexture(addr, width, height);
+        return;
+    }
+
+    uint32_t fullImageLineSizeBytes]=]
+    [=[        if(resource && (resource->Flags & ::mk64_3ds::kNativeGpuTextureFlag)) {
+            const auto offset=reinterpret_cast<uintptr_t>(addr)-reinterpret_cast<uintptr_t>(resource->ImageData);
+            static_cast<Fast::GfxRenderingAPICitro3D*>(mRapi)->UploadNativeKartTexture(resource->ImageData,width,height,
+                offset,4*width,4*width,static_cast<size_t>(width)*height*4);
+        } else mRapi->UploadTexture(addr, width, height);
+        return;
+    }
+
+    uint32_t fullImageLineSizeBytes]=]
+    SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+# Skip CPU row packing for the native-layout case; the backend copies tiles.
+string(REPLACE
+    "    for (uint32_t i = 0, j = 0; i < safeLoadedBytes; i += safeLineSizeBytes, j += safeFullImageLineSizeBytes) {"
+    "    if (!(resource->Flags & ::mk64_3ds::kNativeGpuTextureFlag)) for (uint32_t i = 0, j = 0; i < safeLoadedBytes; i += safeLineSizeBytes, j += safeFullImageLineSizeBytes) {"
+    SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+string(REPLACE
+    "    mRapi->UploadTexture(mTexUploadBuffer, uploadWidth, uploadHeight);"
+    [=[    if(resource && (resource->Flags & ::mk64_3ds::kNativeGpuTextureFlag)) {
+        const auto offset=reinterpret_cast<uintptr_t>(addr)-reinterpret_cast<uintptr_t>(resource->ImageData);
+        static_cast<Fast::GfxRenderingAPICitro3D*>(mRapi)->UploadNativeKartTexture(resource->ImageData,uploadWidth,uploadHeight,
+            offset,safeLineSizeBytes,safeFullImageLineSizeBytes,safeLoadedBytes);
+    } else mRapi->UploadTexture(mTexUploadBuffer, uploadWidth, uploadHeight);]=]
+    SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+if(MK64_SHARED_IMPORT_BEFORE STREQUAL SPAGHETTIKART_3DS_INTERPRETER_TEXT)
+    message(FATAL_ERROR "Shared native image import point changed")
+endif()
+
+        if(MK64_3DS_NATIVE_DYNAMIC)
+            string(FIND "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}" "    g_exec_stack.start((F3DGfx*)commands);" nativeReplayBegin)
+            string(FIND "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}" "\n    Flush();\n    if(Mk64NativeKartEndReplay)" nativeReplayEnd)
+            if(nativeReplayBegin LESS 0 OR nativeReplayEnd LESS nativeReplayBegin)
+                message(FATAL_ERROR "Native direct replay integration bounds changed")
+            endif()
+            math(EXPR nativeReplayLength "${nativeReplayEnd}-${nativeReplayBegin}")
+            string(SUBSTRING "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}" ${nativeReplayBegin} ${nativeReplayLength} nativeLegacyReplay)
+            string(REPLACE "${nativeLegacyReplay}" "    Mk64NativeFrameReplay(this,commands);\n"
+                SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+            string(FIND "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}" "static void gfx_step() {" nativeStepBegin)
+            string(FIND "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}" "void Interpreter::SpReset() {" nativeStepEnd)
+            if(nativeStepBegin LESS 0 OR nativeStepEnd LESS nativeStepBegin)
+                message(FATAL_ERROR "Legacy step removal bounds changed")
+            endif()
+            math(EXPR nativeStepLength "${nativeStepEnd}-${nativeStepBegin}")
+            string(SUBSTRING "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}" ${nativeStepBegin} ${nativeStepLength} nativeLegacyStep)
+            string(REPLACE "${nativeLegacyStep}" "" SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+            string(REPLACE "GfxExecStack g_exec_stack = {};" "" SPAGHETTIKART_3DS_INTERPRETER_TEXT "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")
+            string(PREPEND SPAGHETTIKART_3DS_INTERPRETER_TEXT "#include \"native_dynamic_3ds.h\"\n")
+        endif()
+        # Last: its anchors include text from every earlier interpreter patch.
+        # The native dynamic build replaces the command loop it hooks.
+        if(NOT MK64_3DS_NATIVE_DYNAMIC)
+            include(platform/3ds/cmake/static_runs_3ds.cmake)
+        endif()
+        include(platform/3ds/cmake/texture_image_cache_3ds.cmake)
+
         file(WRITE "${SPAGHETTIKART_3DS_INTERPRETER_SOURCE}" "${SPAGHETTIKART_3DS_INTERPRETER_TEXT}")

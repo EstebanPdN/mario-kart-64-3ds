@@ -1,76 +1,87 @@
 # Changelog
 
-## v2.0-E1
+## v2.0
 
-Experimental 2.0 candidate.
+Based on the 2.0-E6 candidate. Cumulative changes since v1.5.
 
-- Organize platform responsibilities, generated artwork, documentation and asset-free host checks.
-- Retain UI image/palette source bytes through decoding with scoped resource leases.
-- Preserve recoverable settings when FAT replacement or restoration fails.
-- Add Original, bilinearly Scaled and hand-authored Modified UI texture modes.
-- Redraw all twenty course/battle maps at three native sizes with continuous smooth curves.
-- Recompose the port credit from native lettering with a complete y descender and shadow.
-- Author native-size HUD labels, lap counters and timer cells; retain original art where replacements are unfinished.
-- Add original square per-option pixel icons with balanced padding and native bevel/blinking selection; preserve native hint lettering.
-- Rebuild compact Display/Advanced, Gameplay and Pause menus with shared touch geometry and clear selection.
-- Generate native-size menu hints in Python with integrated animated backings; remove the redundant All Random caption.
-- Keep the original-resolution background for Light blur and retain bounded cached stronger treatments.
-- Allow diagnostic SELECT and its expanded chord during AUTO without unlocking driving inputs.
-- Document runtime ownership, configuration, development and validation routes.
-- Add Solo VS/Battle with CPUs, AUTO spectator play and four-course random cups.
-- Add Modern Logic item/CPU rules and held-B reverse, while retaining original reverse when disabled.
-- Add held-X rear view, SELECT camera distance, full Y HUD cycling and held C-Stick Turbo with a 2x–5x slider. ZL/ZR are unassigned.
-- Add exclusive SELECT dump/overlay bindings and an always-available L+R+SELECT expanded dump. The live lower-screen overlay preserves racing inputs.
-- Add Performance/Quality/Custom profiles, a dedicated Advanced display menu and explicit 30/60 FPS presentation targets.
-- Add scrolling course maps with cached light blur, a centered cursor and consistent pause/menu typography without row separators.
-- Preserve EstebanPdN's five HUD layouts, title/HOME branding and Stable/Experimental updater. Add the title credit "Ported by EstebanPdN".
-- Integrate resource ownership, memory/cache recovery, GPU fence/combiner/depth/alpha, Lakitu/jumbotron, race/result/fade and positional audio fixes.
-- Correct AUTO/CPU inventory, targeting, collisions, Battle navigation/standings, spectator feedback and race time accounting across pauses and Turbo.
-- Preserve E14-local used-texture material reuse, verified audio CPU-reservation restoration and startup trace suspension behavior.
+### Artwork and presentation
 
-Adapted features and corrections credit Epic0522's MarioKart64-3DSPort-Complete.
-The original 30 Hz simulation is retained. Native builds and host regressions
-are verified separately from physical-console stability, visual alignment and
-matched performance measurements, which remain pending.
+- Add Original, Menu and Improved texture modes, with the approved menu artwork and Improved kart texture companion included in both the CIA and full-game 3DSX.
+- Redraw all twenty course and battle maps at three native sizes, with smoother continuous outlines.
+- Add native-size HUD labels, lap counters and timer cells, improved portraits, and animated menu hints with integrated backings.
+- Add per-option pixel icons, native-style bevels and blinking selection highlights.
+- Rebuild the Display, Advanced, Gameplay and Pause menus with shared touch geometry and consistent typography.
+- Add Performance, Quality and Custom display profiles, a touch-adjustable volume slider, and clearer render and presentation controls.
+- Add HUD distance, speed, position and lap displays, scrolling course maps, a centered map cursor and an animated item-box selection cursor.
+- Preserve the original-resolution background for Light blur and cache stronger blur treatments within a bounded budget.
+- Improve standings, finish transitions, spectator feedback and the layout of results across both screens.
+- Match the Nintendo copyright and port credit font, colors, outline and shadow. Keep Nintendo on the first line and the smaller port credit below it.
+- Restore the Nintendo title copyright in Menu and Improved modes, and correct the P/s/a credit lettering on a native pixel grid.
+- Retain the original HOME Menu banner, icon, sound and all five HUD layouts.
 
-## v1.6-E7
+### Modes, controls and optional gameplay changes
 
-Changes since v1.5.
+- Add Solo VS with one player and seven CPU opponents.
+- Add Solo Battle with one player and three CPU opponents, navigation for all four original arenas, and spectator play after elimination.
+- Add random cups containing four different courses, with driver and difficulty shortcuts.
+- Add AUTO driving and spectator play, camera choices and automatic confirmation of results and ceremonies.
+- Add optional Modern Logic for CPU item-box collection, inventory, rank-based roulette, Star and mushroom use, terrain handling, collisions, targeting, stuck recovery, road-following shells and protection after a hit.
+- Add held-B reverse with Modern Logic, held-X rear view and configurable SELECT camera distance.
+- Add held C-Stick Turbo with an adjustable 2x–5x multiplier; preserve Y cycling through all five HUD layouts.
+- Add a threat warning widget and improve CPU behavior, Battle standings and race results.
+- Correct race-time accounting across pauses and Turbo, CPU finishing behavior and manual result controls when AUTO is disabled.
 
-- Default to 1.0 render scale on both Old and New 3DS.
-- Clean the actual HUD buffer allocations instead of the gaps between them.
-- Move texture scaling and tile clamping to the GPU vertex shader.
-- Service HOME before starting game logic and audio rendering work.
-- Stop the audio producer and release its shared-core reservation during suspension.
-- Restart audio and reset presentation timing after returning from HOME or sleep.
-- Suspend diagnostic input polling while the application is inactive.
-- Bound shutdown waits and prevent live worker stacks from being freed on timeout.
-- Record startup stages, shared-core reservations, vertex packing and HUD cache costs.
-- Fix Old 3DS startup aborts caused by mandatory archive RAM residency.
-- Keep optional interpolation storage out of the ordinary archive heap.
-- Load compressed resources in small blocks to tolerate heap fragmentation.
-- Distinguish memory limits from archive read errors in startup diagnostics.
-- Show a small animated Lakitu flag on black screens while the game starts.
-- Cache the 32 loading frames locally and release their memory before gameplay.
-- Show instantaneous FPS from consecutive presented images in the corner counter.
-- Add a touch-adjustable volume slider matching the render slider.
-- Allow adaptive interpolation on Old and New 3DS in both supported resolutions.
-- Skip interpolation recording when CPU or GPU work exceeds its budget.
-- Batch O2R startup reads while retaining compact RAM residency and CRC checks.
-- Avoid repeated black-screen redraws during course loading.
+### Rendering and resource use
+
+- Fix distance fog hiding track textures on Old 3DS with Low and Normal draw distance. Preserve the distance-off path and the E6 correction to fog-ramp orientation.
+- Cache hot decoded textures and resource wrappers to avoid repeated reads, decompression and lookup work.
+- Route ordinary texture-image commands through the texture lookup cache and retain texture and palette owners for the lifetime of submitted work.
+- Reuse eligible static geometry, matrix and vertex state, including ordinary single-effective-texture fog materials in Choco Mountain and Toad's Turnpike.
+- Separate effective sampler use from legacy vertex-layout flags, keep complex dual-texture fog on its guarded compatibility path, and avoid redundant fog-state writes when only unused alpha changes.
+- Improve repeated-corner vertex-cache hashing, bypass the cache for very small draws and sample packing timers instead of reading the clock on every draw.
+- Skip eligible kart visual preparation when a presentation frame is omitted, while retaining game simulation updates.
+- Restore early face rejection, avoid state changes for rejected triangles, and add bounded matrix and vertex-depth reuse.
+- Move eligible texture scaling, tile clamping, vertex transforms and directional lighting to the GPU, with compatibility paths for unsupported cases.
+- Correct UV, combiner, alpha, depth, Lakitu, jumbotron and third/fourth viewport kart texture-buffer handling.
+- Fence GPU work before buffer reuse, resource release and texture-mode changes; clear saved renderer state at scene and mode boundaries.
+- Add bounded Improved artwork mirrors, decoded pages and inactive-mode metadata instead of repeatedly loading and decoding the same artwork.
+- Release replaceable stream-cache memory before archive residency admission, and keep optional artwork allocation failures from evicting a resident game archive.
+- Keep archive streaming available when Old 3DS cannot admit full RAM residency, use smaller allocation blocks and distinguish memory limits from read errors.
+- Batch startup archive reads with CRC validation and retain a reserve for game allocations.
+
+### Audio, startup and reliability
+
+- Restore the Old 3DS shared-core audio reservation and retain a synchronized fallback when the worker is unavailable.
+- Wake audio from NDSP progress, validate DMA ranges and cache interval lookups.
+- Refill audio during long render work and synchronize before game logic resumes.
+- Service HOME before starting new logic and audio work, suspend the producer and shared-core reservation while inactive, and reset presentation timing on resume.
+- Bound shutdown waits and preserve live worker stacks until they can be released safely.
+- Remove repeated per-frame settings allocation and reduce timer overhead.
+- Preserve UI image and palette source bytes through decoding with scoped resource leases.
+- Preserve recoverable settings if replacement or restoration fails.
 - Combine initial EEPROM repairs into one atomic save and skip unchanged writes.
-- Refill audio throughout long rendering work, with a barrier before game logic resumes.
-- Restore early CPU face rejection before texture processing and vertex submission.
-- Avoid renderer state changes for rejected triangles and cache copies for small vertex loads.
-- Add eligible GPU vertex transforms and directional lighting with CPU compatibility paths.
-- Add bounded matrix and vertex-depth reuse, faster command dispatch, and diagnostic counters.
-- Fix the red lower screen during the Nintendo logo and synchronize the white title transition.
-- Remove menu labels and race HUD text behind the Update changelog.
-- Fix updater certificates, offline notes, flicker, backgrounds, and page navigation.
-- Add Update below Close Options with the native Mario Kart menu font.
-- Add Stable and Experimental channels with verified CIA/3DSX updates and installation confirmation.
+- Add an animated loading flag, cache its frames locally, release that cache before gameplay and avoid redundant black-screen redraws during loading.
+- Correct the lower-screen Nintendo/title transitions and keep menu or HUD text from appearing behind the update changelog.
+- Extend adaptive presentation to both console models and supported resolutions, with budget checks that skip interpolation recording when work exceeds its allowance.
 
-The game simulation remains at 30 Hz; adaptive presentation can reach the 60 Hz display limit when workload permits. E7 performance and compatibility still require physical-console validation.
+### Updates, installation and diagnostics
+
+- Add built-in Stable and Experimental update channels for CIA and 3DSX, with installation confirmation and preservation of game data, saves and settings.
+- Fix updater certificates, offline notes, flicker, backgrounds, page navigation and release-version comparison for 2.0.
+- Add portable MK64 Extractor packages for Windows x64, macOS Apple Silicon and Linux x64. Create your own game archive on a computer from your legally obtained USA ROM.
+- Keep on-device ROM validation and extraction available; no ROM or extracted game archive is included in the download.
+- Add configurable SELECT dump or live-overlay bindings and an always-available L+R+SELECT expanded dump, including during AUTO.
+- Expand diagnostic state, RAM, resource history, integrity checks and renderer/audio timing. Exclude export pauses from normal timing epochs and separate preparation work from overlapping audio/render measurements.
+- Keep automatic laboratory captures disabled in this normal-play build.
+- Organize platform code, generated artwork and documentation, and add asset-free sanitizer regressions and reproducible dependency compatibility patches.
+
+### Credits and validation
+
+Solo VS/Battle, AUTO, random cups, Modern Logic, control and HUD ideas, and runtime corrections are adapted from [Epic0522's MarioKart64-3DSPort-Complete](https://github.com/Epic0522/MarioKart64-3DSPort-Complete). [Epic0522's Super Mario 64 3DS Port Ultimate](https://github.com/Epic0522/Super-Mario-64-3ds-port---Ultimate) also provided 3DS implementation and optimization references. These changes were integrated with this port's artwork, five HUD layouts, controls, branding and updater.
+
+The port is based on [Harbour Masters' SpaghettiKart](https://github.com/HarbourMasters/SpaghettiKart), the N64 decompilation community and the Nintendo 3DS homebrew libraries. The updater retains its Legend of Doom 3DS attribution and component licenses.
+
+The game simulation remains at 30 Hz. Adaptive presentation can use additional display frames when the workload permits; this is not a guarantee of sustained 30 or 60 FPS on a physical console. Host checks, target compilation and emulator checks do not establish physical Old/New 3DS frame rates, pixel accuracy or long-run stability.
 
 ## v1.5
 

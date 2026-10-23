@@ -14,6 +14,8 @@ void Mk64Audio3DSSetPaused(bool paused);
 uint32_t Mk64Audio3DSBufferedFrames(void);
 uint32_t Mk64Audio3DSQueuedCount(void);
 uint32_t Mk64Audio3DSDroppedCount(void);
+void Mk64Audio3DSWaitForRefill(uint64_t timeoutNs);
+void Mk64Audio3DSWakeRefill(void);
 int16_t* Mk64Audio3DSAcquireStereoS16(size_t frameCount, uint32_t* bufferToken);
 void Mk64Audio3DSReleaseStereoS16(uint32_t bufferToken);
 bool Mk64Audio3DSCommitStereoS16(uint32_t bufferToken, size_t frameCount);

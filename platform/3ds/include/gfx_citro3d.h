@@ -9,13 +9,42 @@
 
 #include "fast/backends/gfx_rendering_api.h"
 #include "native_geometry_3ds.hpp"
+#include "static_runs_3ds.hpp"
 #include "native_lighting_3ds.h"
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+namespace mk64_3ds::native_scene { class GpuScene; class GpuSprites; struct Vertex; struct SpriteStyle; }
+#endif
 
 namespace Fast {
 
 struct CompiledTevOperation3DS {
     uint8_t function = 0;
     std::array<uint8_t, 3> source = {};
+};
+
+// One recorded static geometry run (static_runs_3ds.hpp), drawn with the
+// material the interpreter just selected. `materialVertex` is a single vertex
+// in the interpreter's packed layout carrying the constant combiner inputs and
+// tile clamps; `varyingInput` is the combiner input fed by the shade colour.
+struct StaticRunDraw3DS {
+    const void* vertices = nullptr;
+    const uint16_t* indices = nullptr;
+    uint16_t indexCount = 0;
+    uint16_t vertexCount = 0;
+    mk64_3ds::StaticRunTransform fogTransform{};
+    float center[3] = {};
+    bool fogFromVertex = true;
+    const float* materialVertex = nullptr;
+    int varyingInput = 0;
+    // Per-channel shade mask and constant terms in packed (0-255) units.
+    bool constantColor = false;
+    float color[4] = {};
+    float colorMask[4] = {};
+    // Per texture: raw-coordinate scale (u, v) and offset (u, v).
+    float uvAffine[2][4] = {};
+    // Object (centred) to clip rows: X with aspect, Y, (Z-W)/2 depth, W.
+    float rows[4][4] = {};
+    mk64_3ds::NativeGeometryCull cull = mk64_3ds::NativeGeometryCull::None;
 };
 
 struct ShaderProgram {
@@ -28,6 +57,10 @@ struct ShaderProgram {
     uint8_t fogOffset = 0;
     uint8_t grayscaleOffset = 0;
     bool usedTextures[6] = {};
+    // Physical samplers actually read by enabled compiled TEV operations,
+    // after the RDP's second-cycle TEXEL0/TEXEL1 swap. usedTextures above is
+    // the legacy interpreter coordinate-layout contract and stays unchanged.
+    bool sampledTextures[2] = {};
     bool clamp[2][2] = {};
     bool alpha = false;
     bool fog = false;
@@ -49,6 +82,7 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     ~GfxRenderingAPICitro3D() override;
 
     bool IsInitialized() const;
+    void SetPresentationUncapped(bool uncapped);
     void* GetTopRenderTarget() const;
     const char* GetName() override;
     int GetMaxTextureSize() override;
@@ -62,6 +96,8 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     uint32_t NewTexture() override;
     void SelectTexture(int tile, uint32_t textureId) override;
     void UploadTexture(const uint8_t* rgba32Buf, uint32_t width, uint32_t height) override;
+    void UploadNativeKartTexture(const uint8_t* source, uint32_t width, uint32_t height,
+        size_t logicalOffset, size_t lineBytes, size_t sourceStep, size_t loadedBytes);
     void SetSamplerParameters(int sampler, bool linearFilter, uint32_t cms, uint32_t cmt) override;
     void SetDepthTestAndMask(bool depthTest, bool zUpdate) override;
     void SetZmodeDecal(bool decal) override;
@@ -69,6 +105,7 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void SetScissor(int x, int y, int width, int height) override;
     void SetUseAlpha(bool useAlpha) override;
     void DrawTriangles(float bufVbo[], size_t bufVboLen, size_t bufVboNumTris) override;
+    void DrawStaticRun(const StaticRunDraw3DS& draw);
     bool NativeGeometryMatches(const mk64_3ds::NativeGeometryDraw* state) const;
     void SetNativeGeometry(const mk64_3ds::NativeGeometryDraw* state);
     bool NativeLightingMatches(const mk64_3ds::NativeLightingState* state) const;
@@ -102,6 +139,8 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void GetDebugStats(size_t* textureSlots, size_t* initializedTextures, size_t* textureBytes,
                        size_t* shaderPrograms, size_t* clipScratchBytes) const;
     uint32_t GetFrameBeginWaitMicroseconds() const;
+    uint32_t GetPendingPresentWaitMicroseconds() const;
+    float GetActiveProcessingMilliseconds() const;
     void ResetPresentedFps();
     float GetPresentedFps2Seconds() const;
     float GetPresentedFps10Seconds() const;
@@ -117,8 +156,34 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void* PrepareForExternalDraw();
     void SetExternalLinearBufferRange(const void* address, size_t size);
     void MarkExternalLinearBuffersDirty();
+#ifdef MK64_3DS_NATIVE_KART_LAB
+    void BeginNativeSpriteBatch(mk64_3ds::native_scene::GpuSprites&);
+    void EndNativeSpriteBatch();
+    void DrawNativeSprite(mk64_3ds::native_scene::GpuSprites&,uint32_t key,
+        const mk64_3ds::native_scene::Vertex*,const float matrix[16],float horizontalScale,
+        const mk64_3ds::native_scene::SpriteStyle&);
+    bool CaptureNativeFrame(const char* path);
+#ifdef MK64_3DS_NATIVE_PARTICLE_COMPARE_LAB
+    size_t NativeComparisonFrameBytes() const;
+    // Caller owns a 128-byte-aligned linear buffer until this synchronous
+    // transfer returns. Invoke only after EndFrame, outside timed submission.
+    bool CaptureNativeComparisonPixels(void* pixels,size_t bytes);
+#endif
+#endif
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+    void BeginNativeSceneBatch(mk64_3ds::native_scene::GpuScene&);
+    void EndNativeSceneBatch();
+    void DrawNativeCourse(mk64_3ds::native_scene::GpuScene& scene,uint32_t view,
+                          const float matrix[16],float horizontalScale);
+#endif
 
   private:
+#ifdef MK64_3DS_NATIVE_LUIGI_LAB
+    mk64_3ds::native_scene::GpuScene* mNativeSceneBatch=nullptr;
+#endif
+#ifdef MK64_3DS_NATIVE_KART_LAB
+    mk64_3ds::native_scene::GpuSprites* mNativeSpriteBatch=nullptr;
+#endif
     void FlushPackedVertices();
     bool EnsurePresentationResources();
     void UploadProjectionForActiveTarget(bool viewportSlide = true);
@@ -127,6 +192,13 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void RestoreFast3DState();
     void ApplyDepthMapping();
     void ApplyNativeVertexState();
+    bool DrawTargetVisible() const;
+    std::array<float, 4> SelectedTextureScale(const ShaderProgram* program, float coverScale) const;
+    void ApplyCombinerState(ShaderProgram* program, int varyingInput,
+                            const std::array<std::array<float, 4>, 7>& constants,
+                            const std::array<float, 4>& grayscaleColor, bool reachesDistanceFog,
+                            const std::array<float, 4>& fogColor = {});
+    void BindPackedVertices();
     float GetPresentedFps(uint64_t windowMilliseconds) const;
 
     struct Impl;

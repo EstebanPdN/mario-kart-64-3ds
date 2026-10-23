@@ -188,7 +188,8 @@ void render_pause_menu(MenuItem* arg0) {
     endif()
     set(SPAGHETTIKART_3DS_MENU_ITEMS_EXISTING "")
     string(REPLACE "void render_menus(MenuItem* arg0) {"
-        [=[extern bool Mk64BottomUI3DSIsUpdateOpen(void) __attribute__((weak));
+        [=[extern bool Mk64BottomUI3DSHasTitleCopyright(void) __attribute__((weak));
+extern bool Mk64BottomUI3DSIsUpdateOpen(void) __attribute__((weak));
 void render_menus(MenuItem* arg0) {
     // Keep the original background/filter, but omit every foreground menu item.
     // In a race this removes the pause title without replacing the 3D scene.
@@ -199,6 +200,14 @@ void render_menus(MenuItem* arg0) {
         arg0->type != MENU_ITEM_UI_START_BACKGROUND) return;
     if ((gMenuSelection == DATA_MENU || gMenuSelection == COURSE_DATA_MENU) && arg0->type != MAIN_MENU_BACKGROUND) return;]=]
         SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    set(MK64_TITLE_COPYRIGHT_BEFORE "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    string(REPLACE
+        "                gDisplayListHead =\n                    render_menu_textures(gDisplayListHead, seg2_copyright_1996_texture, arg0->column, arg0->row);"
+        "                if (Mk64BottomUI3DSHasTitleCopyright == NULL || !Mk64BottomUI3DSHasTitleCopyright()) {\n                    gDisplayListHead = render_menu_textures(gDisplayListHead, seg2_copyright_1996_texture, arg0->column, arg0->row);\n                }"
+        SPAGHETTIKART_3DS_MENU_ITEMS_TEXT "${SPAGHETTIKART_3DS_MENU_ITEMS_TEXT}")
+    if(SPAGHETTIKART_3DS_MENU_ITEMS_TEXT STREQUAL MK64_TITLE_COPYRIGHT_BEFORE)
+        message(FATAL_ERROR "The upstream title copyright draw changed")
+    endif()
     string(REPLACE
         "            case COURSE_DATA_MENU:\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
         "            case COURSE_DATA_MENU:\n                add_menu_item(MAIN_MENU_BACKGROUND, 0, 0, MENU_ITEM_PRIORITY_2);\n                add_menu_item(MENU_ITEM_DATA_COURSE_IMAGE"
@@ -338,6 +347,10 @@ extern bool Mk64BottomUI3DSIsUpdateOpen(void) __attribute__((weak));
     if(SPAGHETTIKART_3DS_HUD_TEXT STREQUAL SPAGHETTIKART_3DS_HUD_UPDATE_TEXT)
         message(FATAL_ERROR "The upstream updater HUD render points changed")
     endif()
+    if(MK64_3DS_NATIVE_PARTICLE_LAB)
+        include(platform/3ds/cmake/native_particle_game_3ds.cmake)
+        mk64_convert_native_particle_producers()
+    endif()
     set(SPAGHETTIKART_3DS_HUD_EXISTING "")
     if(EXISTS "${SPAGHETTIKART_3DS_HUD_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_HUD_SOURCE}" SPAGHETTIKART_3DS_HUD_EXISTING)
@@ -429,6 +442,8 @@ extern bool Mk64BottomUI3DSIsUpdateOpen(void) __attribute__((weak));
     string(REPLACE "${MK64_CLOCK_PAUSE_ANCHOR}"
         "    Mk64RaceClock3DSObserve();\n    if (gIsGamePaused == false) {\n        for (size_t i = 0; i < gTickLogic; i++) {"
         SPAGHETTIKART_3DS_MAIN_TEXT "${SPAGHETTIKART_3DS_MAIN_TEXT}")
+    include(platform/3ds/cmake/native_kart_main_3ds.cmake)
+    include(platform/3ds/cmake/game_preparation_3ds.cmake)
     if(EXISTS "${SPAGHETTIKART_3DS_MAIN_SOURCE}")
         file(READ "${SPAGHETTIKART_3DS_MAIN_SOURCE}" SPAGHETTIKART_3DS_MAIN_EXISTING)
     endif()

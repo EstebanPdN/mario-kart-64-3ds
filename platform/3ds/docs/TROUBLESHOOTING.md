@@ -1,4 +1,4 @@
-# Troubleshooting — 2.0 experimental
+# Troubleshooting — 2.0
 
 ## Startup and data
 

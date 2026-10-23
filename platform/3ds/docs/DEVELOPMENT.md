@@ -1,6 +1,6 @@
 # Developing the native 3DS port
 
-This guide describes the 2.0 experimental line. Start from a recursive clone;
+This guide describes version 2.0, based on the E6 candidate. Start from a recursive clone;
 the pinned submodules are build inputs, not optional reference downloads.
 
 ## Build prerequisites
@@ -16,7 +16,7 @@ cd mario-kart-64-3ds
 ./platform/3ds/build.sh
 ```
 
-The script verifies/applies the checked-in Torch compatibility patch. Do not
+The script verifies/applies the checked-in libultraship and Torch compatibility patches. Do not
 manually reset that submodule during a build. It builds the updater's pinned
 curl/mbedTLS/Jansson dependencies when they are absent, configures the complete
 engine and writes results under `build-3ds/game/`. Internet access is needed
@@ -63,6 +63,7 @@ geometry contract, including touch coordinates.
 Use one asset-free host command before a target build:
 
 ```sh
+./platform/3ds/prepare-dependencies.sh
 python3 platform/3ds/tests/check-project.py
 python3 platform/3ds/tests/run-host-tests.py --output /tmp/mk64-host-tests
 ```

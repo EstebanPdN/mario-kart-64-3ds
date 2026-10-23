@@ -2,6 +2,7 @@
 
 #include "native_sprite_3ds.hpp"
 #include <cstring>
+#include <initializer_list>
 
 namespace mk64_3ds {
 // Reuse the actual copyright lettering from the owner's archive. Missing
@@ -29,7 +30,17 @@ inline Glyph Crop(const Image& image,unsigned x,unsigned y,unsigned width,unsign
     }
     return g;
 }
-inline Glyph Letter(char c,const Image& source) {
+inline Glyph Strokes(unsigned top,unsigned white,std::initializer_list<const char*> rows) {
+    auto g=Empty(std::strlen(*rows.begin()),rows.size(),top);
+    unsigned y=0;
+    for(const char* row:rows) {
+        for(unsigned x=0;x<g.width;++x)
+            Put(g,x,y,row[x]=='#' ? white : row[x]=='+' ? (white+1)/2 : 0);
+        ++y;
+    }
+    return g;
+}
+inline Glyph Letter(unsigned char c,const Image& source) {
     const auto n=Crop(source,76,6,7,8,2), o=Crop(source,113,6,8,8,2);
     const auto d=Crop(source,105,4,8,10,0), e=Crop(source,89,6,8,8,2);
     const auto cap=Crop(source,62,4,9,10,0);
@@ -40,6 +51,27 @@ inline Glyph Letter(char c,const Image& source) {
         case 'd':return d;
         case 'e':return e;
         case 't':return Crop(source,84,4,5,10,0);
+        case 'i':return Crop(source,72,4,3,10,0);
+        case '1':return Crop(source,22,4,6,10,0);
+        case '9':return Crop(source,29,4,9,10,0);
+        case '6':return Crop(source,46,4,8,10,0);
+        case 0xa9: {
+            auto g=Empty(11,10);
+            // Match the capital height and face coverage of the shared font.
+            for(unsigned y=0;y<10;++y)for(unsigned x=0;x<11;++x) {
+                unsigned covered=0;
+                for(unsigned sy=0;sy<4;++sy)for(unsigned sx=0;sx<4;++sx) {
+                    const float xx=x+(sx+.5f)/4-5.5f, yy=y+(sy+.5f)/4-5;
+                    const float radius=xx*xx+yy*yy;
+                    const bool ring=radius<24 && radius>=13;
+                    const float inner=(xx+.1f)*(xx+.1f)+yy*yy;
+                    const bool letter=inner<8 && inner>=2 && (xx<.5f || yy<-1 || yy>1);
+                    covered+=ring||letter;
+                }
+                Put(g,x,y,(covered*At(cap,1,1)+8)/16);
+            }
+            return g;
+        }
         case ' ':return Empty(4,10);
         case 'b': {
             auto g=Empty(8,10);
@@ -53,13 +85,9 @@ inline Glyph Letter(char c,const Image& source) {
             return g;
         }
         case 'P': {
-            auto g=Empty(8,10);
-            for(unsigned y=0;y<10;++y)for(unsigned x=0;x<3;++x)Put(g,x,y,At(cap,x,y));
-            // A full-height capital stem and a six-row bowl with the same
-            // rounded corners as the original lowercase o.
-            constexpr unsigned rows[]={0,1,2,4,6,7};
-            for(unsigned y=0;y<6;++y)for(unsigned x=1;x<8;++x)Put(g,x,y,At(o,x,rows[y]));
-            return g;
+            return Strokes(0,At(cap,1,1),{
+                ".+####..", "+######.", "+##..##+", "+##..##+", "+#####+.",
+                "+####...", "+##.....", "+##.....", "+##.....", "........"});
         }
         case 'E': {
             auto g=Empty(8,10);
@@ -72,22 +100,14 @@ inline Glyph Letter(char c,const Image& source) {
             return g;
         }
         case 's': {
-            auto g=Empty(8,8,2);
-            for(unsigned y=0;y<8;++y)for(unsigned x=0;x<8;++x) {
-                if(y<2 || y>=6)Put(g,x,y,At(o,x,y));
-                else if((y<4 && x<3)||(y>=4 && x>=5))Put(g,x,y,At(o,x,y));
-                if((y==3||y==4)&&x>0&&x<7)Put(g,x,y,std::max<unsigned>(At(e,x,3),At(e,x,4)));
-            }
-            return g;
+            return Strokes(2,At(cap,1,1),{
+                "........", ".+####+.", "+##...+.", ".+####..",
+                "...+###+", ".+...##+", ".+####+.", "........"});
         }
         case 'a': {
-            auto g=Empty(8,8,2);
-            for(unsigned y=0;y<8;++y)for(unsigned x=0;x<8;++x) {
-                if(y<2 || y>=4)Put(g,x,y,At(o,x,y));
-                if(x>=5)Put(g,x,y,At(d,x,y+2));
-                if(y==3 || y==4)Put(g,x,y,std::max<unsigned>(At(e,x,3),At(e,x,4)));
-            }
-            return g;
+            return Strokes(2,At(cap,1,1),{
+                "........", ".+####+.", ".....##+", ".+#####+",
+                "+##..##+", "+##..##+", ".+######", "........"});
         }
         case 'y': {
             auto g=Empty(8,12,2);
@@ -116,10 +136,9 @@ inline Glyph Letter(char c,const Image& source) {
 }
 } // namespace credit_font
 
-inline native_sprite::Image MakeNativeTitleCredit(const native_sprite::Image& source) {
+inline native_sprite::Image MakeNativeTitleText(const native_sprite::Image& source,const char* text) {
     if (!source.Valid() || source.width!=124 || source.height!=17) return {};
     using namespace credit_font;
-    constexpr const char* text="Ported by EstebanPdN";
     unsigned width=3;
     for(const char* p=text;*p;++p)width+=Letter(*p,source).width+1;
     // Derive the canvas from every glyph plus its outline/drop shadow. A
@@ -152,6 +171,33 @@ inline native_sprite::Image MakeNativeTitleCredit(const native_sprite::Image& so
         auto& pixel=result.pixels[size_t(y)*width+x];
         pixel=pixel>>24 ? 0xff000000U|value|(value<<8)|(value<<16) : (value<<24)|0x00ffffffU;
     }
+    return result;
+}
+
+inline native_sprite::Image MakeNativeTitleCredit(const native_sprite::Image& source) {
+    return MakeNativeTitleText(source,"Ported by EstebanPdN");
+}
+
+inline native_sprite::Image MakeNativeTitleCopyright(const native_sprite::Image& source) {
+    return MakeNativeTitleText(source,"\xA9 1996 Nintendo");
+}
+
+inline native_sprite::Image MakeNativeTitleCredits(const native_sprite::Image& source) {
+    const auto copyright=MakeNativeTitleCopyright(source);
+    const auto port=MakeNativeTitleCredit(source);
+    if(!copyright.Valid() || !port.Valid())return {};
+    const unsigned width=std::max(copyright.width,port.width);
+    native_sprite::Image result{width,copyright.height+port.height,{}};
+    result.pixels.resize(size_t(result.width)*result.height);
+    const auto copy=[&](const native_sprite::Image& line,unsigned top) {
+        const unsigned left=(width-line.width)/2;
+        for(unsigned y=0;y<line.height;++y)for(unsigned x=0;x<line.width;++x)
+            result.pixels[size_t(top+y)*width+left+x]=line.At(x,y);
+    };
+    copy(copyright,0);
+    copy(port,copyright.height);
+    // Draw the authored texels one-to-one. Fractional resampling distorts
+    // narrow counters and stems; both lines already fit the native canvas.
     return result;
 }
 } // namespace mk64_3ds

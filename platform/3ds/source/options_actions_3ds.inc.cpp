@@ -110,12 +110,14 @@ void ActivateSelectedRow(int direction) {
                 case mk64_3ds::DisplayOption::Distance: Mk64Settings3DSSetRenderDistance(static_cast<Mk64RenderDistance3DS>((Mk64Settings3DSGetRenderDistance() + step + 3) % 3)); break;
                 case mk64_3ds::DisplayOption::Filter: Mk64Settings3DSSetDisplayFilter(static_cast<Mk64DisplayFilter3DS>((Mk64Settings3DSGetDisplayFilter() + step + 3) % 3)); break;
                 case mk64_3ds::DisplayOption::Loading: Mk64Settings3DSSetShowLoadingScreens(!Mk64Settings3DSGetShowLoadingScreens()); break;
-                case mk64_3ds::DisplayOption::FrameLimiter: Mk64Settings3DSSetFrameLimiter(!Mk64Settings3DSGetFrameLimiter()); break;
+                case mk64_3ds::DisplayOption::FrameLimiter:
+                    Mk64Settings3DSSetFrameLimit(static_cast<Mk64FrameLimit3DS>((Mk64Settings3DSGetFrameLimit()+step+3)%3)); break;
                 case mk64_3ds::DisplayOption::Meters: Mk64Settings3DSSetHudMeters(static_cast<Mk64HudMeters3DS>((Mk64Settings3DSGetHudMeters() + step + 4) % 4)); break;
                 case mk64_3ds::DisplayOption::Blur: Mk64Settings3DSSetMenuBlur((Mk64Settings3DSGetMenuBlur() + step + 4) % 4); break;
                 case mk64_3ds::DisplayOption::Maps: Mk64Settings3DSSetMenuMaps(!Mk64Settings3DSGetMenuMaps()); break;
                 case mk64_3ds::DisplayOption::Textures:
-                    Mk64Settings3DSSetUiTextures(static_cast<Mk64UiTextures3DS>((Mk64Settings3DSGetUiTextures()+step+3)%3)); break;
+                    Mk64Settings3DSSetUiTextures(static_cast<Mk64UiTextures3DS>(
+                        (Mk64Settings3DSGetUiTextures()+step+3)%3)); break;
                 case mk64_3ds::DisplayOption::Warnings: Mk64Settings3DSSetThreatWarnings(!Mk64Settings3DSGetThreatWarnings()); break;
                 case mk64_3ds::DisplayOption::Back: sUi.displayAdvanced = false; sUi.selectedRow = mk64_3ds::kAdvancedDisplayRow; sUi.bottomDirty = true; return;
             }

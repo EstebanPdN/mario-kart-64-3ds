@@ -51,6 +51,7 @@ header=r'''
 #include "auto_mode_3ds.h"
 #include "solo_modes_3ds.h"
 #include "hud_layout_3ds.hpp"
+#include "presentation_fps_3ds.hpp"
 #include "standings_presentation_3ds.hpp"
 #include "menu_transition_3ds.hpp"
 #include "menu_backdrop_3ds.hpp"
@@ -178,22 +179,35 @@ int main(){
  autoSelect=true;int oldDumps=dumps;Frame(KEY_SELECT);assert(dumps==oldDumps&&(sUi.injectedGameKeys&KEY_A));Frame();
  autoSelect=false;randomMenu=1;Frame(KEY_SELECT);assert(randomStarts==1&&dumps==oldDumps);Frame();
  // Touch and controller activate the real Advanced sub-menu and its back action.
- randomMenu=0;OpenOptions(false);HandleOptionsTouch(150,int(OptionsRowY(OptionsTab::Screen,6)));assert(sUi.displayAdvanced&&RowCount(sUi.tab)==8);
- HandleOptionsTouch(60,66);assert(sUi.displayAdvanced&&sUi.selectedRow==0); // first row, not tab strip
- HandleOptionsTouch(60,int(OptionsRowY(OptionsTab::Screen,7)));assert(!sUi.displayAdvanced&&sUi.selectedRow==6);HandleOptionsTouch(150,int(OptionsRowY(OptionsTab::Screen,6)));
+ randomMenu=0;OpenOptions(false);HandleOptionsTouch(150,int(OptionsRowY(OptionsTab::Screen,7)));assert(sUi.displayAdvanced&&RowCount(sUi.tab)==7);
+ HandleOptionsTouch(60,66);assert(sUi.displayAdvanced&&sUi.selectedRow==0);
+ HandleOptionsTouch(60,int(OptionsRowY(OptionsTab::Screen,6)));assert(!sUi.displayAdvanced&&sUi.selectedRow==7);HandleOptionsTouch(150,int(OptionsRowY(OptionsTab::Screen,7)));
  Mk64DiagnosticsInput3DS back{};back.downMask=KEY_B;HandleModalInput(back);assert(!sUi.displayAdvanced&&sUi.modalOpen);
- SetTab(OptionsTab::Screen);sUi.selectedRow=6;ActivateSelectedRow(1);assert(sUi.displayAdvanced);
+ SetTab(OptionsTab::Screen);sUi.selectedRow=7;ActivateSelectedRow(1);assert(sUi.displayAdvanced);
  HandleModalInput(back);sUi.selectedRow=2;
- // Artwork choice is persistent and does not alter controls or performance profiles.
- SetTab(OptionsTab::Screen);sUi.selectedRow=6;ActivateSelectedRow(1);
- sUi.selectedRow=6;Mk64Settings3DSSetUiTextures(MK64_UI_TEXTURES_3DS_ORIGINAL);
- ActivateSelectedRow(1);assert(Mk64Settings3DSGetUiTextures()==MK64_UI_TEXTURES_3DS_SCALED);
- ActivateSelectedRow(1);assert(Mk64Settings3DSGetUiTextures()==MK64_UI_TEXTURES_3DS_MODIFIED);
- ActivateSelectedRow(1);assert(Mk64Settings3DSGetUiTextures()==MK64_UI_TEXTURES_3DS_ORIGINAL);
- ActivateSelectedRow(-1);assert(Mk64Settings3DSGetUiTextures()==MK64_UI_TEXTURES_3DS_MODIFIED);
- ActivateSelectedRow(-1);assert(Mk64Settings3DSGetUiTextures()==MK64_UI_TEXTURES_3DS_SCALED);
- ActivateSelectedRow(-1);assert(Mk64Settings3DSGetUiTextures()==MK64_UI_TEXTURES_3DS_ORIGINAL);
- sUi.displayAdvanced=false;
+ // The actual Display action cycles 30/60/Off in both directions and shows each label.
+ SetTab(OptionsTab::Screen);sUi.displayAdvanced=false;sUi.selectedRow=6;
+ Mk64Settings3DSSetFrameLimit(MK64_FRAME_LIMIT_3DS_30);
+ for(int direction:{1,-1})for(int n=0;n<6;++n){
+  const auto before=Mk64Settings3DSGetFrameLimit();ActivateSelectedRow(direction);
+  const auto current=static_cast<Mk64FrameLimit3DS>((before+direction+3)%3);
+  assert(Mk64Settings3DSGetFrameLimit()==current);
+  const char* label;char value[32];GetRowText(OptionsTab::Screen,6,&label,value,sizeof(value));
+  const char* expected[]={"30 FPS","60 FPS","OFF"};assert(!std::strcmp(value,expected[current]));
+ }
+ // Artwork is on the main page and cycles Original / Improved / Menu both ways.
+ sUi.selectedRow=3;Mk64Settings3DSSetUiTextures(MK64_UI_TEXTURES_3DS_ORIGINAL);
+ for(int direction:{1,-1})for(int n=0;n<6;++n){
+  const auto before=Mk64Settings3DSGetUiTextures();ActivateSelectedRow(direction);
+  const auto expected=static_cast<Mk64UiTextures3DS>((before+direction+3)%3);
+  assert(Mk64Settings3DSGetUiTextures()==expected&&!sUi.displayAdvanced);
+  const char* label;char value[32];GetRowText(OptionsTab::Screen,3,&label,value,sizeof(value));
+  const char* modes[]={"ORIGINAL","IMPROVED","MENU"};
+  assert(!std::strcmp(label,"TEXTURE")&&!std::strcmp(value,modes[expected]));
+ }
+ assert(OptionIconForRow(OptionsTab::Screen,3)==mk64_3ds::OptionIcon::Render);
+ assert(OptionIconForRow(OptionsTab::Screen,4)==mk64_3ds::OptionIcon::Dump);
+ assert(OptionIconForRow(OptionsTab::Screen,4)==OptionIconForRow(OptionsTab::Developer,0));
  // Draw the production option rows, with mocked pixels, to compare shared fonts and alignment.
  texts.clear();rects.clear();sUi.selectedRow=2;DrawOptions();
  for(const auto& t:texts)if(t.text=="HUD LAYOUT")assert(t.scale==.62f&&std::abs((t.y+16*t.scale/2)-cursorY)<1);
@@ -202,7 +216,7 @@ int main(){
  for(auto tab:{OptionsTab::Screen,OptionsTab::Gameplay}){
   SetTab(tab);rects.clear();DrawOptions();int grips=0;
   for(const auto& r:rects)if(r.w==9&&r.h==12){
-   const int row=tab==OptionsTab::Screen?3:grips;
+   const int row=tab==OptionsTab::Screen?4:grips;
    assert(r.y+6==mk64_3ds::OptionRowCenterY(tab==OptionsTab::Screen,row));++grips;
   }
   assert(grips==(tab==OptionsTab::Screen?1:2));
