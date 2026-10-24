@@ -1,4 +1,7 @@
 #include "diagnostics_3ds.h"
+#include "auto_mode_3ds.h"
+#include "frame_begin_3ds.hpp"
+#include "vram_dump_3ds.hpp"
 extern "C" bool Mk64Improved3DSWriteHistory(const char*) __attribute__((weak));
 #include "autodump_lab_3ds.h"
 #ifdef MK64_3DS_AUTODUMP_LAB
@@ -436,8 +439,9 @@ void ShowDumpProgress(const char* label, size_t done, size_t total) {
     Mk64BottomUI3DSShowProgress("WRITING DUMP", label, mk64_3ds::DumpProgressPercent(done, total));
 }
 
-void ShowDumpSavedOverlay() {
-    Mk64BottomUI3DSShowProgress("DUMP SAVED", "READY TO CONTINUE", 100);
+void ShowDumpSavedOverlay(bool complete) {
+    Mk64BottomUI3DSShowProgress(complete ? "DUMP SAVED" : "DUMP INCOMPLETE",
+                              complete ? "READY TO CONTINUE" : "CHECK DUMP FILES", 100);
     for (unsigned i = 0; i < 45; ++i) gspWaitForVBlank();
 }
 
@@ -623,6 +627,46 @@ bool WriteProcessMemory(const char* directory) {
     return complete;
 }
 
+mk64_3ds::VramDumpResult WriteVramCapture(const char* directory) {
+    char folder[256], path[288];
+    std::snprintf(folder, sizeof(folder), "%s/vram", directory);
+    if (!EnsureDirectory(folder)) return {};
+    std::snprintf(path, sizeof(path), "%s/manifest.txt", folder);
+    FILE* manifest = std::fopen(path, "wb");
+    if (!manifest) return {};
+    const bool readable = IsReadableRange(OS_VRAM_VADDR, OS_VRAM_SIZE);
+    std::fprintf(manifest,
+        "VRAM snapshot v1\nvirtual_base=0x%08lX\nphysical_base=0x%08lX\n"
+        "expected_bytes=%lu\nreadable=%s\nphase=before-diagnostic-progress\n"
+        "method=CPU aligned word reads from mapped VRAM; game/audio paused\n",
+        static_cast<unsigned long>(OS_VRAM_VADDR), static_cast<unsigned long>(OS_VRAM_PADDR),
+        static_cast<unsigned long>(OS_VRAM_SIZE), readable ? "yes" : "no");
+    mk64_3ds::VramDumpResult result;
+    if (readable && mk64_3ds::BeginFrame3DS(0, "diagnostic-vram-gpu-queue-wait")) {
+        // FrameBegin owns the completed queue. Do not draw, clear targets or
+        // call ShowDumpProgress until every VRAM byte has been saved.
+        struct ReleaseQueue { ~ReleaseQueue() { C3D_FrameEnd(0); } } release;
+        std::snprintf(path, sizeof(path), "%s/1F000000.bin", folder);
+        result = mk64_3ds::WriteVramSnapshot(path, OS_VRAM_SIZE,
+            [](std::size_t offset, unsigned char* output, std::size_t count) {
+                if ((offset | count) & 3U) return false;
+                const auto* source = reinterpret_cast<const volatile std::uint32_t*>(OS_VRAM_VADDR + offset);
+                for (std::size_t i = 0; i < count / 4; ++i) {
+                    const std::uint32_t word = source[i];
+                    std::memcpy(output + i * 4, &word, sizeof(word));
+                }
+                return true;
+            });
+        std::fprintf(manifest, "gpu_queue_fenced=yes\n");
+    } else std::fprintf(manifest, "gpu_queue_fenced=no\n");
+    std::fprintf(manifest, "saved_bytes=%lu\ncrc32=%08lX\nstatus=%s\n",
+        static_cast<unsigned long>(result.bytes), static_cast<unsigned long>(result.crc32),
+        result.complete ? "COMPLETE" : "INCOMPLETE");
+    const bool written = std::ferror(manifest) == 0;
+    if (std::fclose(manifest) != 0 || !written) result.complete = false;
+    return result;
+}
+
 bool WriteQuickDump(const char* trigger, bool fullMemory, bool lightweight = false, bool labCapture = false) {
     char directory[192] = {};
     if (!CreateSessionDirectory(directory, sizeof(directory))) {
@@ -637,6 +681,13 @@ bool WriteQuickDump(const char* trigger, bool fullMemory, bool lightweight = fal
     if (labCapture) complete = Mk64Lab3DSWriteContext(directory);
 #endif
 
+    // Capture VRAM first, before diagnostic rendering reuses targets and state.
+    // Normal manual dumps include it, even without the expanded process RAM.
+    const auto vram = lightweight ? mk64_3ds::VramDumpResult{} : WriteVramCapture(directory);
+    if (!lightweight && !vram.complete) {
+        complete = false;
+        LogLine("dump warning: ", "VRAM capture incomplete");
+    }
     // Capture the game image before painting the paused write-progress screen.
     WriteScreenCaptures(directory);
     ShowDumpProgress("METADATA", 0, 1);
@@ -671,6 +722,9 @@ bool WriteQuickDump(const char* trigger, bool fullMemory, bool lightweight = fal
             static_cast<unsigned long>(game.trackIndex), game.trackName ? game.trackName : "unknown",
             game.currentLap, game.courseTimerSeconds);
         std::fprintf(info, "Full process RAM requested: %s\n", fullMemory ? "yes" : "no");
+        std::fprintf(info, "VRAM capture / bytes / CRC32: %s / %lu / %08lX\n",
+                     lightweight ? "not requested" : vram.complete ? "complete" : "INCOMPLETE",
+                     static_cast<unsigned long>(vram.bytes), static_cast<unsigned long>(vram.crc32));
         std::fprintf(info, "Trigger: %s\n", trigger == nullptr ? "unknown" : trigger);
         std::fprintf(info, "Uptime ms: %llu\n",
                      static_cast<unsigned long long>(osGetTime() - sStartTime));
@@ -881,7 +935,7 @@ bool WriteQuickDump(const char* trigger, bool fullMemory, bool lightweight = fal
     if (labCapture) Mk64Lab3DSDumpComplete(directory,complete);
 #endif
     LogLine("dump written: ", directory, true);
-    ShowDumpSavedOverlay();
+    ShowDumpSavedOverlay(complete);
     return complete;
 }
 
@@ -1162,6 +1216,9 @@ extern "C" bool Mk64Diagnostics3DSIsPaused() {
 extern "C" bool Mk64Diagnostics3DSServiceDumpIfRequested() {
     const unsigned request = sDumpRequest.exchange(kDumpRequestNone, std::memory_order_acq_rel);
     if (request == kDumpRequestNone) return false;
+    // Recheck at consumption too: a queued manual request must not pause a
+    // session which entered AUTO after the button was pressed.
+    if (request != kDumpRequestClean && request != kDumpRequestLab && Mk64Auto3DSActive()) return false;
 
     // Disk writes and the diagnostic pause are not racing time.
     Mk64RaceClock3DSFreeze();
@@ -1214,6 +1271,7 @@ extern "C" bool Mk64Diagnostics3DSRequestCleanDumps() {
 }
 
 extern "C" bool Mk64Diagnostics3DSRequestDump() {
+    if (Mk64Auto3DSActive()) return false;
     unsigned expected = kDumpRequestNone;
     if (!sDumpRequest.compare_exchange_strong(expected, kDumpRequestBottomUi,
                                                std::memory_order_acq_rel)) {
@@ -1223,6 +1281,7 @@ extern "C" bool Mk64Diagnostics3DSRequestDump() {
     return true;
 }
 extern "C" bool Mk64Diagnostics3DSRequestFullDump() {
+    if (Mk64Auto3DSActive()) return false;
     unsigned expected = kDumpRequestNone;
     if (!sDumpRequest.compare_exchange_strong(expected, kDumpRequestFullMemory,
                                              std::memory_order_acq_rel)) return false;
@@ -1230,6 +1289,7 @@ extern "C" bool Mk64Diagnostics3DSRequestFullDump() {
     return true;
 }
 extern "C" bool Mk64Diagnostics3DSRequestBenchmarkDump() {
+    if (Mk64Auto3DSActive()) return false;
     unsigned expected = kDumpRequestNone;
     if (!sDumpRequest.compare_exchange_strong(expected, kDumpRequestBenchmark,
                                              std::memory_order_acq_rel)) return false;

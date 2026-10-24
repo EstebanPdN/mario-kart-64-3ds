@@ -112,7 +112,7 @@ AccessControlInfo:
 
 SystemControlInfo:
   SaveDataSize: 0KB
-  RemasterVersion: 8
+  RemasterVersion: 9
   StackSize: 0x100000
   Dependency:
     ac: 0x0004013000002402

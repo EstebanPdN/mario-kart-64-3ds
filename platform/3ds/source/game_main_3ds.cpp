@@ -543,7 +543,6 @@ int main(int argc, char** argv) {
         mk64_3ds::PerformanceCourse(courseGeneration, static_cast<std::uint16_t>(gCurrentCourseId));
         mk64_3ds::PerformanceRaceState(gGamestate == 4, static_cast<uint32_t>(gRaceState),
             gCourseTimer > 0.0f ? static_cast<uint32_t>(gCourseTimer * 1000.0f) : 0);
-        Mk64Auto3DSBenchmarkTick();
         perf.scale = Mk64Settings3DSGetRenderScalePercent();
         perf.distance = Mk64Settings3DSGetRenderDistance();
         perf.layout = Mk64Settings3DSGetHudLayout();

@@ -51,8 +51,9 @@ additional item/CPU rules and held-B reverse. ZL/ZR have no game binding.
 
 Developer contains Memory dump, Show FPS, Select for dump, Select for overlay and
 Clean dumps. SELECT's dump/overlay settings are exclusive; with both off SELECT
-uses the manual-race camera action. Diagnostics remain available during AUTO.
-The expanded L+R+SELECT chord always takes precedence, including in menus.
+uses the manual-race camera action. Dump captures are disabled while AUTO is active.
+The expanded L+R+SELECT chord takes precedence in manual play, including menus.
+Manual dumps include a six-MiB VRAM snapshot before progress rendering.
 Overlay is temporary live state and is not restored as an open modal on boot.
 
 Pause contains Continue game, Quit and Update in the same typography and row

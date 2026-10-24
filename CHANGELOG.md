@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1-E1
+
+- Added VRAM capture to manual dumps.
+- Captured VRAM before diagnostic progress rendering.
+- Disabled scheduled and manual dumps during AUTO.
+
 ## v2.0
 
 Based on the 2.0-E6 candidate. Cumulative changes since v1.5.
