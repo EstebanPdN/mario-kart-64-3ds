@@ -45,9 +45,10 @@ bool Mk64Diagnostics3DSReadInput(Mk64DiagnosticsInput3DS* input);
 bool Mk64Diagnostics3DSConsumeInput(Mk64DiagnosticsInput3DS* input);
 bool Mk64Diagnostics3DSRequestCleanDumps(void);
 bool Mk64Diagnostics3DSRequestDump(void);
-// L+R+SELECT retains the existing expanded application-memory capture.
+// Manual dumps include VRAM. AUTO sessions reject capture requests.
+// L+R+SELECT also captures expanded application memory.
 bool Mk64Diagnostics3DSRequestFullDump(void);
-// Lightweight trace/screen dump used by AUTO benchmark races.
+// Lightweight diagnostic request; disabled while AUTO is active.
 bool Mk64Diagnostics3DSRequestBenchmarkDump(void);
 bool Mk64Diagnostics3DSIsNewModel(void);
 bool Mk64Diagnostics3DSSupportsWideMode(void);

@@ -36,6 +36,7 @@ def main():
         return binary
 
     if args.suite in ('all', 'ui'):
+        run([sys.executable, port / 'tests/vram_dump_test.py', '--output', output / 'vram-dump'])
         run([sys.executable, port / 'tests/title_credit_pipeline_test.py', '--output', output / 'title-credit-pipeline'])
         run([compile_test('audio_dma_range_cache_test')], cwd=output)
         run([compile_test('audio_ndsp_notification_test', [

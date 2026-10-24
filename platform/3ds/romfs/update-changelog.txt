@@ -1,5 +1,11 @@
 ## Changelog
 
+2.1-E1 — local experimental candidate
+
+- Include a checked 6 MiB VRAM snapshot in manual dumps.
+- Capture VRAM before diagnostic progress rendering.
+- Disable scheduled and manual dump captures during AUTO.
+
 2.0 — based on 2.0-E6; changes since 1.5
 
 - Include Menu/Improved artwork and the Improved kart texture companion.
