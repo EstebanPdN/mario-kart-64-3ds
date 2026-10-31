@@ -100,7 +100,7 @@ void fogRun(){
  for(int scenario=0;scenario<64;++scenario){
   draw.fogTransform.fog=scenario&1;draw.fogFromVertex=scenario&2;draw.fogTransform.matrix[3][2]=float(scenario-32);
   const auto before=renderer.state.packedVertexCount;renderer.DrawStaticRun(draw);
-  assert(bindings.size()==2 && bindings[0].pointer==vertices && bindings[0].stride==40 && bindings[0].count==2 && bindings[0].permutation==0x10);
+  assert(bindings.size()==2 && bindings[0].pointer==vertices && bindings[0].stride==40 && bindings[0].count==3 && bindings[0].permutation==0xF10);
   assert(bindings[1].stride==16 && bindings[1].count==3 && bindings[1].permutation==0x432);
   const auto* fog=static_cast<const StaticFogVertex*>(bindings[1].pointer);
   assert(fog==reinterpret_cast<const StaticFogVertex*>(stream.data()+before));

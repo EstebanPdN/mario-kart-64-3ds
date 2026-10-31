@@ -1,6 +1,10 @@
 ## Changelog
 
-2.1-E1 — local experimental candidate
+2.1-E2 — experimental
+
+- Fix a console freeze at the start of courses with fog, including Choco Mountain.
+
+2.1-E1 — experimental
 
 - Include a checked 6 MiB VRAM snapshot in manual dumps.
 - Capture VRAM before diagnostic progress rendering.

@@ -2,6 +2,7 @@
 """Real course GBI -> GenerateCC -> factory -> static eligibility -> TEV, with negative controls."""
 import argparse
 from pathlib import Path
+import re
 import subprocess
 
 p=argparse.ArgumentParser(description=__doc__)
@@ -15,6 +16,14 @@ def block(text,marker,start=0):
     while depth:
         depth+=(text[end]=='{')-(text[end]=='}');end+=1
     return text[begin:end]
+
+# Real PICA freezes unless each stride equals its attribute and padding bytes.
+# Emulators accept the mismatch, so check every packed-vertex buffer layout.
+sizes={0:16,1:8,2:8,3:4,4:4,0xC:4,0xD:8,0xE:12,0xF:16}
+for stride,count,layout in re.findall(r'BufInfo_Add\([^,]+, *[^,]+, *sizeof\((PackedVertex|StaticFogVertex)\), *(\d+), *(0x[0-9A-Fa-f]+)\)',backend):
+    fields=[int(layout,16)>>(4*i)&15 for i in range(int(count))]
+    assert sum(sizes[field] for field in fields)=={'PackedVertex':40,'StaticFogVertex':16}[stride],(stride,count,layout)
+assert 'sizeof(PackedVertex), 2, 0x10)' not in backend
 
 # Reuse the scalar test's SDK mocks and TEV evaluator; that test remains an
 # independent algebra/ramp-channel regression. No production header is mocked.

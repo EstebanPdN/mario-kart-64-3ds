@@ -1749,7 +1749,9 @@ void GfxRenderingAPICitro3D::DrawStaticRun(const StaticRunDraw3DS& draw) {
     C3D_BufInfo* bufferInfo = C3D_GetBufInfo();
     BufInfo_Init(bufferInfo);
     if (fogVertices != nullptr) {
-        BufInfo_Add(bufferInfo, draw.vertices, sizeof(PackedVertex), 2, 0x10);
+        // PICA freezes when a stride differs from its attribute layout. Pad the
+        // cached fields replaced by the fog stream: texcoord1, color and depth.
+        BufInfo_Add(bufferInfo, draw.vertices, sizeof(PackedVertex), 3, 0xF10);
         BufInfo_Add(bufferInfo, fogVertices, sizeof(StaticFogVertex), 3, 0x432);
     } else {
         BufInfo_Add(bufferInfo, draw.vertices, sizeof(PackedVertex), 5, 0x43210);

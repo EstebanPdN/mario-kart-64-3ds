@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.1-E2
+
+- Fixed a console freeze at the start of courses with fog, including Choco Mountain.
+
 ## v2.1-E1
 
 - Added VRAM capture to manual dumps.
