@@ -149,6 +149,40 @@ native allocation is freed with its parent; the shared glyph atlas is released
 once at UI shutdown. Private archive previews compile the same portable scaler
 and credit compositor, but their extracted output must stay outside Source.
 
+## Stereo
+
+Each draw carries a shift `x' = x + eye * (a * w + b)` (`include/stereo_3ds.hpp`,
+`shaders/fast3d_passthrough.v.pica`). A draw's `(a, b)` does not depend on the
+eye, only the `eye` uniform does, so the frame's Fast3D draws form one command
+list that is queued once per eye (`BeginEyeList`, `FinishEyeList` in
+`source/gfx_citro3d.cpp`). Three rules keep that list replayable:
+
+1. It must set all the state its draws use from inside itself, because the right
+   eye starts from where the left eye's draws left the GPU. `BeginEyeList` calls
+   `RestoreFast3DState` after closing the setup list for this reason. Any new
+   state must be restored there too, or the right eye's first draws will use the
+   left eye's last value. Static runs rebind their own buffers and uniforms the
+   same way.
+2. It must not contain the framebuffer or the eye sign. Both go out ahead of it.
+   `StartDrawToFramebuffer` therefore does not rebind the current target.
+3. Its vertices and textures must stay untouched until the frame ends. Anything
+   that ends the command buffer early (`FenceTextureReuseBatch`) or changes the
+   target first calls `FinishEyeList(false)`.
+
+Perspective draws and static runs are the world. Orthographic ones are the HUD
+unless untextured (fades, the sky gradient: no shift, or their edges would show)
+or inside the sky marker around clouds and stars (infinity,
+`cmake/stereo_sky_3ds.cmake`). Auto convergence reads a sparse tile lattice of
+the left eye's depth, copied by the GPU after its draws because the overlay
+clears that depth afterwards. The copy is read at the next frame. The C2D
+overlay is drawn into each eye at its share of the HUD depth.
+
+The CPU face cull cannot use the centre view's winding alone: a face the centre
+view sees from behind can show its front to one eye, and culling it leaves a hole
+in that eye. With the eyes on, the interpreter keeps a triangle unless both eyes
+see its back (`StereoCullReach`), and the GPU culls each eye's back faces
+(`SetStereoFaceCull`, sent from inside the list as rule 1 requires).
+
 ## Memory and synchronization contracts
 
 - `heap_partition_3ds.cpp` uses the actual process commit limit before services

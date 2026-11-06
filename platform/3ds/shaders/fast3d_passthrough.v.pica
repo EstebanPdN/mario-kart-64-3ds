@@ -10,9 +10,13 @@
 .bool staticMeshEnabled
 .bool staticConstantColor
 .bool originalFogEnabled
+.bool stereoEnabled
 .fvec nativeMatrix[4], nativeAspect
 .fvec staticUv[2], staticColor, staticColorMask
 .fvec nativeLightDirection, nativeLightDiffuse, nativeLightAmbient
+; Stereo: x' = x + eye.x * (stereo.x * w + stereo.y). A draw's shift is the
+; same for both eyes, so the right eye runs the left eye's commands again.
+.fvec stereo, eye
 
 .constf shaderConstants(1.0, 0.0, 0.00392156862745, 0.0)
 .constf lightingConstants(128.0, 0.0078740157480315, 255.0, 0.0)
@@ -60,6 +64,12 @@
         add r9.xy, staticUv[0].zw, r9.xy
         mul r9.zw, staticUv[1].xyxy, intex0.xyxy
         add r9.zw, staticUv[1].zwzw, r9.zw
+    .end
+    ifu stereoEnabled
+        mul r5.x, stereo.x, r4.w
+        add r5.x, stereo.y, r5.x
+        mul r5.x, eye.x, r5.x
+        add r4.x, r4.x, r5.x
     .end
     dp4 r0.x, projection[0], r4
     dp4 r0.y, projection[1], r4
