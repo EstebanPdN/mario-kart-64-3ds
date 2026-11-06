@@ -45,6 +45,12 @@ struct Settings {
     bool menuMaps;
     bool threatWarnings;
     Mk64UiTextures3DS uiTextures;
+    // Top-screen stereo, the keys and ranges of rt64-3ds's 3D page.
+    uint8_t stereoSeparation;
+    uint8_t stereoConvergenceTenths;
+    uint8_t stereoHudDepth;
+    bool stereoAutoConvergence;
+    int8_t stereoComfortTarget;
 };
 
 constexpr Settings kDefaults = {
@@ -71,6 +77,11 @@ constexpr Settings kDefaults = {
     true,
     true,
     MK64_UI_TEXTURES_3DS_MODIFIED,
+    25,
+    30,
+    50,
+    true,
+    0,
 };
 
 bool sNewModelDefaults = false;
@@ -187,6 +198,10 @@ bool ParseBoolean(const char* text, bool* result) {
         return true;
     }
     return false;
+}
+
+int ClampSetting(long value, int minimum, int maximum) {
+    return value < minimum ? minimum : (value > maximum ? maximum : static_cast<int>(value));
 }
 
 uint16_t SanitizeResolution(long width) {
@@ -357,8 +372,29 @@ void ApplySetting(const char* key, const char* value) {
         return;
     }
 
+    if (std::strcmp(key, "auto_convergence") == 0) {
+        if (ParseBoolean(value, &booleanValue)) sSettings.stereoAutoConvergence = booleanValue;
+        return;
+    }
+
     long integerValue = 0;
     if (!ParseInteger(value, &integerValue)) {
+        return;
+    }
+    if (std::strcmp(key, "separation") == 0) {
+        Mk64Settings3DSSetStereoRow(MK64_STEREO_ROW_3DS_SEPARATION, ClampSetting(integerValue, 0, 100));
+        return;
+    }
+    if (std::strcmp(key, "convergence_tenths") == 0) {
+        Mk64Settings3DSSetStereoRow(MK64_STEREO_ROW_3DS_CONVERGENCE, ClampSetting(integerValue, 1, 200));
+        return;
+    }
+    if (std::strcmp(key, "hud_depth") == 0) {
+        Mk64Settings3DSSetStereoRow(MK64_STEREO_ROW_3DS_HUD_DEPTH, ClampSetting(integerValue, 0, 100));
+        return;
+    }
+    if (std::strcmp(key, "comfort_target") == 0) {
+        Mk64Settings3DSSetStereoRow(MK64_STEREO_ROW_3DS_COMFORT_TARGET, ClampSetting(integerValue, -20, 30));
         return;
     }
     if (std::strcmp(key, "menu_blur") == 0) {
@@ -471,7 +507,12 @@ extern "C" bool Mk64Settings3DSSave(void) {
         "menu_maps=%s\n"
         "threat_warnings=%s\n"
         "ui_textures=%s\n"
-        "gpu_static_meshes=%s\n",
+        "gpu_static_meshes=%s\n"
+        "separation=%u\n"
+        "convergence_tenths=%u\n"
+        "hud_depth=%u\n"
+        "auto_convergence=%s\n"
+        "comfort_target=%d\n",
         sSettings.aspectRatio == MK64_ASPECT_RATIO_3DS_ORIGINAL ? "original" : "wide",
         sSettings.topHudEnabled ? "on" : "off",
         kLayoutNames[static_cast<int>(sSettings.hudLayout)],
@@ -495,7 +536,12 @@ extern "C" bool Mk64Settings3DSSave(void) {
         sSettings.threatWarnings ? "on" : "off",
         sSettings.uiTextures == MK64_UI_TEXTURES_3DS_ORIGINAL ? "original" :
             sSettings.uiTextures == MK64_UI_TEXTURES_3DS_MENU ? "menu" : "improved",
-        sGpuStaticMeshes ? "on" : "off");
+        sGpuStaticMeshes ? "on" : "off",
+        static_cast<unsigned int>(sSettings.stereoSeparation),
+        static_cast<unsigned int>(sSettings.stereoConvergenceTenths),
+        static_cast<unsigned int>(sSettings.stereoHudDepth),
+        sSettings.stereoAutoConvergence ? "on" : "off",
+        static_cast<int>(sSettings.stereoComfortTarget));
     const bool flushSucceeded = std::fflush(file) == 0;
     const bool closeSucceeded = std::fclose(file) == 0;
     const bool writeSucceeded = written >= 0 && flushSucceeded && closeSucceeded;
@@ -702,4 +748,50 @@ extern "C" void Mk64Settings3DSSetUiTextures(Mk64UiTextures3DS textures) {
     EnsureLoaded();
     sSettings.uiTextures = textures >= MK64_UI_TEXTURES_3DS_ORIGINAL && textures <= MK64_UI_TEXTURES_3DS_MENU
         ? textures : MK64_UI_TEXTURES_3DS_MODIFIED;
+}
+
+extern "C" void Mk64Settings3DSGetStereo(Mk64Stereo3DS* stereo) {
+    EnsureLoaded();
+    stereo->separation = sSettings.stereoSeparation;
+    stereo->convergenceTenths = sSettings.stereoConvergenceTenths;
+    stereo->hudDepth = sSettings.stereoHudDepth;
+    stereo->autoConvergence = sSettings.stereoAutoConvergence;
+    stereo->comfortTarget = sSettings.stereoComfortTarget;
+}
+
+extern "C" int Mk64Settings3DSGetStereoRow(Mk64StereoRow3DS row) {
+    EnsureLoaded();
+    switch (row) {
+        case MK64_STEREO_ROW_3DS_SEPARATION: return sSettings.stereoSeparation;
+        case MK64_STEREO_ROW_3DS_CONVERGENCE: return sSettings.stereoConvergenceTenths;
+        case MK64_STEREO_ROW_3DS_HUD_DEPTH: return sSettings.stereoHudDepth;
+        case MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE: return sSettings.stereoAutoConvergence ? 1 : 0;
+        case MK64_STEREO_ROW_3DS_COMFORT_TARGET: return sSettings.stereoComfortTarget;
+        default: return 0;
+    }
+}
+
+extern "C" void Mk64Settings3DSSetStereoRow(Mk64StereoRow3DS row, int value) {
+    // ApplySetting calls this while the file is being read: sLoaded is set by
+    // then, so EnsureLoaded cannot recurse.
+    EnsureLoaded();
+    switch (row) {
+        case MK64_STEREO_ROW_3DS_SEPARATION:
+            sSettings.stereoSeparation = static_cast<uint8_t>(ClampSetting(value, 0, 100));
+            break;
+        case MK64_STEREO_ROW_3DS_CONVERGENCE:
+            sSettings.stereoConvergenceTenths = static_cast<uint8_t>(ClampSetting(value, 1, 200));
+            break;
+        case MK64_STEREO_ROW_3DS_HUD_DEPTH:
+            sSettings.stereoHudDepth = static_cast<uint8_t>(ClampSetting(value, 0, 100));
+            break;
+        case MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE:
+            sSettings.stereoAutoConvergence = value != 0;
+            break;
+        case MK64_STEREO_ROW_3DS_COMFORT_TARGET:
+            sSettings.stereoComfortTarget = static_cast<int8_t>(ClampSetting(value, -20, 30));
+            break;
+        default:
+            break;
+    }
 }

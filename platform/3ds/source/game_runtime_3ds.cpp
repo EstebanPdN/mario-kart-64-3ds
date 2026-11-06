@@ -406,6 +406,14 @@ extern "C" void* Mk64Graphics3DSGetTopRenderTarget() {
     return sRenderer != nullptr ? sRenderer->GetTopRenderTarget() : nullptr;
 }
 
+extern "C" void* Mk64Graphics3DSGetStereoRightTarget() {
+    return sRenderer != nullptr ? sRenderer->GetStereoRightTarget() : nullptr;
+}
+
+extern "C" float Mk64Graphics3DSGetStereoHudShiftPixels() {
+    return sRenderer != nullptr ? sRenderer->GetStereoHudShiftPixels() : 0.0f;
+}
+
 extern "C" void Mk64Graphics3DSShutdown() {
     if (sInterpreter != nullptr) {
         sInterpreter->Destroy();

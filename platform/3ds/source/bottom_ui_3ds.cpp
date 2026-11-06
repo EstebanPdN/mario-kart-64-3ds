@@ -114,6 +114,7 @@ enum class BaseView : uint8_t {
 enum class OptionsTab : uint8_t {
     Game,
     Screen,
+    Stereo,
     Gameplay,
     Developer,
     Count,
@@ -1398,7 +1399,23 @@ void SetStatus(const char* text, uint64_t durationMilliseconds = 1800) {
     sUi.bottomDirty = true;
 }
 
+// Changes made in the options menu are written to the SD card once, when the
+// menu closes: held D-pad steps and slider drags would otherwise rewrite the
+// file many times a second. Changes made outside the menu save at once.
+bool sSettingsDirty = false;
+
+void FlushChangedSettings() {
+    if (!sSettingsDirty) return;
+    sSettingsDirty = false;
+    if (!Mk64Settings3DSSave()) SetStatus("SETTINGS SAVE FAILED", 2400);
+}
+
 void SaveChangedSetting(const char* successText) {
+    if (sUi.modalOpen) {
+        sSettingsDirty = true;
+        if (successText != nullptr) SetStatus(successText);
+        return;
+    }
     if (Mk64Settings3DSSave()) {
         SetStatus(successText);
     } else {
@@ -2309,7 +2326,7 @@ bool TitleCreditVisible() {
         sUi.game.menuSelection == 10 && !sMenuTransition.blankBackdrop;
 }
 
-void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
+void DrawTopFpsBatch(C3D_RenderTarget* topTarget, float eyeShift) {
     if (topTarget == nullptr || !Mk64BottomUI3DSNeedsTopOverlay()) return;
     // Preserve the completed game color buffer and clear only reverse-depth so
     // the overlay cannot be hidden behind scene geometry.
@@ -2321,7 +2338,10 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
     PrepareC2DBatch();
     Mk64Graphics3DSMarkExternalLinearBuffersDirty();
     C2D_SceneBegin(topTarget);
-    if (UpdateIsOpen()) { DrawUpdateTop(); C2D_Flush(); return; }
+    // This eye's share of the HUD depth; 0 in mono and at the screen plane.
+    C2D_ViewReset();
+    C2D_ViewTranslate(eyeShift, 0.0f);
+    if (UpdateIsOpen()) { DrawUpdateTop(); C2D_Flush(); C2D_ViewReset(); return; }
     if (TitleCreditVisible()) {
         C2D_ImageTint tint = {};
         C2D_AlphaImageTint(&tint, (255-sMenuTransition.alpha)/255.0f);
@@ -2342,9 +2362,18 @@ void DrawTopFpsBatch(C3D_RenderTarget* topTarget) {
     DrawStatus();
     // This is the final cover, after both native HUD and custom live text.
     // Retain it across the one-image pre-dispatch snapshot lag on exit too.
+    C2D_ViewReset();
     if (RaceExitBlackHold())
         C2D_DrawRectSolid(0, 0, .99f, 400, 240, C2D_Color32(0,0,0,255));
     C2D_Flush();
+}
+
+// The overlay in each eye the frame drew, each at its share of the HUD depth.
+void DrawTopOverlayEyes(C3D_RenderTarget* leftTarget) {
+    auto* rightTarget = static_cast<C3D_RenderTarget*>(Mk64Graphics3DSGetStereoRightTarget());
+    const float shift = rightTarget != nullptr ? Mk64Graphics3DSGetStereoHudShiftPixels() : 0.0f;
+    DrawTopFpsBatch(leftTarget, shift);
+    if (rightTarget != nullptr) DrawTopFpsBatch(rightTarget, -shift);
 }
 
 } // namespace
@@ -2454,6 +2483,11 @@ extern "C" bool Mk64BottomUI3DSInit() {
 
 extern "C" void Mk64BottomUI3DSShutdown() {
     if (!sUi.initialized) return;
+    // Closing the application with the options menu still open.
+    if (sSettingsDirty) {
+        sSettingsDirty = false;
+        Mk64Settings3DSSave();
+    }
     // The final C3D_FrameEnd is asynchronous. Detaching an output while no
     // frame is active drains Citro3D's GPU queue; FrameSync alone only waits
     // for VBlank and is not a resource-lifetime fence.
@@ -2776,7 +2810,7 @@ extern "C" void Mk64BottomUI3DSDraw(void* existingTopTarget) {
     // With double buffering, omitting this can leave the paired screen stale.
     C3D_FrameDrawOn(sUi.bottomTarget);
     if (!drawTopFps) return;
-    DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
+    DrawTopOverlayEyes(static_cast<C3D_RenderTarget*>(existingTopTarget));
 }
 
 static void ShowProgress(const char* title, const char* detail, unsigned percent, bool showArtwork) {
@@ -2793,6 +2827,12 @@ static void ShowProgress(const char* title, const char* detail, unsigned percent
     if (sUi.lastTopTarget != nullptr) {
         C3D_FrameDrawOn(sUi.lastTopTarget);
         if (!showArtwork || firstTopImage) C3D_RenderTargetClear(sUi.lastTopTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+        // A retained stereo image keeps both eyes.
+        auto* right = static_cast<C3D_RenderTarget*>(Mk64Graphics3DSGetStereoRightTarget());
+        if (right != nullptr) {
+            C3D_FrameDrawOn(right);
+            if (!showArtwork || firstTopImage) C3D_RenderTargetClear(right, C3D_CLEAR_ALL, 0x000000FF, 0);
+        }
     }
     C3D_RenderTargetClear(sUi.bottomTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(sUi.bottomTarget);
@@ -2854,7 +2894,7 @@ extern "C" bool Mk64BottomUI3DSHasTitleCopyright() {
 
 extern "C" void Mk64BottomUI3DSDrawTopFps(void* existingTopTarget) {
     if (!Mk64BottomUI3DSNeedsTopOverlay() || existingTopTarget == nullptr) return;
-    DrawTopFpsBatch(static_cast<C3D_RenderTarget*>(existingTopTarget));
+    DrawTopOverlayEyes(static_cast<C3D_RenderTarget*>(existingTopTarget));
 }
 
 extern "C" uint32_t Mk64BottomUI3DSFilterGameKeys(uint32_t heldKeys) {

@@ -16,6 +16,7 @@ pre=r'''
 #include "native_geometry_3ds.hpp"
 #include "static_runs_3ds.hpp"
 #include "original_fog_3ds.hpp"
+#include "stereo_3ds.hpp"
 #include <stdexcept>
 #include <array>
 #include <cassert>
@@ -47,7 +48,7 @@ pre+=block(source,'struct StaticFogVertex {')+';\n'
 pre+=struct('CompiledTevOperation3DS')+struct('StaticRunDraw3DS')+struct('ShaderProgram')
 pre+=r'''
 struct Impl {
- bool frameActive=true,textureTransformValid=false,staticVertexStateValid=false,packedBufferBound=false,nativeVertexStateDirty=false;
+ bool frameActive=true,textureTransformValid=false,staticVertexStateValid=false,packedBufferBound=false,nativeVertexStateDirty=false,eyesOpen=false;
  ShaderProgram* currentProgram=nullptr;StaticRunDraw3DS staticVertexState{};
  std::array<float,4> textureScaleState{},textureClampState{};
  int textureScaleUniform=0,textureClampUniform=1,nativeMatrixUniform=2,staticUvUniform=6,staticColorUniform=8,staticColorMaskUniform=9;
@@ -58,7 +59,7 @@ struct Impl {
 class GfxRenderingAPICitro3D {
 public:
  Impl state;Impl* mImpl=&state;
- void DrawStaticRun(const StaticRunDraw3DS&);void BindPackedVertices();void FlushPackedVertices();
+ void DrawStaticRun(const StaticRunDraw3DS&);void BindPackedVertices();void FlushPackedVertices();void SetStereoUniform(mk64_3ds::StereoClass){}
  bool DrawTargetVisible(){return true;}
  void RequireGpuCommandRoom(int){}
  std::array<float,4> SelectedTextureScale(ShaderProgram*,float){return {1,1,1,1};}

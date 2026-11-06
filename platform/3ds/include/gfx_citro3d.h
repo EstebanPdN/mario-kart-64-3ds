@@ -11,11 +11,14 @@
 #include "native_geometry_3ds.hpp"
 #include "static_runs_3ds.hpp"
 #include "native_lighting_3ds.h"
+#include "stereo_3ds.hpp"
 #ifdef MK64_3DS_NATIVE_LUIGI_LAB
 namespace mk64_3ds::native_scene { class GpuScene; class GpuSprites; struct Vertex; struct SpriteStyle; }
 #endif
 
 namespace Fast {
+
+using StereoClassForDraw = mk64_3ds::StereoClass;
 
 struct CompiledTevOperation3DS {
     uint8_t function = 0;
@@ -84,6 +87,13 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     bool IsInitialized() const;
     void SetPresentationUncapped(bool uncapped);
     void* GetTopRenderTarget() const;
+    // Non-null only while the current or last frame draws both eyes.
+    void* GetStereoRightTarget() const;
+    // The left eye's horizontal shift for overlays at the HUD depth, top-screen
+    // pixels (0 in mono). The right eye takes the negative.
+    float GetStereoHudShiftPixels() const;
+    // Display-list marker, called after the interpreter flushes its batch.
+    void SetStereoSkyLayer(bool sky);
     const char* GetName() override;
     int GetMaxTextureSize() override;
     GfxClipParameters GetClipParameters() override;
@@ -108,6 +118,8 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
     void DrawStaticRun(const StaticRunDraw3DS& draw);
     bool NativeGeometryMatches(const mk64_3ds::NativeGeometryDraw* state) const;
     void SetNativeGeometry(const mk64_3ds::NativeGeometryDraw* state);
+    mk64_3ds::NativeGeometryCull GetStereoFaceCull() const;
+    void SetStereoFaceCull(mk64_3ds::NativeGeometryCull cull);
     bool NativeLightingMatches(const mk64_3ds::NativeLightingState* state) const;
     void SetNativeLighting(const mk64_3ds::NativeLightingState* state);
     void Init() override;
@@ -200,6 +212,14 @@ class GfxRenderingAPICitro3D final : public GfxRenderingAPI {
                             const std::array<float, 4>& fogColor = {});
     void BindPackedVertices();
     float GetPresentedFps(uint64_t windowMilliseconds) const;
+    void UpdateStereoFrame();
+    bool EnsureStereoSceneResources();
+    void UpdateAutoConvergence();
+    void QueueStereoDepthCopy();
+    void CloseGpuList(uint32_t** list, uint32_t* words);
+    void BeginEyeList();
+    void FinishEyeList(bool frameEnd);
+    void SetStereoUniform(StereoClassForDraw cls);
 
     struct Impl;
     std::unique_ptr<Impl> mImpl;

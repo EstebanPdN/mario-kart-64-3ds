@@ -1,6 +1,9 @@
 # Configuration reference — 2.0
 
-Options are saved in `sd:/3ds/MK64/mk64-3ds.cfg`. Menu changes use the same
+Options are saved in `sd:/3ds/MK64/mk64-3ds.cfg`. Changes made in the options
+menu apply at once and are written to the SD card once, when the menu closes
+(or the application exits with it open); the Y HUD-layout shortcut in a race
+saves immediately. Menu changes use the same
 validated settings implementation as loading that file. The writer uses a
 temporary file and recoverable replacement; existing game saves and the O2R are
 separate. If the main file is missing, a complete `.bak` is loaded. See
@@ -42,6 +45,24 @@ values also becomes Custom; the label must describe the active configuration.
 
 The 60 FPS choice permits an additional presentation when CPU/GPU/audio/resource
 headroom allows it. It is not a fixed-rate guarantee or a 60 Hz physics mode.
+
+## 3D
+
+Stereoscopic 3D covers races, the podium and the credits; menus stay flat. The
+hardware 3D slider sets the strength. The page is also available from Pause, so
+it can be tuned against the race on the top screen; hold the D-pad left or right
+to step a value, or tap a row's left or right half.
+
+| Row | Values and purpose |
+| --- | --- |
+| 3D depth | 0–100: depth at full slider, how far distant scenery sits behind the screen. |
+| Convergence | 0.1–20.0: the distance at the screen's plane; with auto convergence on, its farthest. |
+| HUD depth | 0–100: 50 is on the screen, higher comes out of it, lower goes behind. |
+| Auto convergence | Pulls the screen's plane in so that nearby objects do not pop out too far. |
+| Comfort target | -20–30: how much pop-out auto convergence allows (0: none). |
+
+3D draws the scene twice while the slider is up, so an Old 3DS will want a lower
+render scale or the 30 FPS limiter. It is unavailable in the 800-pixel mode.
 
 ## Gameplay and Developer
 
@@ -92,6 +113,11 @@ wins, and saving writes one normalized exclusive pair.
 | `show_fps` | Boolean | off |
 | `select_for_dump` | Boolean, exclusive with overlay | off |
 | `select_for_overlay` | Boolean, exclusive with dump | off |
+| `separation` | Integer clamped to 0–100 | 25 |
+| `convergence_tenths` | Integer clamped to 1–200 | 30 |
+| `hud_depth` | Integer clamped to 0–100 | 50 |
+| `auto_convergence` | Boolean | on |
+| `comfort_target` | Integer clamped to -20–30 | 0 |
 
 Existing saved values take precedence over model defaults. Display presets
 change their own display values, while preserving gameplay, volume, SELECT and
