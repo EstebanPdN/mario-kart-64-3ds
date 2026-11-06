@@ -51,7 +51,8 @@ headroom allows it. It is not a fixed-rate guarantee or a 60 Hz physics mode.
 Stereoscopic 3D covers races, the podium and the credits; menus stay flat. The
 hardware 3D slider sets the strength. The page is also available from Pause, so
 it can be tuned against the race on the top screen; hold the D-pad left or right
-to step a value, or tap a row's left or right half.
+to step a value, or tap a row's left or right half. While 3D is on, the New 3DS
+runs at 30 fps without the interpolated in-between frame.
 
 | Row | Values and purpose |
 | --- | --- |

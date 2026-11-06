@@ -547,7 +547,12 @@ extern "C" void Graphics_PushFrame(Gfx* commands) {
     } sample{sRenderer.get(), sRenderer->GetDrawCallCount(), sRenderer->GetTriangleCount(),
              sRenderer->GetTextureCacheUploadCount(), sRenderer->GetTextureCacheUploadBytes()};
     const uint64_t presentationStart = osGetTime();
-    const bool midpointRequested = !limiter && sUseIntermediatePresentation &&
+    // Stereo draws every image twice, so a midpoint rarely fits and each
+    // failed probe shows as a hitch: present keyframes only while 3D is on.
+    // The last frame's state decides; mono starts over from a fresh policy.
+    const bool stereo = sRenderer->GetStereoRightTarget() != nullptr;
+    if (stereo) sAdaptivePresentation = {};
+    const bool midpointRequested = !limiter && sUseIntermediatePresentation && !stereo &&
                                    ShouldRenderIntermediatePresentation(presentationStart);
     const bool renderIntermediate = midpointRequested && !catchupKeyframe;
     perf.requested_mid = renderIntermediate;
