@@ -12,7 +12,8 @@
     "docs",
     "platform",
     "scripts",
-    "third_party"
+    "third_party",
+    "assets"
   ],
   "current_documents": [
     "README.md",

@@ -1,0 +1,17 @@
+{
+  "format": "FVID1",
+  "videos": [
+    {
+      "id": "mk64/trailer",
+      "file": "mk64-trailer.fvid",
+      "bytes": 32387202,
+      "sha256": "8b5f5a6413f05d3865862112aa746b832abab1b11cea0c499699e2e7a95a0865"
+    },
+    {
+      "id": "mk64/luigi-raceway",
+      "file": "mk64-luigi-raceway.fvid",
+      "bytes": 6513554,
+      "sha256": "be5cfa65dfc741386ac800710eb4061c2f1b99e5afa5d9b97cb87746713e06d5"
+    }
+  ]
+}
