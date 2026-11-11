@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added stereoscopic 3D on the top screen, driven by the 3D slider: races, the
+  podium and the credits draw both eyes with a per-draw clip-space shift, the
+  right eye replaying the left eye's GPU commands. A new **3D** options page has
+  depth, convergence, HUD depth, auto convergence and comfort target, using
+  rt64-3ds's settings keys. With 3D on, the New 3DS presents at 30 fps without
+  the interpolated in-between frame, which no longer fits and caused hitches.
+- Options changed in the menu are now written to the SD card once, when the menu
+  closes, instead of on every change.
+
 ## v2.1-E2
 
 - Fixed a console freeze at the start of courses with fog, including Choco Mountain.

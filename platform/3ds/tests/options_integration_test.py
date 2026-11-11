@@ -128,8 +128,18 @@ void DrawText(const char* t,float x,float y,float scale,uint32_t,int,float,bool 
 void DrawOptionIcon(mk64_3ds::OptionIcon icon,float,float y){if(icon==mk64_3ds::OptionIcon::Hud)cursorY=y+9;}
 uint32_t C2D_Color32(int r,int g,int b,int a){return r|(g<<8)|(b<<16)|(uint32_t(a)<<24);}
 void C2D_DrawRectSolid(float x,float y,float,float w,float h,uint32_t){rects.push_back({x,y,w,h});}
+float MeasureText(const char* t,float scale){return std::strlen(t)*8*scale;}
+extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth(){return 400;}
+static bool sSettingsDirty=false;
+static uint64_t sStereoRepeatAt=0;
+constexpr uint64_t kStereoRepeatDelayMilliseconds=350,kStereoRepeatIntervalMilliseconds=70;
+static std::string ReadSettingsFile(){
+ FILE* f=std::fopen("sdmc:/3ds/MK64/mk64-3ds.cfg","rb");if(!f)return "";
+ std::string text;char buffer[256];size_t n;while((n=std::fread(buffer,1,sizeof(buffer),f))>0)text.append(buffer,n);
+ std::fclose(f);return text;
+}
 '''
-functions=['GetBaseView','SetStatus','SaveChangedSetting','RowCount','VisibleTabCount','VisibleTab','VisibleTabIndex','OptionsRowY','OpenOptions','CloseOptions','DismissOptions','SetTab','ActivateSelectedRow','PointInside','HandleOptionsTouch','HandleModalInput','DataActive','TabName','OptionValueUnavailable','GetRowText','OptionIconForRow','DrawOptions','Mk64BottomUI3DSPrepareFrame','Mk64BottomUI3DSFilterGameKeys','Mk64BottomUI3DSConsumesCStick','Mk64BottomUI3DSIsModalOpen']
+functions=['GetBaseView','SetStatus','FlushChangedSettings','SaveChangedSetting','RowCount','VisibleTabCount','VisibleTab','VisibleTabIndex','CompactOptionRows','OptionsRowY','OpenOptions','CloseOptions','DismissOptions','SetTab','ActivateSelectedRow','PointInside','HandleOptionsTouch','HandleModalInput','DataActive','TabName','OptionValueUnavailable','GetRowText','OptionIconForRow','DrawOptions','Mk64BottomUI3DSPrepareFrame','Mk64BottomUI3DSFilterGameKeys','Mk64BottomUI3DSConsumesCStick','Mk64BottomUI3DSIsModalOpen']
 # Forward declarations are necessary because PrepareFrame's original file order includes DataActive later.
 prototypes='bool DataActive();\n'
 body=''.join(fn(n) for n in functions)
@@ -229,8 +239,30 @@ int main(){
  sUi.selectedRow=2;ActivateSelectedRow(1);assert(Mk64Settings3DSGetSelectAction()==MK64_SELECT_ACTION_3DS_DUMP);
  // Updater remains reachable from the Game tab.
  SetTab(OptionsTab::Game);sUi.modalOpenedFromPause=false;sUi.selectedRow=0;ActivateSelectedRow(1);assert(updateOpen);
- CloseUpdate();CloseOptions();engine.gameSelectVisible=false;engine.gameState=5;Frame();Frame(KEY_START);assert(ceremonies==1);
- std::puts("PASS: actual UI routing: nonmodal overlay/Turbo, expanded chord priority/hold guards, held-A resume, Y cycle, AUTO/random contexts, Advanced touch/back, common font/cursor, slider/binding/updater/ceremony actions. Rendering and engine calls are mocked; not console proof.");
+ // The 3D page: D-pad and half-row touch step, held D-pad repeats, and
+ // menu changes reach the SD card once, when the menu closes.
+ CloseUpdate();CloseOptions();
+ OpenOptions(true);SetTab(OptionsTab::Stereo);assert(RowCount(OptionsTab::Stereo)==MK64_STEREO_ROW_3DS_COUNT);
+ const std::string savedBefore=ReadSettingsFile();
+ sUi.selectedRow=MK64_STEREO_ROW_3DS_SEPARATION;const int depth=Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_SEPARATION);
+ ActivateSelectedRow(1);assert(Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_SEPARATION)==depth+1);
+ HandleOptionsTouch(60,int(OptionsRowY(OptionsTab::Stereo,0)));assert(Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_SEPARATION)==depth);
+ HandleOptionsTouch(260,int(OptionsRowY(OptionsTab::Stereo,0)));assert(Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_SEPARATION)==depth+1);
+ {Mk64DiagnosticsInput3DS held{};held.heldMask=held.downMask=KEY_DRIGHT;HandleModalInput(held);
+  held.downMask=0;for(int n=0;n<20;++n){tick+=33;HandleModalInput(held);}
+  assert(Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_SEPARATION)>depth+3);}
+ sUi.selectedRow=MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE;const int autoBefore=Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE);
+ ActivateSelectedRow(1);assert(Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE)==!autoBefore);
+ {const char* label;char value[32];GetRowText(OptionsTab::Stereo,MK64_STEREO_ROW_3DS_CONVERGENCE,&label,value,sizeof(value));assert(!std::strcmp(label,"CONVERGENCE")&&std::strchr(value,'.'));}
+ texts.clear();DrawOptions();bool found3D=false;for(const auto& t:texts)if(t.text=="3D")found3D=true;assert(found3D);
+ HandleOptionsTouch(2*320/5+5,int(kOptionsTabY)+4);assert(sUi.tab==OptionsTab::Stereo);
+ HandleOptionsTouch(319,int(kOptionsTabY)+4);assert(sUi.tab==OptionsTab::Developer);
+ assert(sSettingsDirty&&ReadSettingsFile()==savedBefore);
+ CloseOptions();assert(!sSettingsDirty);
+ {char expected[48];std::snprintf(expected,sizeof(expected),"separation=%d\n",Mk64Settings3DSGetStereoRow(MK64_STEREO_ROW_3DS_SEPARATION));
+  assert(ReadSettingsFile().find(expected)!=std::string::npos);}
+ engine.gameSelectVisible=false;engine.gameState=5;Frame();Frame(KEY_START);assert(ceremonies==1);
+ std::puts("PASS: actual UI routing: nonmodal overlay/Turbo, expanded chord priority/hold guards, held-A resume, Y cycle, AUTO/random contexts, Advanced touch/back, 3D page and save on close, common font/cursor, slider/binding/updater/ceremony actions. Rendering and engine calls are mocked; not console proof.");
 }
 '''
 out=output/'ui_integration.cpp'

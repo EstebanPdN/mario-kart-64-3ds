@@ -129,6 +129,48 @@ mk64_native_replace(
     "native face culling")
 
 mk64_native_replace(
+    [=[        auto cull_type = mRsp->geometry_mode & cull_both;
+
+        if (cull_type == cull_front) {
+            if (cross <= 0) {
+                return;
+            }
+        } else if (cull_type == cull_back) {
+            if (cross >= 0) {
+                return;
+            }
+        } else if (cull_type == cull_both) {]=]
+    [=[        auto cull_type = mRsp->geometry_mode & cull_both;
+        // Culled only when neither eye sees the front; 0 in mono.
+        const float eyeReach3DS = ::mk64_3ds::StereoCullReach(::mk64_3ds::gStereoCullReach3DS,
+            v1->w, v2->w, v3->w, v1->y, v2->y, v3->y);
+
+        if (cull_type == cull_front) {
+            if (cross + eyeReach3DS <= 0) {
+                return;
+            }
+        } else if (cull_type == cull_back) {
+            if (cross - eyeReach3DS >= 0) {
+                return;
+            }
+        } else if (cull_type == cull_both) {]=]
+    "per-eye face culling")
+
+mk64_native_replace(
+    "    if (!nativeRenderer3DS->NativeGeometryMatches(nativeDraw3DS.enabled ? &nativeDraw3DS : nullptr)) {"
+    [=[    // The triangles the cull above kept for one eye: the GPU drops them from
+    // the other. A triangle the CPU cannot project stays uncut, as in mono.
+    const auto eyeCull3DS = ::mk64_3ds::gStereoCullReach3DS > 0.0f && !is_rect &&
+        ::mk64_3ds::Fast3DCanProject(v1->w, v2->w, v3->w)
+        ? nativeCull3DS : ::mk64_3ds::NativeGeometryCull::None;
+    if (eyeCull3DS != nativeRenderer3DS->GetStereoFaceCull()) {
+        Flush();
+        nativeRenderer3DS->SetStereoFaceCull(eyeCull3DS);
+    }
+    if (!nativeRenderer3DS->NativeGeometryMatches(nativeDraw3DS.enabled ? &nativeDraw3DS : nullptr)) {]=]
+    "per-eye GPU face cull state")
+
+mk64_native_replace(
     "    struct GfxClipParameters clip_parameters = mRapi->GetClipParameters();"
     [=[    const bool nativeLighting3DS = ::mk64_3ds::gNativeGeometry3DS.enabled &&
         !is_rect && numInputs == 1 && comb->shader_input_mapping[0][0] == G_CCMUX_SHADE &&
@@ -183,5 +225,19 @@ mk64_native_replace(
     "normal emission")
 
 include("${CMAKE_CURRENT_LIST_DIR}/native_lighting_3ds.cmake")
+
+# Display-list stereo markers (stereo_sky_3ds.cmake): they take effect from here
+# on in the list, so the batch before them keeps the old layer.
+mk64_native_replace(
+    "    uint32_t l = C0(0, 16);\n    if (p == 7) {"
+    [=[    uint32_t l = C0(0, 16);
+    if (p == ::mk64_3ds::kStereoSkyLayerNoop) {
+        Interpreter* stereoGfx3DS = mInstance;
+        stereoGfx3DS->Flush();
+        static_cast<GfxRenderingAPICitro3D*>(stereoGfx3DS->mRapi)->SetStereoSkyLayer(l != 0);
+        return false;
+    }
+    if (p == 7) {]=]
+    "stereo sky marker")
 
 include("${CMAKE_CURRENT_LIST_DIR}/stage_timers_3ds.cmake")

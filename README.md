@@ -48,7 +48,7 @@ game data is included.
     <td width="50%" valign="top"><strong>Made for two screens</strong><br>Top-screen racing, five HUD layouts, course maps and bottom-screen touch menus.</td>
   </tr>
   <tr>
-    <td width="50%" valign="top"><strong>Tune the presentation</strong><br>Adjust render scale, draw distance, filters, UI textures and display profiles.</td>
+    <td width="50%" valign="top"><strong>Tune the presentation</strong><br>Adjust render scale, draw distance, filters, UI textures, display profiles and stereoscopic 3D depth.</td>
     <td width="50%" valign="top"><strong>Keep it current</strong><br>Built-in Stable and Experimental updates that preserve your game data, saves and settings.</td>
   </tr>
 </table>
@@ -119,6 +119,8 @@ your version, console model and steps to reproduce the issue.
   — solo modes, AUTO, random cups, Modern Logic and runtime corrections.
 - Epic0522's [Super Mario 64 3DS Port Ultimate](https://github.com/Epic0522/Super-Mario-64-3ds-port---Ultimate)
   — 3DS implementation and optimization references.
+- [rt64-3ds](https://github.com/oneup03/rt64-3ds) — the stereoscopic 3D shift,
+  HUD depth and auto convergence.
 - The Nintendo 3DS homebrew community — tools and libraries.
 - EstebanPdN — Nintendo 3DS adaptation, HUD, branding and updater, with help from Codex.
 
