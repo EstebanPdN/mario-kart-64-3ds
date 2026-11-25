@@ -26,7 +26,7 @@
 
 <p align="center">
   <a href="https://estebanpdn.github.io/"><img src="docs/images/website.svg" alt="Visit Esteban’s Forge" width="142" height="46"></a>
-  <a href="https://discord.gg/BjbzfRYpV"><img src="docs/images/discord-official.svg" alt="Join our Discord community" width="166" height="46"></a>
+  <a href="https://discord.com/servers/esteban-s-forge-1533248895663210506"><img src="docs/images/discord-official.svg" alt="Join our Discord community" width="166" height="46"></a>
   <!-- <a href="https://ko-fi.com/estebanpdn"><img src="docs/images/kofi.svg" alt="Support EstebanPdN on Ko-fi" width="190" height="46"></a> -->
   <a href="https://www.patreon.com/c/EstebanPdN"><img src="docs/images/patreon.svg" alt="Support EstebanPdN on Patreon" width="216" height="46"></a>
 </p>
@@ -106,7 +106,7 @@ Use **Options > Game > Update** for built-in updates. See the
 
 ## Community and bug reports
 
-[Join the project Discord](https://discord.gg/BjbzfRYpV) for updates, support
+[Join the project Discord](https://discord.com/servers/esteban-s-forge-1533248895663210506) for updates, support
 and suggestions. Report reproducible problems through
 [GitHub issues](https://github.com/EstebanPdN/mario-kart-64-3ds/issues), including
 your version, console model and steps to reproduce the issue.
@@ -139,7 +139,7 @@ Mario Kart 64 and its game content belong to Nintendo.
 
 <p align="center">
   <a href="https://estebanpdn.github.io/">Esteban’s Forge</a> ·
-  <a href="https://discord.gg/BjbzfRYpV">Discord</a> ·
+  <a href="https://discord.com/servers/esteban-s-forge-1533248895663210506">Discord</a> ·
   <a href="#documentation">Documentation</a> ·
   <a href="#license-and-legal-notice">License and notices</a><br>
   <sub>An independent fan project. Game names and content belong to their respective owners.</sub>
