@@ -737,6 +737,17 @@ extern "C" float Mk64GameState3DSDistanceFog(uint32_t* color) {
     return mk64_3ds::RenderDistanceEnd(properties->FarPersp, Mk64Settings3DSGetRenderDistance());
 }
 
+// Stereo is for the 3D scenes: the menus are flat artwork, and their title
+// logo, a perspective model at a distance of thousands, would sink behind it.
+extern "C" bool Mk64GameState3DSStereoScene(float* nearPlane, float* farPlane) {
+    if (gGamestate != RACING && gGamestate != ENDING && gGamestate != CREDITS_SEQUENCE) return false;
+    Properties* properties = CM_GetProps();
+    if (properties == nullptr || !(properties->NearPersp > 0.0f) ||
+        !(properties->FarPersp > properties->NearPersp)) return false;
+    *nearPlane = properties->NearPersp;
+    *farPlane = properties->FarPersp;
+    return true;
+}
 
 extern "C" const char* Mk64GameState3DSDataPreview(int index) {
     index = std::clamp(index, 0, 15);

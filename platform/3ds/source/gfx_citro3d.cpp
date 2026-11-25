@@ -22,6 +22,8 @@ extern "C" size_t Mk64System3DSCapturedLinearAllocationSize(void) __attribute__(
 #include "depth_precision_3ds.hpp"
 #include "alpha_policy_3ds.hpp"
 #include "viewport_slide_3ds.hpp"
+#include "stereo_settings_3ds.h"
+#include "stereo_3ds.hpp"
 #ifdef MK64_3DS_NATIVE_LUIGI_LAB
 #include "native_gpu_scene_3ds.hpp"
 #endif
@@ -50,6 +52,12 @@ extern "C" bool Mk64Diagnostics3DSSupportsWideMode(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSResolvedNewModel(void) __attribute__((weak));
 extern "C" uint32_t Mk64Graphics3DSResolvedOutputWidth(void) __attribute__((weak));
 extern "C" bool Mk64Graphics3DSUsesIntermediatePresentation(void) __attribute__((weak));
+extern "C" void Mk64Settings3DSGetStereo(Mk64Stereo3DS*) __attribute__((weak));
+extern "C" bool Mk64GameState3DSStereoScene(float*, float*) __attribute__((weak));
+// citro3d internals: state to the command buffer now, and a command list closed
+// without queueing it, so that one list can be queued for each eye.
+extern "C" void C3Di_UpdateContext(void);
+extern "C" bool C3Di_SplitFrame(u32** pBuf, u32* pSize);
 extern "C" {
 extern u32 __ctru_linear_heap;
 extern u32 __ctru_linear_heap_size;
@@ -103,6 +111,19 @@ constexpr float kClipWEpsilon = 1.0e-4f;
 constexpr float kFullscreenBoundsEpsilon = 0.03f;
 constexpr float kFullscreenCoverScale = static_cast<float>(kTopLogicalWidth) / kNativeWidth;
 constexpr size_t kMaxVertexStrideFloats = 64;
+constexpr float kOrthographicWEpsilon = 1.0e-3f;
+// Auto-convergence reads one 8x8 depth tile in every so many, copied by the GPU
+// after the left eye's draws (the top target's depth is cleared for overlays
+// before the CPU could read it). The strides are coprime with each buffer's
+// tiles per row, so the sampled tiles spread evenly over the screen.
+constexpr uint32_t kStereoDepthTileBytes = 64 * 4;
+constexpr uint32_t kStereoDepthTopStride = 7;       // 240x400: 30 tiles a row
+constexpr uint32_t kStereoDepthSceneStride = 9;     // 512x256: 64 tiles a row
+constexpr uint32_t kStereoDepthMaxTiles = (240 / 8) * (400 / 8) / kStereoDepthTopStride + 1;
+constexpr uint32_t kStereoDepthSceneMaxTiles = (512 / 8) * (256 / 8) / kStereoDepthSceneStride + 1;
+constexpr uint32_t kStereoDepthCopyTiles = std::max(kStereoDepthMaxTiles, kStereoDepthSceneMaxTiles);
+constexpr uint32_t kStereoDepthTexelsPerTile = 4;
+constexpr uint64_t kStereoAutoConvergenceIntervalMs = 30;
 
 struct PackedVertex {
     float position[4];
@@ -479,6 +500,33 @@ struct GfxRenderingAPICitro3D::Impl {
     bool tevStateDistanceFog = false;
     uint32_t tevStateOriginalFog = 0;
     C3D_RenderTarget* topTarget = nullptr;
+    // Stereo. eyesOpen: the draws since BeginEyeList form the left eye's
+    // command list, queued again for the right eye by FinishEyeList.
+    C3D_RenderTarget* topRightTarget = nullptr;
+    C3D_Tex sceneRightTexture = {};
+    C3D_RenderTarget* sceneRightTarget = nullptr;
+    bool sceneRightTextureInitialized = false;
+    mk64_3ds::StereoFrame stereoFrame;
+    Mk64Stereo3DS stereoSettings = {};
+    mk64_3ds::StereoAutoConvergence stereoAutoConvergence;
+    mk64_3ds::StereoAutoConvergenceTuning stereoTuning;
+    float stereoNear = 0.0f;
+    float stereoFar = 0.0f;
+    bool stereoDisplayOn = false;
+    bool eyesOpen = false;
+    bool stereoSkyLayer = false;
+    mk64_3ds::NativeGeometryCull stereoFaceCull = mk64_3ds::NativeGeometryCull::None;
+    bool stereoUniformValid = false;
+    float stereoUniformA = 0.0f;
+    float stereoUniformB = 0.0f;
+    int stereoUniform = -1;
+    int stereoEyeUniform = -1;
+    int stereoEnabledUniform = -1;
+    uint8_t* stereoDepthCopy = nullptr;
+    uint32_t stereoDepthCopyTilesQueued = 0;
+    uint32_t stereoDepthCopyStride = 0;
+    bool stereoDepthCopyFromScene = false;
+    uint64_t stereoAutoConvergenceAt = 0;
     C3D_Tex sceneTexture = {};
     C3D_RenderTarget* sceneTarget = nullptr;
     bool sceneTextureInitialized = false;
@@ -580,6 +628,9 @@ struct GfxRenderingAPICitro3D::Impl {
         if (sceneTextureInitialized) {
             C3D_TexDelete(&sceneTexture);
         }
+        if (sceneRightTarget != nullptr) C3D_RenderTargetDelete(sceneRightTarget);
+        if (sceneRightTextureInitialized) C3D_TexDelete(&sceneRightTexture);
+        if (stereoDepthCopy != nullptr) linearFree(stereoDepthCopy);
         if (distanceFogTextureInitialized) C3D_TexDelete(&distanceFogTexture);
         if (crtMaskTextureInitialized) {
             C3D_TexDelete(&crtMaskTexture);
@@ -592,6 +643,7 @@ struct GfxRenderingAPICitro3D::Impl {
             if (topTarget != nullptr) {
                 C3D_RenderTargetDelete(topTarget);
             }
+            if (topRightTarget != nullptr) C3D_RenderTargetDelete(topRightTarget);
             C3D_Fini();
             gfxExit();
         }
@@ -613,6 +665,18 @@ bool GfxRenderingAPICitro3D::IsInitialized() const {
 
 void* GfxRenderingAPICitro3D::GetTopRenderTarget() const {
     return mImpl->topTarget;
+}
+
+void* GfxRenderingAPICitro3D::GetStereoRightTarget() const {
+    return mImpl->stereoFrame.on ? mImpl->topRightTarget : nullptr;
+}
+
+float GfxRenderingAPICitro3D::GetStereoHudShiftPixels() const {
+    return mImpl->stereoFrame.on ? mImpl->stereoFrame.hudNdc * mk64_3ds::kStereoPxPerNdc : 0.0f;
+}
+
+void GfxRenderingAPICitro3D::SetStereoSkyLayer(bool sky) {
+    mImpl->stereoSkyLayer = sky;
 }
 
 const char* GfxRenderingAPICitro3D::GetName() {
@@ -1078,6 +1142,16 @@ void GfxRenderingAPICitro3D::SetNativeGeometry(const mk64_3ds::NativeGeometryDra
     mImpl->nativeVertexStateDirty = true;
 }
 
+mk64_3ds::NativeGeometryCull GfxRenderingAPICitro3D::GetStereoFaceCull() const {
+    return mImpl->stereoFaceCull;
+}
+
+void GfxRenderingAPICitro3D::SetStereoFaceCull(mk64_3ds::NativeGeometryCull cull) {
+    if (mImpl->stereoFaceCull == cull) return;
+    mImpl->stereoFaceCull = cull;
+    mImpl->nativeVertexStateDirty = true;
+}
+
 bool GfxRenderingAPICitro3D::NativeLightingMatches(const mk64_3ds::NativeLightingState* state) const {
     return mImpl->nativeLightingEnabled == (state != nullptr) &&
         (state == nullptr || mImpl->nativeLighting == *state);
@@ -1115,10 +1189,10 @@ void GfxRenderingAPICitro3D::ApplyNativeVertexState() {
             light.ambient[0], light.ambient[1], light.ambient[2], 0);
     }
     GPU_CULLMODE cull = GPU_CULL_NONE;
-    if (geometry.enabled) {
-        if (geometry.cull == mk64_3ds::NativeGeometryCull::Front) cull = GPU_CULL_FRONT_CCW;
-        if (geometry.cull == mk64_3ds::NativeGeometryCull::Back) cull = GPU_CULL_BACK_CCW;
-    }
+    const mk64_3ds::NativeGeometryCull faces = geometry.enabled ? geometry.cull
+        : mImpl->eyesOpen ? mImpl->stereoFaceCull : mk64_3ds::NativeGeometryCull::None;
+    if (faces == mk64_3ds::NativeGeometryCull::Front) cull = GPU_CULL_FRONT_CCW;
+    if (faces == mk64_3ds::NativeGeometryCull::Back) cull = GPU_CULL_BACK_CCW;
     C3D_CullFace(cull);
     mImpl->nativeVertexStateDirty = false;
 }
@@ -1145,11 +1219,13 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     size_t vertexCount = sourceVertexCount;
     bool needsClipping = false;
     bool reachesDistanceFog = false;
+    bool perspective = false;
     const float fogStart = gMk64DistanceFar3DS * 0.75f;
     for (size_t vertex = 0; vertex < sourceVertexCount; ++vertex) {
         const float w = bufVbo[vertex * program->strideFloats + 3];
         needsClipping |= w < kClipWEpsilon;
         reachesDistanceFog |= w > fogStart;
+        perspective |= std::fabs(w - 1.0f) > kOrthographicWEpsilon;
     }
     if (needsClipping) {
         mImpl->clipScratch.resize(sourceTriangleCount * 6 * program->strideFloats);
@@ -1365,6 +1441,16 @@ void GfxRenderingAPICitro3D::DrawTriangles(float bufVbo[], size_t bufVboLen, siz
     mImpl->dirtyVertexEnd = firstVertex + vertexCount;
     BindPackedVertices();
     ApplyNativeVertexState();
+    if (mImpl->eyesOpen) {
+        // Perspective draws are the world, however they got there. Of the
+        // orthographic ones, an untextured draw has no detail to fuse (the sky
+        // gradient, fades): shifting it would only show its edges.
+        const bool textured = program->usedTextures[0] || program->usedTextures[1];
+        SetStereoUniform(perspective ? mk64_3ds::StereoClass::World
+                         : !textured ? mk64_3ds::StereoClass::Screen
+                         : mImpl->stereoSkyLayer ? mk64_3ds::StereoClass::Infinity
+                                                 : mk64_3ds::StereoClass::Hud);
+    }
     C3D_DrawArrays(GPU_TRIANGLES, static_cast<int>(firstVertex), static_cast<int>(vertexCount));
     ++mImpl->drawCallCount;
     mImpl->triangleCount += vertexCount / 3;
@@ -1757,6 +1843,8 @@ void GfxRenderingAPICitro3D::DrawStaticRun(const StaticRunDraw3DS& draw) {
         BufInfo_Add(bufferInfo, draw.vertices, sizeof(PackedVertex), 5, 0x43210);
     }
     mImpl->packedBufferBound = false;
+    // Recorded runs are course geometry under the game's perspective camera.
+    if (mImpl->eyesOpen) SetStereoUniform(mk64_3ds::StereoClass::World);
     C3D_DrawElements(GPU_TRIANGLES, draw.indexCount, C3D_UNSIGNED_SHORT, draw.indices);
     ++mImpl->drawCallCount;
     mImpl->triangleCount += draw.indexCount / 3;
@@ -1914,6 +2002,7 @@ void GfxRenderingAPICitro3D::PresentSceneToTopTarget() {
     C3D_RenderTargetClear(mImpl->topTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_FrameDrawOn(mImpl->topTarget);
     mImpl->activeTarget = mImpl->topTarget;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->stereoEnabledUniform, false);
 
     C3D_BindProgram(&mImpl->shaderProgram);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->textureScaleUniform, 1, 1, 1, 1);
@@ -2070,8 +2159,238 @@ void GfxRenderingAPICitro3D::PresentSceneToTopTarget() {
     ++mImpl->drawCallCount;
     mImpl->triangleCount += vertexCount / 3;
 
+    if (mImpl->stereoFrame.on && mImpl->sceneRightTarget != nullptr) {
+        // The same quad from the right eye's scene into the right output. The
+        // left target stays current for whatever draws over the frame next.
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+        C3D_RenderTargetClear(mImpl->topRightTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
+        C3D_FrameDrawOn(mImpl->topRightTarget);
+        C3D_SetViewport(0, 0, kTopHeight, mImpl->outputWidth);
+        C3D_TexSetFilter(&mImpl->sceneRightTexture, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&mImpl->sceneRightTexture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        C3D_TexBind(0, &mImpl->sceneRightTexture);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, static_cast<int>(vertexCount));
+        ++mImpl->drawCallCount;
+        mImpl->triangleCount += vertexCount / 3;
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+        C3D_FrameDrawOn(mImpl->topTarget);
+        C3D_TexBind(0, &mImpl->sceneTexture);
+    }
+
     mImpl->tevStateValid = false;
     mImpl->scenePresented = true;
+}
+
+void GfxRenderingAPICitro3D::UpdateStereoFrame() {
+    auto& stereo = mImpl->stereoFrame;
+    stereo = {};
+    mk64_3ds::gStereoClipScale3DS = 1.0f;
+    mk64_3ds::gStereoCullReach3DS = 0.0f;
+    float nearPlane = 0.0f;
+    float farPlane = 0.0f;
+    if (mImpl->topRightTarget != nullptr && mImpl->outputWidth == kTopLogicalWidth &&
+        Mk64Settings3DSGetStereo != nullptr && Mk64GameState3DSStereoScene != nullptr &&
+        Mk64GameState3DSStereoScene(&nearPlane, &farPlane)) {
+        Mk64Settings3DSGetStereo(&mImpl->stereoSettings);
+        const float slider = osGet3DSliderState();
+        const float sep = mk64_3ds::StereoSeparation(mImpl->stereoSettings.separation, slider);
+        if (slider > 0.001f && sep > 0.0f &&
+            (!mImpl->postprocessActive || EnsureStereoSceneResources())) {
+            stereo.on = true;
+            stereo.sep = sep;
+            stereo.conv = mk64_3ds::StereoConvergence(mImpl->stereoSettings.convergenceTenths);
+            stereo.hudNdc = mk64_3ds::StereoHudShift(mImpl->stereoSettings.hudDepth, sep);
+            mImpl->stereoNear = nearPlane;
+            mImpl->stereoFar = farPlane;
+            // Twice the shift at infinity: a triangle just beyond the screen's
+            // edge can come into either eye, and nearer ones shift the other way.
+            mk64_3ds::gStereoClipScale3DS = 1.0f + 2.0f * sep;
+        }
+    }
+    if (stereo.on != mImpl->stereoDisplayOn) {
+        gfxSet3D(stereo.on);
+        mImpl->stereoDisplayOn = stereo.on;
+    }
+    if (!stereo.on || !mImpl->stereoSettings.autoConvergence) {
+        mImpl->stereoAutoConvergence.Reset();
+        mImpl->stereoDepthCopyTilesQueued = 0;
+    }
+}
+
+bool GfxRenderingAPICitro3D::EnsureStereoSceneResources() {
+    if (mImpl->sceneRightTarget != nullptr) return true;
+    if (!mImpl->sceneTextureInitialized) return false;
+    if (!mImpl->sceneRightTextureInitialized) {
+        if (!C3D_TexInitVRAM(&mImpl->sceneRightTexture, mImpl->sceneTexture.width,
+                             mImpl->sceneTexture.height, GPU_RGBA8)) {
+            return false;
+        }
+        mImpl->sceneRightTextureInitialized = true;
+    }
+    mImpl->sceneRightTarget = C3D_RenderTargetCreateFromTex(
+        &mImpl->sceneRightTexture, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(GPU_RB_DEPTH24_STENCIL8));
+    return mImpl->sceneRightTarget != nullptr;
+}
+
+void GfxRenderingAPICitro3D::UpdateAutoConvergence() {
+    auto& stereo = mImpl->stereoFrame;
+    if (!stereo.on) return;
+    const float manual = stereo.conv;
+    const auto& tuning = mImpl->stereoTuning;
+    if (!mImpl->stereoSettings.autoConvergence || mImpl->stereoDepthCopy == nullptr) return;
+    auto& loop = mImpl->stereoAutoConvergence;
+
+    // The GPU is idle here (the frame has begun), so last frame's copy is whole.
+    // The loop's rates are per 30 Hz update; a midpoint image keeps its value.
+    const uint64_t now = osGetTime();
+    const uint32_t tiles = mImpl->stereoDepthCopyTilesQueued;
+    if (tiles == 0 || now - mImpl->stereoAutoConvergenceAt < kStereoAutoConvergenceIntervalMs) {
+        stereo.conv = loop.lastConv > 0.0f ? std::min(loop.lastConv, manual) : manual;
+        return;
+    }
+    mImpl->stereoAutoConvergenceAt = now;
+    if (!Mk64System3DSInvalidateDataCache(mImpl->stereoDepthCopy, tiles * kStereoDepthTileBytes)) return;
+
+    static std::array<mk64_3ds::StereoDepthSample, kStereoDepthCopyTiles * kStereoDepthTexelsPerTile> samples;
+    size_t count = 0;
+    const bool scene = mImpl->stereoDepthCopyFromScene;
+    const uint32_t stride = mImpl->stereoDepthCopyStride;
+    const uint32_t tilesPerRow = scene ? mImpl->sceneTexture.width / 8U : kTopHeight / 8U;
+    const float renderWidth = static_cast<float>(mImpl->renderWidth);
+    const float renderHeight = static_cast<float>(mImpl->renderHeight);
+    const auto* copy = reinterpret_cast<const uint32_t*>(mImpl->stereoDepthCopy);
+    for (uint32_t index = 0; index < tiles; ++index) {
+        const uint32_t tile = index * stride;
+        const uint32_t row = tile / tilesPerRow;
+        const uint32_t col = tile % tilesPerRow;
+        for (uint32_t texel = 0; texel < kStereoDepthTexelsPerTile; ++texel) {
+            const uint32_t tx = (texel & 1U) ? 6U : 2U;
+            const uint32_t ty = (texel & 2U) ? 6U : 2U;
+            const uint32_t x = col * 8U + tx;
+            const uint32_t y = row * 8U + ty;
+            mk64_3ds::StereoDepthSample sample;
+            if (scene) {
+                // Upright, with memory rows bottom-up.
+                const float up = static_cast<float>(mImpl->sceneTexture.height - 1U - y);
+                if (static_cast<float>(x) >= renderWidth || up >= renderHeight) continue;
+                sample.x = static_cast<float>(x) / renderWidth;
+                sample.y = 1.0f - up / renderHeight;
+            } else {
+                // The tilted top target: memory rows run along the screen's x.
+                sample.x = static_cast<float>(y) / static_cast<float>(kTopLogicalWidth);
+                sample.y = 1.0f - static_cast<float>(x) / static_cast<float>(kTopHeight);
+            }
+            const uint32_t depth = copy[index * 64U + MortonOffset8x8(tx, ty)] & 0xFFFFFFU;
+            // Reversed depth: 1 at the near plane, 0 (the clear value) at the far.
+            sample.zp = 1.0f - static_cast<float>(depth) * (1.0f / 16777215.0f);
+            samples[count++] = sample;
+        }
+    }
+    const float zp = mk64_3ds::StereoNearDepth(samples.data(), count, tuning.regionBottom);
+    // guPerspective at scale 1, which every game camera uses.
+    const float span = mImpl->stereoNear - mImpl->stereoFar;
+    const float m22 = (mImpl->stereoNear + mImpl->stereoFar) / span;
+    const float m32 = 2.0f * mImpl->stereoNear * mImpl->stereoFar / span;
+    const float nearest = zp > 0.0f ? mk64_3ds::StereoViewDepth(zp, m22, m32) : -1.0f;
+    stereo.conv = loop.Update(nearest, manual, stereo.sep, mImpl->stereoSettings.comfortTarget, tuning);
+}
+
+void GfxRenderingAPICitro3D::QueueStereoDepthCopy() {
+    mImpl->stereoDepthCopyTilesQueued = 0;
+    if (mImpl->stereoDepthCopy == nullptr || !mImpl->stereoSettings.autoConvergence ||
+        mImpl->activeTarget == nullptr) {
+        return;
+    }
+    const bool scene = mImpl->activeTarget == mImpl->sceneTarget;
+    const C3D_FrameBuf& frameBuffer = mImpl->activeTarget->frameBuf;
+    const uint32_t stride = scene ? kStereoDepthSceneStride : kStereoDepthTopStride;
+    const uint32_t tileCount = (frameBuffer.width / 8U) * (frameBuffer.height / 8U);
+    const uint32_t tiles = std::min(tileCount / stride, kStereoDepthCopyTiles);
+    if (frameBuffer.depthBuf == nullptr || tiles == 0) return;
+    // Texture-copy mode: one tile, then skip to the next sampled tile.
+    constexpr u32 kTextureCopyMode = BIT(3);
+    const u16 tileUnits = kStereoDepthTileBytes / 16U;
+    GX_TextureCopy(static_cast<u32*>(frameBuffer.depthBuf),
+                   GX_BUFFER_DIM(tileUnits, tileUnits * (stride - 1U)),
+                   reinterpret_cast<u32*>(mImpl->stereoDepthCopy), GX_BUFFER_DIM(tileUnits, 0),
+                   tiles * kStereoDepthTileBytes, kTextureCopyMode);
+    mImpl->stereoDepthCopyTilesQueued = tiles;
+    mImpl->stereoDepthCopyStride = stride;
+    mImpl->stereoDepthCopyFromScene = scene;
+}
+
+void GfxRenderingAPICitro3D::CloseGpuList(uint32_t** list, uint32_t* words) {
+    u32* closed = nullptr;
+    u32 closedWords = 0;
+    if (!C3Di_SplitFrame(&closed, &closedWords) || closed == nullptr || closedWords == 0) {
+        if (list != nullptr) *list = nullptr;
+        if (words != nullptr) *words = 0;
+        return;
+    }
+    if (!Mk64System3DSCleanDataCache(closed, closedWords * sizeof(u32))) {
+        throw std::runtime_error("3DS command list cache clean failed");
+    }
+    GX_ProcessCommandList(closed, closedWords * sizeof(u32), 0);
+    if (list != nullptr) *list = closed;
+    if (words != nullptr) *words = closedWords;
+}
+
+void GfxRenderingAPICitro3D::BeginEyeList() {
+    if (!mImpl->stereoFrame.on || mImpl->eyesOpen || mImpl->activeTarget != mImpl->gameTarget) return;
+    // The target and sign go out ahead of the list, which must not carry them.
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->stereoEyeUniform, 1.0f, 0.0f, 0.0f, 0.0f);
+    C3Di_UpdateContext();
+    CloseGpuList(nullptr, nullptr);
+    mImpl->eyesOpen = true;
+    // All state again, so that it is sent from inside the list: the right eye
+    // starts from where the left eye's draws left the GPU, not from here.
+    RestoreFast3DState();
+    mImpl->nativeVertexStateDirty = true;  // the face cull, sent from inside the list
+}
+
+void GfxRenderingAPICitro3D::FinishEyeList(bool frameEnd) {
+    if (!mImpl->eyesOpen) return;
+    mImpl->eyesOpen = false;
+    u32* leftList = nullptr;
+    u32 leftWords = 0;
+    CloseGpuList(&leftList, &leftWords);
+    if (frameEnd) QueueStereoDepthCopy();
+    const bool scene = mImpl->activeTarget == mImpl->sceneTarget;
+    C3D_RenderTarget* left = mImpl->activeTarget;
+    C3D_RenderTarget* right = scene ? mImpl->sceneRightTarget : mImpl->topRightTarget;
+
+    C3D_FrameDrawOn(right);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->stereoEyeUniform, -1.0f, 0.0f, 0.0f, 0.0f);
+    C3Di_UpdateContext();
+    CloseGpuList(nullptr, nullptr);
+    if (leftList != nullptr) GX_ProcessCommandList(leftList, leftWords * sizeof(u32), 0);  // flushed above
+
+    C3D_FrameDrawOn(left);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->stereoEyeUniform, 1.0f, 0.0f, 0.0f, 0.0f);
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->stereoEnabledUniform, false);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3Di_UpdateContext();
+    CloseGpuList(nullptr, nullptr);
+    // Whatever draws next on this frame re-establishes the Fast3D state.
+    mImpl->tevStateValid = false;
+    mImpl->textureTransformValid = false;
+    mImpl->nativeVertexStateDirty = true;
+    mImpl->distanceFogTextureBound = false;
+    mImpl->stereoUniformValid = false;
+    mImpl->staticVertexStateValid = false;
+    mImpl->packedBufferBound = false;
+    if (!frameEnd) RestoreFast3DState();
+}
+
+void GfxRenderingAPICitro3D::SetStereoUniform(StereoClassForDraw cls) {
+    float a = 0.0f;
+    float b = 0.0f;
+    mk64_3ds::StereoShift(mImpl->stereoFrame, cls, &a, &b);
+    if (mImpl->stereoUniformValid && a == mImpl->stereoUniformA && b == mImpl->stereoUniformB) return;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, mImpl->stereoUniform, a, b, 0.0f, 0.0f);
+    mImpl->stereoUniformA = a;
+    mImpl->stereoUniformB = b;
+    mImpl->stereoUniformValid = true;
 }
 
 void GfxRenderingAPICitro3D::RestoreFast3DState() {
@@ -2080,6 +2399,8 @@ void GfxRenderingAPICitro3D::RestoreFast3DState() {
     C3D_BindProgram(&mImpl->shaderProgram);
     mImpl->nativeVertexStateDirty = true;
     mImpl->textureTransformValid = false;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, mImpl->stereoEnabledUniform, mImpl->eyesOpen);
+    mImpl->stereoUniformValid = false;
 
     C3D_AttrInfo* attributeInfo = C3D_GetAttrInfo();
     AttrInfo_Init(attributeInfo);
@@ -2314,6 +2635,17 @@ void GfxRenderingAPICitro3D::Init() {
         return;
     }
     C3D_RenderTargetSetOutput(mImpl->topTarget, GFX_TOP, GFX_LEFT, kDisplayTransferFlags);
+    // The right eye, drawn only while the 3D slider is up. The wide mode's 800
+    // lines per eye have no right-eye output to go to.
+    if (mImpl->outputWidth == kTopLogicalWidth) {
+        mImpl->topRightTarget = C3D_RenderTargetCreate(kTopHeight, mImpl->outputWidth, GPU_RB_RGBA8,
+                                                       GPU_RB_DEPTH24_STENCIL8);
+        if (mImpl->topRightTarget != nullptr) {
+            C3D_RenderTargetSetOutput(mImpl->topRightTarget, GFX_TOP, GFX_RIGHT, kDisplayTransferFlags);
+            mImpl->stereoDepthCopy = static_cast<uint8_t*>(
+                linearAlloc(kStereoDepthCopyTiles * kStereoDepthTileBytes));
+        }
+    }
 
     mImpl->shaderBinary = DVLB_ParseFile(reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(fast3d_passthrough_shbin)),
                                          fast3d_passthrough_shbin_size);
@@ -2340,6 +2672,9 @@ void GfxRenderingAPICitro3D::Init() {
     mImpl->staticColorUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "staticColor");
     mImpl->staticColorMaskUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "staticColorMask");
     mImpl->originalFogUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "originalFogEnabled");
+    mImpl->stereoUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "stereo");
+    mImpl->stereoEyeUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "eye");
+    mImpl->stereoEnabledUniform = shaderInstanceGetUniformLocation(mImpl->shaderProgram.vertexShader, "stereoEnabled");
     if (mImpl->textureScaleUniform < 0 || mImpl->textureClampUniform < 0 ||
         mImpl->projectionUniform < 0 || mImpl->distanceFogUniform < 0 ||
         mImpl->nativeGeometryUniform < 0 || mImpl->nativeMatrixUniform < 0 ||
@@ -2347,7 +2682,8 @@ void GfxRenderingAPICitro3D::Init() {
         mImpl->nativeLightDirectionUniform < 0 || mImpl->nativeLightDiffuseUniform < 0 ||
         mImpl->nativeLightAmbientUniform < 0 || mImpl->staticMeshUniform < 0 ||
         mImpl->staticUvUniform < 0 || mImpl->staticConstantColorUniform < 0 ||
-        mImpl->staticColorUniform < 0 || mImpl->staticColorMaskUniform < 0 || mImpl->originalFogUniform < 0) return;
+        mImpl->staticColorUniform < 0 || mImpl->staticColorMaskUniform < 0 || mImpl->originalFogUniform < 0 ||
+        mImpl->stereoUniform < 0 || mImpl->stereoEyeUniform < 0 || mImpl->stereoEnabledUniform < 0) return;
     // Independent ramps: R holds all 256 original fog factors; G retains the
     // exact eight distance-option samples. Both leave alpha and depth intact.
     mImpl->distanceFogTextureInitialized = C3D_TexInit(&mImpl->distanceFogTexture, 256, 8, GPU_RGBA8);
@@ -2425,6 +2761,7 @@ void GfxRenderingAPICitro3D::StartFrame() {
                               ? ScaledDimension(kTopHeight, mImpl->renderScalePercent)
                               : kTopHeight;
     mImpl->gameTarget = mImpl->postprocessActive ? mImpl->sceneTarget : mImpl->topTarget;
+    UpdateStereoFrame();
     const uint64_t beginTick = svcGetSystemTick();
     mImpl->frameBeginWaitMicroseconds = 0;
     mImpl->pendingPresentWaitMicroseconds = 0;
@@ -2466,6 +2803,14 @@ void GfxRenderingAPICitro3D::StartFrame() {
     mImpl->tevStateValid = false;
     mImpl->activeTarget = mImpl->gameTarget;
     mImpl->scenePresented = false;
+    mImpl->eyesOpen = false;
+    mImpl->stereoSkyLayer = false;
+    mImpl->stereoFaceCull = mk64_3ds::NativeGeometryCull::None;
+    mImpl->nativeVertexStateDirty = true;
+    UpdateAutoConvergence();
+    // This frame's own convergence: it is final from here on.
+    mk64_3ds::gStereoCullReach3DS =
+        mImpl->stereoFrame.on ? mImpl->stereoFrame.sep * mImpl->stereoFrame.conv : 0.0f;
     mImpl->packedVertexCount = 0;
     mImpl->dirtyVertexBegin = 0;
     mImpl->dirtyVertexEnd = 0;
@@ -2479,12 +2824,14 @@ void GfxRenderingAPICitro3D::StartFrame() {
                             Mk64Settings3DSGetAspectRatio() != 0;
     C3D_FrameDrawOn(mImpl->gameTarget);
     RestoreFast3DState();
+    BeginEyeList();
 }
 
 void GfxRenderingAPICitro3D::EndFrame() {
     if (!mImpl->frameActive) {
         return;
     }
+    FinishEyeList(true);
     // Fast3D cleans its exact VBO and texture ranges. Citro2D owns private
     // linear vertex/index buffers, so only frames that actually submit a C2D
     // batch need the separately captured range below.
@@ -2609,7 +2956,15 @@ void GfxRenderingAPICitro3D::StartDrawToFramebuffer(int fbId, float noiseScale) 
         slot = mImpl->framebuffers[fbId].get();
         target = slot->target;
     }
+    if (mImpl->eyesOpen && mImpl->activeTarget == target) {
+        // Rebinding the same target would put the left eye's framebuffer into
+        // its command list, and the right eye would draw over the left.
+        C3D_SetViewport(0, 0, target->frameBuf.width, target->frameBuf.height);
+        UploadProjectionForActiveTarget();
+        return;
+    }
     if (mImpl->frameActive && mImpl->activeTarget != target) {
+        FinishEyeList(false);
         FlushPackedVertices();
         C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }
@@ -2620,6 +2975,7 @@ void GfxRenderingAPICitro3D::StartDrawToFramebuffer(int fbId, float noiseScale) 
         C3D_RenderTargetClear(target, C3D_CLEAR_ALL, 0x000000FF, 0);
         slot->needsClear = false;
     }
+    BeginEyeList();
 }
 
 void GfxRenderingAPICitro3D::CopyFramebuffer(int fbDstId, int fbSrcId, int srcX0, int srcY0, int srcX1, int srcY1,
@@ -2640,6 +2996,11 @@ void GfxRenderingAPICitro3D::ClearFramebuffer(bool color, bool depth) {
     C3D_ClearBits clear = static_cast<C3D_ClearBits>((color ? C3D_CLEAR_COLOR : 0) | (depth ? C3D_CLEAR_DEPTH : 0));
     if (clear != 0 && mImpl->activeTarget != nullptr) {
         C3D_RenderTargetClear(mImpl->activeTarget, clear, 0x000000FF, 0);
+        if (mImpl->eyesOpen) {
+            C3D_RenderTargetClear(mImpl->activeTarget == mImpl->sceneTarget ? mImpl->sceneRightTarget
+                                                                            : mImpl->topRightTarget,
+                                  clear, 0x000000FF, 0);
+        }
     }
 }
 
@@ -2706,6 +3067,9 @@ void GfxRenderingAPICitro3D::DeleteTexture(uint32_t textureId) {
 
 bool GfxRenderingAPICitro3D::FenceTextureReuseBatch() {
     if (!mImpl->frameActive || mImpl->activeTarget == nullptr) return false;
+    // The fence ends the frame's command buffer: the right eye gets the draws so
+    // far now, and the list starts anew after it.
+    FinishEyeList(false);
     const uint64_t started = svcGetSystemTick();
     const bool completed = mk64_3ds::FenceTextureBatch(
         mImpl->topTarget,
@@ -2726,6 +3090,7 @@ bool GfxRenderingAPICitro3D::FenceTextureReuseBatch() {
     mImpl->packedVertexCount = mImpl->dirtyVertexBegin = mImpl->dirtyVertexEnd = 0;
     C3D_FrameDrawOn(mImpl->activeTarget);
     RestoreFast3DState();
+    BeginEyeList();
     return true;
 }
 
@@ -2888,6 +3253,7 @@ void* GfxRenderingAPICitro3D::PrepareForExternalDraw() {
         return nullptr;
     }
     RequireGpuCommandRoom(mk64_3ds::kGpuCommandTailWords);
+    FinishEyeList(true);
     // Citro2D's target-clear helper performs an internal FrameSplit. Complete
     // any scaled presentation first, then hand it a coherent top target.
     PresentSceneToTopTarget();

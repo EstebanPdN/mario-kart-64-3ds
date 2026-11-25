@@ -24,8 +24,9 @@ pre=r'''
 #include "original_fog_3ds.hpp"
 #include "packed_vertex_cache_3ds.hpp"
 #include "performance_trace_3ds.hpp"
+#include "stereo_3ds.hpp"
 constexpr size_t kMaxVertexStrideFloats=64,kMaxSourceVertices=768,kMaxDrawVertices=1536,kVertexBufferCapacity=65536;
-constexpr float kClipWEpsilon=1e-4f,kFullscreenBoundsEpsilon=0.03f,kFullscreenCoverScale=1.25f;
+constexpr float kClipWEpsilon=1e-4f,kOrthographicWEpsilon=1e-3f,kFullscreenBoundsEpsilon=0.03f,kFullscreenCoverScale=1.25f;
 constexpr int kNativeWidth=320,kNativeHeight=240,kTopLogicalWidth=400,GPU_VERTEX_SHADER=0,GPU_TRIANGLES=0;
 namespace mk64_3ds {constexpr int kGpuCommandTailWords=64,kGpuCommandDrawWords=32;PerformanceTick sCurrent;bool sTickOpen=true,sWriting=false;unsigned clockReads=0;PerformanceTick& PerformanceCurrent(){return sCurrent;}uint64_t PerformanceNow(){return ++clockReads;}}
 float gMk64DistanceFar3DS=5000;unsigned colorConversions=0,conversionProbes=0;
@@ -38,7 +39,7 @@ for name in ['CompiledTevOperation3DS','ShaderProgram']:pre+=block(h,'struct '+n
 pre+=r'''
 struct Impl {
  struct Texture{bool initialized=true,hasTransparency=false;unsigned sourceWidth=320,sourceHeight=240;};
- bool frameActive=true,originalAspect=false,textureTransformValid=false;ShaderProgram* currentProgram=nullptr;
+ bool frameActive=true,originalAspect=false,textureTransformValid=false,eyesOpen=false,stereoSkyLayer=false;ShaderProgram* currentProgram=nullptr;
  mk64_3ds::NativeGeometryDraw nativeGeometry;void* activeTarget=nullptr;void* gameTarget=nullptr;
  std::array<int,2> selectedFramebuffers{};std::array<unsigned,2> selectedTextures{};std::vector<Texture> textures={Texture{}};
  std::vector<float> clipScratch;PackedVertex* packedVertices=nullptr;size_t packedVertexCount=0,dirtyVertexBegin=0,dirtyVertexEnd=0;
@@ -48,7 +49,7 @@ struct Impl {
 struct MaterialEvent {int varying;std::array<std::array<float,4>,7> constants;std::array<float,4> gray,fog;bool distance;bool operator==(const MaterialEvent&)const=default;};
 class GfxRenderingAPICitro3D {public:
  Impl state;Impl* mImpl=&state;std::vector<MaterialEvent> materials;
- bool DrawTargetVisible(){return true;}void RequireGpuCommandRoom(int){}void BindPackedVertices(){}void ApplyNativeVertexState(){}
+ bool DrawTargetVisible(){return true;}void RequireGpuCommandRoom(int){}void BindPackedVertices(){}void ApplyNativeVertexState(){}void SetStereoUniform(mk64_3ds::StereoClass){}
  std::array<float,4> SelectedTextureScale(ShaderProgram*,float){return {1,1,1,1};}
  void ApplyCombinerState(ShaderProgram*,int varying,const std::array<std::array<float,4>,7>& inputs,const std::array<float,4>& gray,bool distance,const std::array<float,4>& fog){materials.push_back({varying,inputs,gray,fog,distance});}
  void DrawTriangles(float*,size_t,size_t);void Reference(float*,size_t,size_t);

@@ -8,6 +8,22 @@
 
 namespace mk64_3ds {
 
+inline float gStereoClipScale3DS = 1.0f;
+// sep * conv while the eyes are on, else 0: the face cull's reach below.
+inline float gStereoCullReach3DS = 0.0f;
+
+// How far an eye's shift can move Fast3DProjectedCross, in its own w-scaled
+// units. An eye adds e * (m / w - sep) to a vertex's projected x, e = +-1 and
+// m = sep * conv, and leaves y alone, so the cross is linear in e: cross + e *
+// this. A face the centre view sees from behind can show its front to one eye,
+// and culling it leaves a hole there with the sky behind: the CPU keeps a
+// triangle unless both eyes see its back, and the GPU culls each eye's back
+// faces. Only with every vertex in front of the eye; else 0, the mono test.
+inline float StereoCullReach(float reach, float w1, float w2, float w3, float y1, float y2, float y3) {
+    if (!(reach > 0.0f) || !(w1 > 0.0f) || !(w2 > 0.0f) || !(w3 > 0.0f)) return 0.0f;
+    return reach * std::fabs((w2 - w1) * (y3 * w2 - y2 * w3) - (y1 * w2 - y2 * w1) * (w2 - w3));
+}
+
 enum class NativeGeometryCull : std::uint8_t { None, Front, Back };
 
 // A draw owns a copy: loaded vertex slots can be replaced while the previous
@@ -181,7 +197,10 @@ public:
     const Vertex& GetVertex(std::size_t index) const { return vertices_[index]; }
 
     static std::uint8_t ClipMask(float x, float y, float z, float w) {
-        return (x < -w ? 1 : 0) | (x > w ? 2 : 0) |
+        // Each eye shifts a triangle sideways after this test: keep what either
+        // eye could still see (gStereoClipScale3DS, 1 in mono).
+        const float xw = w * gStereoClipScale3DS;
+        return (x < -xw ? 1 : 0) | (x > xw ? 2 : 0) |
                (y < -w ? 4 : 0) | (y > w ? 8 : 0) | (z > w ? 32 : 0);
     }
 

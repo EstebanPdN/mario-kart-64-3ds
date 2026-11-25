@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "stereo_settings_3ds.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,6 +40,19 @@ typedef enum Mk64HudMeters3DS {
     MK64_HUD_METERS_3DS_SPEED = 2,
     MK64_HUD_METERS_3DS_POSITION_LAP = 3,
 } Mk64HudMeters3DS;
+
+typedef enum Mk64StereoRow3DS {
+    MK64_STEREO_ROW_3DS_SEPARATION = 0,
+    MK64_STEREO_ROW_3DS_CONVERGENCE = 1,
+    MK64_STEREO_ROW_3DS_HUD_DEPTH = 2,
+    MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE = 3,
+    MK64_STEREO_ROW_3DS_COMFORT_TARGET = 4,
+    MK64_STEREO_ROW_3DS_COUNT = 5,
+} Mk64StereoRow3DS;
+
+void Mk64Settings3DSGetStereo(Mk64Stereo3DS* stereo);
+int Mk64Settings3DSGetStereoRow(Mk64StereoRow3DS row);
+void Mk64Settings3DSSetStereoRow(Mk64StereoRow3DS row, int value);
 
 typedef enum Mk64DisplayProfile3DS {
     MK64_DISPLAY_PROFILE_3DS_PERFORMANCE = 0,

@@ -10,6 +10,8 @@ extern "C" {
 
 bool Mk64Graphics3DSInit(void);
 void* Mk64Graphics3DSGetTopRenderTarget(void);
+void* Mk64Graphics3DSGetStereoRightTarget(void);
+float Mk64Graphics3DSGetStereoHudShiftPixels(void);
 void Mk64Graphics3DSShutdown(void);
 bool WindowIsRunning(void);
 

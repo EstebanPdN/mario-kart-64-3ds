@@ -169,6 +169,8 @@ if(MK64_3DS_BUILD_GAME_ENGINE)
 
     include(platform/3ds/cmake/world_tracks_bridge_3ds.cmake)
 
+    include(platform/3ds/cmake/stereo_sky_3ds.cmake)
+
     add_library(mk64-3ds-game-engine STATIC
         platform/3ds/source/audio_runtime_3ds.cpp
         platform/3ds/source/cvar_3ds.cpp

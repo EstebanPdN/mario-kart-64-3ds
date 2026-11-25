@@ -5,6 +5,7 @@ const char* TabName(OptionsTab tab) {
     switch (tab) {
         case OptionsTab::Game: return sUi.modalOpenedFromPause ? "PAUSE" : "GAME";
         case OptionsTab::Screen: return "DISPLAY";
+        case OptionsTab::Stereo: return "3D";
         case OptionsTab::Gameplay: return "GAMEPLAY";
         case OptionsTab::Developer: return "DEVELOPER";
         default: return "";
@@ -53,6 +54,18 @@ void GetRowText(OptionsTab tab, uint8_t row, const char** label, char* value, si
                 case mk64_3ds::DisplayOption::Back: *label="BACK TO DISPLAY"; break;
             }
             break;
+        case OptionsTab::Stereo: {
+            const int number = Mk64Settings3DSGetStereoRow(static_cast<Mk64StereoRow3DS>(row));
+            switch (static_cast<Mk64StereoRow3DS>(row)) {
+                case MK64_STEREO_ROW_3DS_SEPARATION: *label="3D DEPTH"; std::snprintf(value,valueSize,"%d",number); break;
+                case MK64_STEREO_ROW_3DS_CONVERGENCE: *label="CONVERGENCE"; std::snprintf(value,valueSize,"%d.%d",number/10,number%10); break;
+                case MK64_STEREO_ROW_3DS_HUD_DEPTH: *label="HUD DEPTH"; std::snprintf(value,valueSize,"%d",number); break;
+                case MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE: *label="AUTO CONVERGENCE"; put(number != 0 ? "ON" : "OFF"); break;
+                case MK64_STEREO_ROW_3DS_COMFORT_TARGET: *label="COMFORT TARGET"; std::snprintf(value,valueSize,"%d",number); break;
+                default: break;
+            }
+            break;
+        }
         case OptionsTab::Gameplay:
             if (row == 0) { *label="TURBO SPEED"; std::snprintf(value,valueSize,"%uX",Mk64Settings3DSGetTurboMultiplier()); }
             else if (row == 1) { *label="VOLUME"; std::snprintf(value,valueSize,"%u%%",Mk64Settings3DSGetMasterVolumePercent()); }
@@ -78,6 +91,11 @@ mk64_3ds::OptionIcon OptionIconForRow(OptionsTab tab, uint8_t row) {
             if (mk64_3ds::DisplayOptionAt(sUi.displayAdvanced, row) == mk64_3ds::DisplayOption::Textures) return OptionIcon::Render;
             if (mk64_3ds::DisplayOptionAt(sUi.displayAdvanced, row) == mk64_3ds::DisplayOption::Render) return OptionIcon::Dump;
             return static_cast<OptionIcon>(mk64_3ds::DisplayOptionAt(sUi.displayAdvanced, row));
+        case OptionsTab::Stereo: {
+            constexpr OptionIcon icons[] = { OptionIcon::Aspect, OptionIcon::Distance, OptionIcon::Hud,
+                OptionIcon::Advanced, OptionIcon::Profile };
+            return row < MK64_STEREO_ROW_3DS_COUNT ? icons[row] : OptionIcon::Advanced;
+        }
         case OptionsTab::Gameplay:
             return static_cast<OptionIcon>(static_cast<unsigned>(OptionIcon::Turbo) + row);
         case OptionsTab::Developer:
@@ -105,8 +123,12 @@ void DrawOptions() {
         const auto tab = VisibleTab(index);
         const bool selected = tab == sUi.tab;
         const float center = (index + 0.5f) * kBottomWidth / VisibleTabCount();
+        // Five tabs leave less room: shrink a name that would touch the next.
+        const float tabScale = tab == OptionsTab::Developer ? 0.5f : 0.58f;
+        const float tabRoom = kBottomWidth / VisibleTabCount() - 4.0f;
+        const float tabWidth = MeasureText(TabName(tab), tabScale);
         DrawText(TabName(tab), center,
-                 kOptionsTabY + 4.0f, tab == OptionsTab::Developer ? 0.5f : 0.58f,
+                 kOptionsTabY + 4.0f, tabWidth > tabRoom ? tabScale * tabRoom / tabWidth : tabScale,
                  selected ? C2D_Color32(255, 225, 75, 255)
                           : C2D_Color32(210, 220, 220, 230),
                  C2D_AlignCenter, 0.72f);
@@ -139,7 +161,7 @@ void DrawOptions() {
                                  : C2D_Color32(198, 222, 210, 240)),
                  C2D_AlignRight, 0.74f);
         sDataFontPalette = -1;
-        const float sliderCenter = mk64_3ds::OptionRowCenterY(sUi.tab == OptionsTab::Screen, row);
+        const float sliderCenter = mk64_3ds::OptionRowCenterY(CompactOptionRows(sUi.tab), row);
         if ((sUi.tab == OptionsTab::Screen &&
             mk64_3ds::DisplayOptionAt(sUi.displayAdvanced, row) == mk64_3ds::DisplayOption::Render) ||
             (sUi.tab == OptionsTab::Gameplay && row <= 1)) {
@@ -166,6 +188,15 @@ void DrawOptions() {
                                       0.79f, 3, 3, C2D_Color32(255, 250, 220, 255));
         }
 
+    }
+    if (sUi.tab == OptionsTab::Stereo) {
+        const char* hint = Mk64Graphics3DSResolvedOutputWidth != nullptr &&
+                                   Mk64Graphics3DSResolvedOutputWidth() != 400
+                               ? "3D NEEDS THE 400 RESOLUTION."
+                               : "3D SLIDER SETS THE STRENGTH. HUD 50 IS ON SCREEN.";
+        const float hintWidth = MeasureText(hint, 0.5f);
+        DrawText(hint, 160.0f, 193.0f, hintWidth > 300.0f ? 0.5f * 300.0f / hintWidth : 0.5f,
+                 C2D_Color32(198, 222, 210, 240), C2D_AlignCenter, 0.74f);
     }
     if (!sUi.modalOpenedFromPause && !(sUi.tab == OptionsTab::Screen && sUi.displayAdvanced)) DrawText("B BACK",
         160.0f, 214.0f, 0.68f, C2D_Color32(235, 238, 225, 255),C2D_AlignCenter,0.74f);

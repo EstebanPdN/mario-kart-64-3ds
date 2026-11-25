@@ -5,19 +5,28 @@ uint8_t RowCount(OptionsTab tab) {
     switch (tab) {
         case OptionsTab::Game: return sUi.modalOpenedFromPause ? 3 : 2;
         case OptionsTab::Screen: return sUi.displayAdvanced ? mk64_3ds::kAdvancedDisplayOptions.size() : mk64_3ds::kDisplayOptions.size();
+        case OptionsTab::Stereo: return MK64_STEREO_ROW_3DS_COUNT;
         case OptionsTab::Gameplay: return 3;
         case OptionsTab::Developer: return 5;
         default: return 1;
     }
 }
 
-int VisibleTabCount() { return 4; }
+int VisibleTabCount() { return static_cast<int>(OptionsTab::Count); }
 OptionsTab VisibleTab(int index) { return static_cast<OptionsTab>(index); }
 int VisibleTabIndex() { return static_cast<int>(sUi.tab); }
 
+// The display layout's tighter rows fit the 3D page's seven.
+bool CompactOptionRows(OptionsTab tab) { return tab == OptionsTab::Screen || tab == OptionsTab::Stereo; }
+
 float OptionsRowY(OptionsTab tab, uint8_t row) {
-    return mk64_3ds::OptionRowY(tab == OptionsTab::Screen, row);
+    return mk64_3ds::OptionRowY(CompactOptionRows(tab), row);
 }
+
+// The 3D rows step while the D-pad is held, and the top screen follows live.
+uint64_t sStereoRepeatAt = 0;
+constexpr uint64_t kStereoRepeatDelayMilliseconds = 350;
+constexpr uint64_t kStereoRepeatIntervalMilliseconds = 70;
 
 void OpenOptions(bool fromPause) {
     sUi.modalOpen = true;
@@ -40,8 +49,10 @@ void CloseOptions() {
     }
     if (Mk64Settings3DSGetOverlayEnabled()) {
         Mk64Settings3DSSetOverlayEnabled(false);
-        Mk64Settings3DSSave();
+        sSettingsDirty = true;
     }
+    // Everything changed while the menu was open goes to the SD card now.
+    FlushChangedSettings();
     sUi.modalOpen = false;
     sUi.modalOpenedFromPause = false;
     sUi.selectedRow = 0;
@@ -123,6 +134,15 @@ void ActivateSelectedRow(int direction) {
             }
             SaveChangedSetting("DISPLAY SETTINGS SAVED");
             break;
+        case OptionsTab::Stereo: {
+            const auto row = static_cast<Mk64StereoRow3DS>(sUi.selectedRow);
+            if (row == MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE)
+                Mk64Settings3DSSetStereoRow(row, Mk64Settings3DSGetStereoRow(row) == 0);
+            else
+                Mk64Settings3DSSetStereoRow(row, Mk64Settings3DSGetStereoRow(row) + step);
+            SaveChangedSetting(nullptr);
+            break;
+        }
         case OptionsTab::Gameplay:
             if (sUi.selectedRow == 0) {
                 Mk64Settings3DSSetTurboMultiplier(std::clamp(Mk64Settings3DSGetTurboMultiplier() + step, 2, 5));
@@ -159,10 +179,13 @@ bool PointInside(uint16_t x, uint16_t y, int left, int top, int width, int heigh
 }
 
 void HandleOptionsTouch(uint16_t x, uint16_t y) {
-    if (y >= kOptionsTabY && y < kOptionsTabY + 24) { SetTab(VisibleTab(std::min<int>(x / 80, 3))); return; }
+    if (y >= kOptionsTabY && y < kOptionsTabY + 24) {
+        SetTab(VisibleTab(std::min<int>(x * VisibleTabCount() / static_cast<int>(kBottomWidth), VisibleTabCount() - 1)));
+        return;
+    }
     for (uint8_t row=0; row<RowCount(sUi.tab); ++row) {
         const int top = OptionsRowY(sUi.tab,row)-3;
-        const int height = mk64_3ds::OptionRowHeight(sUi.tab == OptionsTab::Screen);
+        const int height = mk64_3ds::OptionRowHeight(CompactOptionRows(sUi.tab));
         if (!PointInside(x,y,12,top,296,height)) continue;
         sUi.selectedRow=row;
         if (sUi.tab == OptionsTab::Screen &&
@@ -172,6 +195,9 @@ void HandleOptionsTouch(uint16_t x, uint16_t y) {
             Mk64Settings3DSSetMasterVolumePercent(kVolumeSteps[(std::clamp<int>(x,146,246)-146+10)/20]); sVolumeSliderDragging=true;
         } else if (sUi.tab == OptionsTab::Gameplay && row == 0 && x >= 137 && x <= 255) {
             Mk64Settings3DSSetTurboMultiplier(2+(std::clamp<int>(x,146,246)-146)*3/100); sTurboSliderDragging=true;
+        } else if (sUi.tab == OptionsTab::Stereo) {
+            // The row's left half steps down, its right half up.
+            ActivateSelectedRow(x < 160 ? -1 : 1);
         } else ActivateSelectedRow(1);
         sUi.bottomDirty=true; return;
     }
@@ -241,4 +267,15 @@ void HandleModalInput(const Mk64DiagnosticsInput3DS& input) {
         ActivateSelectedRow(1);
     }
     if ((input.downMask & KEY_TOUCH) != 0) HandleOptionsTouch(input.touchX, input.touchY);
+    if (sUi.tab == OptionsTab::Stereo) {
+        const uint64_t now = osGetTime();
+        const uint32_t held = input.heldMask & (KEY_DLEFT | KEY_DRIGHT);
+        if ((input.downMask & (KEY_DLEFT | KEY_DRIGHT)) != 0) {
+            sStereoRepeatAt = now + kStereoRepeatDelayMilliseconds;
+        } else if (held != 0 && now >= sStereoRepeatAt &&
+                   sUi.selectedRow != MK64_STEREO_ROW_3DS_AUTO_CONVERGENCE) {
+            ActivateSelectedRow((held & KEY_DLEFT) != 0 ? -1 : 1);
+            sStereoRepeatAt = now + kStereoRepeatIntervalMilliseconds;
+        }
+    }
 }
